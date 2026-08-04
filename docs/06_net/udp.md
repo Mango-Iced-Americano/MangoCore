@@ -4,7 +4,7 @@ module: net/socket/udp
 category: net
 status: current
 owner: MangoCore Team
-last_updated: 2026-08-04
+last_updated: 2026-08-05
 code_paths:
   - "os/src/net/socket/inet/datagram/"
 entry_points:
@@ -29,7 +29,7 @@ related_docs:
 
 UDP 子系统基于 smoltcp 的 `udp::Socket` 实现，通过 `Socket` trait 对外暴露无连接数据报服务。设计以单次非阻塞尝试为基础，通过 `rx_queue` 解耦 smoltcp 接收与用户态消费，通过 `try_deliver_local` 实现本地回环快速路径。所有 I/O 操作遵循 `try_xxx` 约定，不做轮询或内部重试。
 
-bind 先在 N1 快照 `BindIntent`，再在所属 `NetNamespace::ports` 完成 reserve→socket.bind→commit/abort；N0 不跨 socket/DeviceStack。N2 内 UDP drain 只形成内核所有数据，释放 N2 才写 OS queue、通知 waiter 或 copyout。readiness miss 只 kick generation worker 后进入纯条件等待，不在锁或条件闭包中 poll。
+bind 和 auto-bind 都先在 N1 快照内核所有 `BindIntent`/候选端点，再在所属 `NetNamespace::ports` 完成 reserve→socket.bind→commit/abort；N0 不跨 socket/DeviceStack。UDP connect 和首个 unconnected `sendto`/`sendmsg` 在 syscall 层以 route 源 IP 和 port 0 调用该事务，故进入 smoltcp 或本地交付前已有实际本地端点。N2 内 UDP drain 只形成内核所有数据，释放 N2 才写 OS queue、通知 waiter 或 copyout。readiness miss 只 kick generation worker 后进入纯条件等待，不在锁或条件闭包中 poll。
 
 ## UdpSocket 结构体
 
@@ -84,7 +84,7 @@ struct UdpSocketInner {
 
 `UdpSocket::bind()` 处理端口绑定：
 
-1. 端口为 0 时调用 `PortManager::alloc_ephemeral_port()` 分配临时端口。该函数从 `local_port_range()` 获取范围（32768-60999，匹配 Linux 默认值），跳过 `TCP_PORTS` / `UDP_PORTS` 中已占用的端口。
+1. `PortRegistry` 在 `bind_port()` 事务中为 port 0 选择并插入带 owner 的临时端口 reservation；`UdpSocket::bind()` 只消费已经解析出的实际端口，不得自行挑选裸端口。
 2. `INADDR_ANY` 地址映射为 smoltcp 的 `addr: None` 语义。
 3. 通过 `NET_INTERFACE.udp_routed_socket()` 调用底层 `socket.bind()`。
 4. 调用 `bound.lock().bind()` 更新绑定记录，记录 ifindex。
@@ -93,7 +93,7 @@ struct UdpSocketInner {
 
 ## connect
 
-`UdpSocket::connect()` 设置 `inner.remote_endpoint`。未 bind 时自动分配临时端口和源 IP（通过 `lookup_source_ip` 选择最匹配的路由地址）。`INADDR_ANY` 映射为本地回环地址（127.0.0.1 或 ::1）。connect 后的 socket 可通过 `try_send()` 直接发送，无需每次指定目标地址。
+`sys_connect()` 先通过 `ensure_auto_bound(Connect)` 为未 bind socket 以 `lookup_source_ip` 选择源 IP 并提交 reservation，随后 `UdpSocket::connect()` 设置 `inner.remote_endpoint`。`INADDR_ANY` 映射为本地回环地址（127.0.0.1 或 ::1）。connect 后的 socket 可通过 `try_send()` 直接发送，无需每次指定目标地址。
 
 UDP 的 connect 是本地状态操作，不产生网络报文。
 
@@ -112,6 +112,8 @@ buffer > 65507 --> EMSGSIZE
 1. **MSG_MORE 路径**: 若 flags 包含 `MSG_MORE`，数据追加到 `msg_more_buf`，立即返回。非 `MSG_MORE` 时若 `msg_more_buf` 非空则合并后清空。
 2. **本地环路优化**: `try_deliver_local()` 检查目标地址是否为本地地址，是则走回环路径。
 3. **smoltcp 发送**: 通过 `udp_routed_socket()` 调用 `socket.send_slice()`。`can_send()` 为 `false` 或缓冲区满时返回 `EAGAIN`。
+
+对于未连接 socket 的首个 `sendto`/`sendmsg`，syscall 在解析 destination 后先调用 `ensure_auto_bound(Send, peer)`；因此 `try_sendmsg()` 和 `local_source_endpoint()` 不会因 `local_endpoint == None` 退化为无源地址发送。
 
 `try_sendmsg` 在 smoltcp 发送前执行 `route_check()` 验证目标地址可达，并根据 `bound_ifindex` 或 `route_output()` 结果调用 `NET_INTERFACE.rebind_routed_udp()` 确保 socket 绑定到正确接口。
 

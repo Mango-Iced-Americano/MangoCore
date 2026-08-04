@@ -1,4 +1,3 @@
-use super::PortManager;
 use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::AF_INET;
 use crate::net::AF_INET6;
@@ -72,10 +71,7 @@ impl From<SocketAddrv4> for IpListenEndpoint {
             if port != 0 {
                 IpListenEndpoint { addr: None, port }
             } else {
-                IpListenEndpoint {
-                    addr: None,
-                    port: PortManager::alloc_ephemeral_port(),
-                }
+                IpListenEndpoint { addr: None, port }
             }
         } else {
             IpListenEndpoint {
@@ -149,10 +145,7 @@ impl From<SocketAddrv6> for IpListenEndpoint {
             if port != 0 {
                 IpListenEndpoint { addr: None, port }
             } else {
-                IpListenEndpoint {
-                    addr: None,
-                    port: PortManager::alloc_ephemeral_port(),
-                }
+                IpListenEndpoint { addr: None, port }
             }
         } else {
             IpListenEndpoint {

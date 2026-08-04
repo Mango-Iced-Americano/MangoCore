@@ -12,18 +12,33 @@ use crate::{
 use alloc::sync::Arc;
 use smoltcp::wire::{IpAddress, Ipv4Address};
 
-/// 端口事务的外部兼容入口。
+/// 自动绑定的触发语义；端点选择由具体 INET socket 在锁外完成。
+#[derive(Clone, Copy)]
+pub enum AutoBindPurpose {
+    Connect,
+    Listen,
+    Send,
+}
+
+/// 端口事务的外部入口。
 pub struct PortManager;
 
 impl PortManager {
-    /// 旧的内部 auto-bind 调用点暂时使用的候选器。
-    /// 显式 bind 必须走 `bind_port()`，其 reservation 才是并发所有权的唯一来源。
-    pub fn alloc_ephemeral_port() -> u16 {
-        crate::net::net_core::current_netns()
-            .ports
-            .lock()
-            .legacy_ephemeral()
-            .unwrap_or(0)
+    /// 为尚未绑定的 INET socket 选择端点，并复用显式 bind 的完整端口事务。
+    ///
+    /// 端点推导不持有 PortRegistry；`bind_port()` 再按 N0 reserve -> N1/N2 bind
+    /// -> N0 commit/abort 执行。因此两个 CPU 同时看到未绑定时，失败者只会撤销
+    /// 自己的 Reserved owner，不能把临时端口暴露为无 owner 的候选值。
+    pub fn ensure_auto_bound(
+        task: &TaskControlBlock,
+        socket: &Arc<dyn Socket>,
+        peer: Option<&Endpoint>,
+        purpose: AutoBindPurpose,
+    ) -> Result<(), SyscallErr> {
+        if let Some(endpoint) = socket.auto_bind_endpoint(peer, purpose)? {
+            Self::bind_port(task, socket, &endpoint)?;
+        }
+        Ok(())
     }
 
     /// 在调用者的 netns 内完成 reserve → bind → commit/abort。

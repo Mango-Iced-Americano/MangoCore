@@ -146,11 +146,6 @@ impl PortRegistry {
         Ok(PortReservation { namespace: Arc::downgrade(namespace), key, token, owner })
     }
 
-    pub fn legacy_ephemeral(&mut self) -> Result<u16, SyscallErr> {
-        self.prune_dead_owners();
-        self.select_ephemeral(&BindIntent::legacy_tcp(0, None))
-    }
-
     pub fn commit(&mut self, reservation: &PortReservation, socket: &Arc<dyn Socket>) -> Result<(), SyscallErr> {
         let owners = self.buckets.get_mut(&reservation.key).ok_or(SyscallErr::EADDRNOTAVAIL)?;
         let owner = owners.iter_mut().find(|owner| owner.token == reservation.token

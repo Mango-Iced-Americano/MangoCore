@@ -3,7 +3,7 @@ title: "网络系统调用层"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 tags: [net, syscall, socket, posix]
 ---
 
@@ -189,7 +189,7 @@ sys_sendto 入口
   ├─ get_socket!(sockfd) 解析 fd
   ├─ 确定 is_nonblock (fd 标志 || MSG_DONTWAIT)
   ├─ read_sockaddr() → 内核地址快照（Stream 只预 fault）
-  ├─ PSOCK::Datagram → 自动绑定 + 解析 dest_endpoint + try_sendmsg
+   ├─ PSOCK::Datagram → 解析 dest_endpoint → PortRegistry auto-bind + try_sendmsg
   ├─ PSOCK::Stream → try_send (无需目标地址)
   ├─ PSOCK::Raw → try_sendmsg (同 Datagram)
   └─ 阻塞路径: copy_from_user_array() → kernel_buf → WaitQueue
@@ -202,7 +202,7 @@ sys_sendto 入口
   再解析 `Endpoint`；不再存在伪造跨页连续 slice 的宏。
 - **数据寿命**：阻塞路径使用内核中转 buffer，不跨 WaitQueue 保存用户页视图；
   非阻塞 fast path 的 `UserBuffer` 只保存 VA 区间，实际 send 逐页在 VM 锁内重验。
-- **自动绑定**：对于未绑定的 DGRAM socket，在发送前自动绑定 `0.0.0.0:0`。
+- **自动绑定**：对于未绑定的 INET DGRAM socket，在 destination 解析后由 `PortManager::ensure_auto_bound(Send, peer)` 走 `reserve → socket.bind → commit/abort`；它按 route 选择源 IP，不能直接调用 `socket.bind(0.0.0.0:0)`。
 - **长度上限**：单次 sendto 最大 64MB，防止整数溢出和内核内存耗尽。
 
 ### recvfrom 调用（syscall 207）
@@ -559,8 +559,8 @@ VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；B59 又删除�
 6. socket = get_socket!(sockfd)             // 解析 fd → Arc<dyn Socket>
 7. is_nonblock = fd_nonblock || msg_dontwait
 8. if socket_type == Datagram:
-      if port == 0: auto_bind(0.0.0.0:0)     // 自动绑定
-      dest = parse_dest_addr(dest_addr)      // 解析目标地址
+       dest = parse_dest_addr(dest_addr)      // 解析目标地址
+       if local unbound: ensure_auto_bound(Send, dest) // transactional auto-bind
       if dest is None && remote_endpoint is None:
         return -EDESTADDRREQ
 9. if is_nonblock:

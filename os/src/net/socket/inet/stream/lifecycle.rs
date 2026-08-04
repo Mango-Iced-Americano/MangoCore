@@ -3,7 +3,6 @@
 use crate::net::{
     config::{lookup_source_ip, route_check, NET_INTERFACE},
     routing::InetProtocol,
-    socket::inet::common::PortManager,
     TCP_SOCKETS_TO_REMOVE,
 };
 use crate::trace_event;
@@ -24,22 +23,17 @@ use super::inner::{
 };
 
 impl Inner {
-    /// bind 操作：将 Unbound 变为 Bound
+    /// bind 操作：将 Unbound 变为 Bound。
+    /// 调用者必须已通过 PortRegistry 将 port=0 替换为已预留的实际端口。
     pub fn bind(self, endpoint: IpListenEndpoint) -> Result<Self, (Self, SyscallErr)> {
         match self {
             Inner::Init(Init::Unbound(socket, ver)) => {
-                let port = if endpoint.port == 0 {
-                    PortManager::alloc_ephemeral_port()
-                } else {
-                    endpoint.port
-                };
-
                 // 构造本地 endpoint
                 let local_addr = endpoint.addr.unwrap_or_else(|| match ver {
                     IpVersion::Ipv4 => IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
                     IpVersion::Ipv6 => IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED),
                 });
-                let local = IpEndpoint::new(local_addr, port);
+                let local = IpEndpoint::new(local_addr, endpoint.port);
 
                 Ok(Inner::Init(Init::Bound {
                     socket,
@@ -55,25 +49,14 @@ impl Inner {
         }
     }
 
-    /// connect 操作：Unbound 先 bind_ephemeral → 发起 SYN
+    /// connect 操作：syscall 层已完成 auto-bind 后发起 SYN。
     /// If `bound_ifindex` is Some, use it instead of route-based ifindex lookup.
     pub fn connect(
         self,
         remote_endpoint: IpEndpoint,
         bound_ifindex: Option<u32>,
     ) -> Result<Connecting, (Self, SyscallErr)> {
-        let (socket, local, ver) = match self {
-            Inner::Init(Init::Unbound(_, ver)) => {
-                let port = PortManager::alloc_ephemeral_port();
-                let local_addr = lookup_source_ip(remote_endpoint.addr);
-                let local = IpEndpoint::new(local_addr, port);
-                let socket = {
-                    let rx_buf = SocketBuffer::new(vec![0u8; DEFAULT_RX_BUF_SIZE]);
-                    let tx_buf = SocketBuffer::new(vec![0u8; DEFAULT_TX_BUF_SIZE]);
-                    tcp::Socket::new(rx_buf, tx_buf)
-                };
-                (socket, local, ver)
-            }
+        let (socket, local) = match self {
             Inner::Init(Init::Bound {
                 socket,
                 local,
@@ -84,11 +67,7 @@ impl Inner {
                 } else {
                     local
                 };
-                let ver = match local.addr {
-                    IpAddress::Ipv4(_) => IpVersion::Ipv4,
-                    _ => IpVersion::Ipv6,
-                };
-                (*socket, local, ver)
+                (*socket, local)
             }
             other => return Err((other, SyscallErr::EISCONN)),
         };
@@ -177,30 +156,15 @@ impl Inner {
         }
     }
 
-    /// listen 操作：Unbound 先 auto-bind INADDR_ANY → 切换 Listen
+    /// listen 操作：syscall 层已完成 INADDR_ANY auto-bind 后切换 Listen。
     pub fn listen(self, backlog: usize) -> Result<Listening, (Self, SyscallErr)> {
-        let (socket, local_endpoint, ver) = match self {
-            Inner::Init(Init::Unbound(socket, ver)) => {
-                let port = PortManager::alloc_ephemeral_port();
-                let unspec = IpEndpoint::new(
-                    match ver {
-                        IpVersion::Ipv4 => IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
-                        IpVersion::Ipv6 => IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED),
-                    },
-                    port,
-                );
-                (*socket, unspec, ver)
-            }
+        let (socket, local_endpoint) = match self {
             Inner::Init(Init::Bound {
                 socket,
                 local,
                 pending_error: None,
             }) => {
-                let ver = match local.addr {
-                    IpAddress::Ipv4(_) => IpVersion::Ipv4,
-                    _ => IpVersion::Ipv6,
-                };
-                (*socket, local, ver)
+                (*socket, local)
             }
             other => return Err((other, SyscallErr::EINVAL)),
         };

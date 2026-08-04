@@ -408,6 +408,17 @@ pub trait Socket: Send + Sync {
         _reservation: crate::net::socket::inet::common::port::PortReservation,
     ) {
     }
+    /// 在不持有 PortRegistry 时快照 auto-bind 所需的端点。
+    ///
+    /// 返回 `None` 表示 socket 已绑定或不参与 INET 自动绑定；返回的端点必须是
+    /// 内核所有值，调用者随后通过 `PortManager::bind_port()` 完成事务提交。
+    fn auto_bind_endpoint(
+        &self,
+        _peer: Option<&Endpoint>,
+        _purpose: crate::net::socket::inet::common::port::AutoBindPurpose,
+    ) -> Result<Option<Endpoint>, SyscallErr> {
+        Ok(None)
+    }
     fn listen(&self) -> SyscallRet;
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
     /// 尝试建立连接一次（不阻塞），检查一次握手状态。

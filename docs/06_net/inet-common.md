@@ -4,7 +4,7 @@ module: "net/socket/inet/common"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: "2026-08-04"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/net/socket/inet/common/address.rs"
   - "os/src/net/socket/inet/common/port.rs"
@@ -50,7 +50,9 @@ related_docs:
 
 ### 临时端口分配
 
-显式 bind 的端口 0 和指定端口共享同一个 `NetNamespace.ports` 线性化点：锁内 prune dead owner、选择 ephemeral、按完整冲突矩阵插入 `Reserved`；解锁后调用 socket bind；最后重锁将同一 key+token+Weak owner 改为 `Bound`，失败则删除 reservation。registry 锁绝不跨 socket/DeviceStack 操作。
+显式 `bind(port=0)` 和所有 INET auto-bind 共享同一个 `NetNamespace.ports` 线性化点：具体 socket 先在未持 N0 时推导内核所有的候选端点，`PortManager::ensure_auto_bound()` 再复用 `bind_port()`。锁内 prune dead owner、选择 ephemeral、按完整冲突矩阵插入 `Reserved`；解锁后调用 socket bind；最后重锁将同一 key+token+Weak owner 改为 `Bound`，失败则删除 reservation。registry 锁绝不跨 socket/DeviceStack 操作。
+
+`AutoBindPurpose::Connect`/`Send` 由 TCP/UDP 按 route 选择源 IP；`Listen` 使用对应地址族的未指定地址。TCP connect/listen、UDP connect 和首个未连接 `sendto`/`sendmsg` 都在 syscall 层持有 `Arc<dyn Socket>` 时调用该入口。并发 auto-bind 可能各自预留不同端口，但只有首个 `socket.bind()` 成功；另一个调用 abort 自己的 reservation，既不会覆盖已绑定 socket，也不会泄漏 owner。
 
 ### 端口冲突检测
 
@@ -63,6 +65,8 @@ related_docs:
 1. 非 TCP/UDP IP endpoint（如 Raw/Packet）直接调用 `socket.bind()`。
 2. TCP/UDP 先在 socket 生命周期锁内快照 `BindIntent`，随后释放 socket 锁。
 3. 在调用 PCB 的 netns registry 中执行 `reserve → socket.bind → commit/abort`；commit 后才将 reservation 安装到 socket，Drop 精确释放。
+
+`Socket::auto_bind_endpoint(peer, purpose)` 只在未持 registry 锁时返回可选端点；非 INET 或已绑定 socket 返回 `None`。它不执行端口分配或 smoltcp 操作。
 
 ## BoundInner
 
@@ -95,7 +99,7 @@ pub struct BoundInner {
 `listen_endpoint(buf)` 从用户态 `sockaddr` 字节流解析出 `IpListenEndpoint`：
 
 - 未指定地址（`0.0.0.0`）→ `addr: None`（表示监听所有接口）
-- 端口为 0 → 自动分配临时端口
+- 端口为 0 → 保留为未绑定端点；只有持有 socket `Arc` 的 syscall auto-bind 入口可以实际分配端口
 
 `to_endpoint(listen_endpoint)` 将 `IpListenEndpoint` 转换为完整 `IpEndpoint`：将 `addr: None` 替换为实际接口 IP 或回环地址。
 

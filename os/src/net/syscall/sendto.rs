@@ -2,12 +2,12 @@ use log::info;
 
 use crate::mm::{copy_from_user_array, fault_in_user_range, UserAccess, UserBufferReader};
 use crate::net::config::NET_INTERFACE;
+use crate::net::socket::inet::common::port::{AutoBindPurpose, PortManager};
 use crate::net::{Endpoint, PSOCK};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::WaitQueue;
 use crate::utils::error::SyscallErr;
-use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use super::common::{read_sockaddr, MsgFlags};
 
@@ -94,18 +94,6 @@ pub fn sys_sendto(
 
     match socket.socket_type() {
         PSOCK::Datagram => {
-            if socket
-                .local_endpoint()
-                .map(|ep| ep.port() == 0)
-                .unwrap_or(true)
-            {
-                // 构造 AF_INET:port=0:addr=0 的 sockaddr_in 用于自动绑定
-                let auto_bind = Endpoint::Ip(IpEndpoint::new(
-                    IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
-                    0,
-                ));
-                let _ = socket.bind(&auto_bind);
-            }
             let dest_endpoint = if dest_addr != 0 {
                 let dest_buf = match read_sockaddr(dest_addr, addrlen) {
                     Ok(buf) => buf,
@@ -122,6 +110,14 @@ pub fn sys_sendto(
             if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
                 // 无目的地址且未 connect → EDESTADDRREQ
                 return -(SyscallErr::EDESTADDRREQ as isize);
+            }
+            if let Err(error) = PortManager::ensure_auto_bound(
+                &task,
+                &socket,
+                dest_endpoint.as_ref(),
+                AutoBindPurpose::Send,
+            ) {
+                return -(error as isize);
             }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {

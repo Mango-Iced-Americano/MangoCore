@@ -27,7 +27,7 @@ use smoltcp::{
 
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::port::{
-    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+    AddressFamily, AutoBindPurpose, BindIntent, PortReservation, TransportProtocol,
 };
 use crate::net::socket::inet::common::BoundInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
@@ -66,9 +66,8 @@ impl Socket for UdpSocket {
     ///
     /// # Semantics
     ///
-    /// 规范化 IPv4-mapped IPv6 地址，处理 `port=0` 的临时端口分配（
-    /// `PortManager::alloc_ephemeral_port()`）。通过 `NET_INTERFACE.udp_routed_socket()`
-    /// 在 smoltcp socket set 中调用 `socket.bind()`。
+    /// 规范化 IPv4-mapped IPv6 地址。`port=0` 已由 `PortRegistry` 在进入本方法前
+    /// 选择并预留；这里通过 `NET_INTERFACE.udp_routed_socket()` 调用 socket.bind()。
     ///
     /// # Locking
     ///
@@ -156,6 +155,45 @@ impl Socket for UdpSocket {
         *self.port_reservation.lock() = Some(reservation);
     }
 
+    fn auto_bind_endpoint(
+        &self,
+        peer: Option<&Endpoint>,
+        purpose: AutoBindPurpose,
+    ) -> Result<Option<Endpoint>, SyscallErr> {
+        let remote = {
+            let inner = self.inner.lock();
+            if inner.local_endpoint.is_some() {
+                return Ok(None);
+            }
+            inner.remote_endpoint
+        };
+        let peer = match purpose {
+            AutoBindPurpose::Connect | AutoBindPurpose::Send => peer
+                .and_then(|endpoint| match endpoint {
+                    Endpoint::Ip(endpoint) => Some(*endpoint),
+                    _ => None,
+                })
+                .or(remote),
+            AutoBindPurpose::Listen => return Ok(None),
+        };
+        let Some(peer) = peer else {
+            return Ok(None);
+        };
+        let peer_addr = self.normalize_ipv4_mapped(peer.addr);
+        let route_addr = if peer_addr.is_unspecified() {
+            match peer_addr {
+                IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+            }
+        } else {
+            peer_addr
+        };
+        Ok(Some(Endpoint::Ip(IpEndpoint::new(
+            lookup_source_ip(route_addr),
+            0,
+        ))))
+    }
+
     fn listen(&self) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
@@ -164,14 +202,12 @@ impl Socket for UdpSocket {
     ///
     /// # Semantics
     ///
-    /// 存储 `remote_endpoint` 到 `self.inner`。若 socket 尚未绑定（`local.port==0`），
-    /// 通过 `NET_INTERFACE.udp_routed_socket()` 调用 smoltcp `socket.bind()` 自动
-    /// 分配临时端口和源 IP。`unspecified` 远程地址映射为 127.0.0.1 / ::1。
+    /// syscall 层先经 `PortManager::ensure_auto_bound()` 绑定本地端点，再存储
+    /// `remote_endpoint`。`unspecified` 远程地址映射为 127.0.0.1 / ::1。
     ///
     /// # Locking
     ///
-    /// 获取 `self.inner` 锁。`NET_INTERFACE.udp_routed_socket()` 闭包内调用
-    /// `socket.bind()` 不持锁。
+    /// 只短暂获取 `self.inner` 锁；PortRegistry 和 DeviceStack 都不在此路径嵌套。
     ///
     /// # Errors
     ///
@@ -196,51 +232,16 @@ impl Socket for UdpSocket {
             ep
         };
         log::info!("[Udp::connect] connect to {:?}", remote_endpoint);
+        let local_ep = self
+            .inner
+            .lock()
+            .local_endpoint
+            .ok_or(SyscallErr::EINVAL)?;
         {
             let mut inner = self.inner.lock();
             inner.remote_endpoint = Some(remote_endpoint);
         }
-        NET_INTERFACE.request_poll();
-        let local_ep = NET_INTERFACE
-            .udp_routed_socket(self.socket_handler, |socket| {
-                let local = socket.endpoint();
-                info!("[Udp::connect] local: {:?}", local);
-                if local.port == 0 {
-                    info!("[Udp::connect] don't have local");
-                    let src_ip = lookup_source_ip(remote_endpoint.addr);
-                    let port =
-                        crate::net::socket::inet::common::PortManager::alloc_ephemeral_port();
-
-                    let endpoint = IpListenEndpoint {
-                        addr: Some(src_ip),
-                        port,
-                    };
-
-                    let ret = socket.bind(endpoint);
-                    if ret.is_err() {
-                        match ret.err().unwrap() {
-                            socket::udp::BindError::Unaddressable => {
-                                info!("[Udp::bind] unaddr");
-                                return Err(SyscallErr::EINVAL);
-                            }
-                            socket::udp::BindError::InvalidState => {
-                                info!("[Udp::bind] invaild state");
-                                return Err(SyscallErr::EINVAL);
-                            }
-                        }
-                    }
-                    log::info!("[Udp::bind] bind to {:?}", endpoint);
-                    Ok(endpoint)
-                } else {
-                    Ok(local)
-                }
-            })
-            .ok_or(SyscallErr::EAGAIN)??;
-        self.inner.lock().local_endpoint = Some(local_ep);
         let ifindex = crate::net::net_core::ifindex_for_local_addr(local_ep.addr);
-        self.bound
-            .lock()
-            .bind(self.socket_handler, ifindex, local_ep.addr, local_ep.port);
         log::debug!(
             "udp_connect: remote={:?} ifindex={}",
             remote_endpoint,

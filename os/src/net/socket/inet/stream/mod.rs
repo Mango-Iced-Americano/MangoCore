@@ -41,7 +41,7 @@ use self::inner::{
 };
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::port::{
-    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+    AddressFamily, AutoBindPurpose, BindIntent, PortReservation, TransportProtocol,
 };
 use crate::net::socket::inet::common::BoundInner;
 use crate::net::socket::inet::stream::inner::ConnectResult;
@@ -491,6 +491,39 @@ impl Socket for TcpSocket {
 
     fn install_port_reservation(&self, reservation: PortReservation) {
         *self.port_reservation.lock() = Some(reservation);
+    }
+
+    fn auto_bind_endpoint(
+        &self,
+        peer: Option<&crate::net::Endpoint>,
+        purpose: AutoBindPurpose,
+    ) -> Result<Option<crate::net::Endpoint>, SyscallErr> {
+        let unbound = matches!(&*self.inner.lock(), Inner::Init(Init::Unbound(_, _)));
+        if !unbound {
+            return Ok(None);
+        }
+        let address = match purpose {
+            AutoBindPurpose::Connect | AutoBindPurpose::Send => match peer {
+                Some(crate::net::Endpoint::Ip(peer)) => {
+                    let peer_addr = self.normalize_ipv4_mapped(peer.addr);
+                    let route_addr = if peer_addr.is_unspecified() {
+                        match peer_addr {
+                            IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                            IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+                        }
+                    } else {
+                        peer_addr
+                    };
+                    crate::net::config::lookup_source_ip(route_addr)
+                }
+                _ => return Ok(None),
+            },
+            AutoBindPurpose::Listen => match self.ip_version {
+                IpVersion::Ipv4 => IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
+                IpVersion::Ipv6 => IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED),
+            },
+        };
+        Ok(Some(crate::net::Endpoint::Ip(IpEndpoint::new(address, 0))))
     }
 
     /// 将 TCP socket 标记为监听状态。
