@@ -520,6 +520,9 @@ pub struct PageCache {
     unevictable: AtomicBool,
     /// Clock sweep 光标（second-chance eviction）
     clock_hand: AtomicUsize,
+    /// `MS_ASYNC` 发布的合作式写回请求。发布者不执行 I/O；reclaim worker 在锁外
+    /// 消费请求并复用正常 writeback 状态机。
+    async_writeback_requested: AtomicBool,
     /// ktest-only 确定性挂点；生产路径恒为 `None`，无锁、无调度、无同步开销。
     /// 仅供 fs_smp ktest 暂停 write_kernel 写入者以复现 truncate 竞态。
     test_hook: Option<PageCacheTestHook>,
@@ -543,6 +546,7 @@ impl PageCache {
             entries: Mutex::new(Vec::new()),
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
+            async_writeback_requested: AtomicBool::new(false),
             test_hook: hook,
         });
         register_page_cache(&pc);
@@ -891,6 +895,64 @@ impl PageCache {
         let state = entry.state();
         match state {
             PageState::UpToDate | PageState::Dirty => Ok(entry.page.clone()),
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// 返回文件映射读页，并在 `PageEntry.data` 写锁内按权威 EOF 清零末页尾部。
+    ///
+    /// 后端可能按磁盘块读取并带回 EOF 之后的旧字节；因此不能把 tail-zero 留给
+    /// filemap 对 raw frame 的锁外写入。这里与 writeback/普通 PageCache 写入共用
+    /// 同一把 data 锁，且只在 entries 锁已经释放后取得它。
+    pub fn frame_for_filemap_read(
+        &self,
+        page_index: usize,
+        authoritative_eof: usize,
+    ) -> Result<Arc<FrameTracker>, SyscallErr> {
+        let _op = self.op_gate.read();
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        self.ensure_fully_valid(page_index)?;
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    entry.with_bytes_mut(|bytes| bytes[tail_start..].fill(0));
+                }
+                Ok(entry.page.clone())
+            }
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// 在 source `PageEntry.data` 读锁内将文件页复制到私有目标帧。
+    ///
+    /// `dst` 只由尚未发布到用户页表的新匿名页持有；EOF 后的字节也在同一快照中
+    /// 清零，避免 private COW copy 逃出 page-cache 数据锁。
+    pub fn copy_page_for_private(
+        &self,
+        page_index: usize,
+        dst: &mut [u8],
+        authoritative_eof: usize,
+    ) -> Result<(), SyscallErr> {
+        if dst.len() != PAGE_SIZE {
+            return Err(SyscallErr::EINVAL);
+        }
+        let _op = self.op_gate.read();
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        self.ensure_fully_valid(page_index)?;
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.with_bytes(|src| dst.copy_from_slice(src));
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    dst[tail_start..].fill(0);
+                }
+                Ok(())
+            }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
         }
@@ -1841,6 +1903,11 @@ impl PageCache {
         Ok(())
     }
 
+    /// 请求下一次合作式 writeback worker 回写此缓存的脏页。
+    pub fn queue_writeback(&self) {
+        self.async_writeback_requested.store(true, Ordering::Release);
+    }
+
     /// 批量写回脏页，最多写回 `budget` 页。返回实际写回的页数。
     ///
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
@@ -2018,7 +2085,10 @@ impl PageCache {
 /// 无新内核线程 — 利用现有 reclaim hook 调度。
 pub fn maybe_background_writeback() {
     let dirty = GLOBAL_DIRTY_PAGES.load(Ordering::Relaxed);
-    if dirty < DIRTY_BACKGROUND {
+    if dirty < DIRTY_BACKGROUND && !PAGE_CACHE_REGISTRY.lock().iter().any(|weak| {
+        weak.upgrade()
+            .is_some_and(|pc| pc.async_writeback_requested.load(Ordering::Acquire))
+    }) {
         return;
     }
     if WRITEBACK_ACTIVE.swap(true, Ordering::AcqRel) {
@@ -2039,10 +2109,16 @@ pub fn maybe_background_writeback() {
 
     let mut remaining = budget;
     for pc in &caches {
-        if remaining == 0 {
+        let requested = pc.async_writeback_requested.swap(false, Ordering::AcqRel);
+        if remaining == 0 && !requested {
             break;
         }
-        let written = pc.writeback_some_pages(remaining.min(WB_BATCH_PAGES));
+        let page_budget = if requested {
+            WB_BATCH_PAGES
+        } else {
+            remaining.min(WB_BATCH_PAGES)
+        };
+        let written = pc.writeback_some_pages(page_budget);
         remaining = remaining.saturating_sub(written);
     }
 

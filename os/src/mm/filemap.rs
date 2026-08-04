@@ -32,15 +32,6 @@ fn check_within_file(inode: &dyn IndexNode, file_offset: usize) -> Result<usize,
     Ok(file_size)
 }
 
-fn zero_tail(file_size: usize, file_offset: usize, buf: &mut [u8]) {
-    let page_end = file_offset + PAGE_SIZE;
-    if page_end > file_size {
-        let valid = file_size.saturating_sub(file_offset);
-        let tail_start = valid.min(PAGE_SIZE);
-        buf[tail_start..].fill(0);
-    }
-}
-
 fn map_pc_error(e: SyscallErr) -> MemoryError {
     match e {
         SyscallErr::ENOMEM => MemoryError::OutOfMemory,
@@ -96,21 +87,17 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     let pc = inode
         .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
-    let cache_frame = pc
-        .frame_for_read(file_offset >> PAGE_SIZE_BITS)
-        .map_err(map_pc_error)?;
+    let page_index = file_offset >> PAGE_SIZE_BITS;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     let allocated_ppn = area.map_one_zeroed_unchecked(mapper, ctx.vpn)?;
-    let src = cache_frame.ppn.get_bytes_array();
     let dst = allocated_ppn.get_bytes_array();
     let _copy_start = crate::task::perf::perf_time_now();
-    dst.copy_from_slice(src);
+    pc.copy_page_for_private(page_index, dst, file_size)
+        .map_err(map_pc_error)?;
     let copy_ticks = crate::task::perf::perf_time_now().wrapping_sub(_copy_start);
     crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS
         .fetch_add(copy_ticks, core::sync::atomic::Ordering::Relaxed);
-    zero_tail(file_size, file_offset, dst);
-
     crate::task::perf::FILEMAP_FAULT_TICKS.fetch_add(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
@@ -138,12 +125,11 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         .ensure_page_cache()
         .ok_or(MemoryError::BackingStoreFailure)?;
     let page_index = file_offset >> PAGE_SIZE_BITS;
-    let cache_frame = pc.frame_for_read(page_index).map_err(map_pc_error)?;
+    let cache_frame = pc
+        .frame_for_filemap_read(page_index, file_size)
+        .map_err(map_pc_error)?;
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-    // EOF 之后的页尾对用户必须读出 0；这里修改的是共享 page cache 帧。
-    zero_tail(file_size, file_offset, cache_ppn.get_bytes_array());
 
     // 可写文件映射首次只给只读 PTE：私有映射写入时触发 CoW，共享映射写入时
     // 触发 page cache dirty 标记后再恢复 W。

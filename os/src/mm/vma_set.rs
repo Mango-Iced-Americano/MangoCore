@@ -763,11 +763,10 @@ impl VmaSet {
         prot: MapPermission,
     ) -> Result<(), isize> {
         let area = self.vmas.get_mut(&area_start).ok_or(EINVAL)?;
-        let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
-            prot
-        } else {
-            prot - MapPermission::W
-        };
+        // 文件 MAP_SHARED 的 W 位只能由 store fault 在 PageCache 脏页所有权已经
+        // 建立后恢复。mprotect 只更新 VMA 的期望权限，不能绕过 frame_for_write()
+        // 直接让 resident PTE 可写；否则写回完成后的用户 store 不会再次标脏。
+        let actual_prot = prot - MapPermission::W;
         let mut failed_mapped_page = false;
         area.inner.for_each_in_memory_vpn(|vpn| {
             if mapper.set_user_flags(vpn, actual_prot).is_err() {
