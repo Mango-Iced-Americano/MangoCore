@@ -16,7 +16,7 @@ pub use page_cache::{
     entries_global_stats, evict_all_clean_pages, flush_all_page_caches, registry_stats, PageCache,
     PageCacheBackend, PageState,
 };
-pub(crate) use page_cache::PageCacheTestHook;
+pub(crate) use page_cache::{PageCacheFault, PageCacheTestHook};
 pub mod poll;
 pub mod procfs;
 pub mod ramfs;

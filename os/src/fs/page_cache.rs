@@ -15,15 +15,16 @@
 //! （`map_pages` / `fault` 回调）、不含 `O_DIRECT` 绕过 PageCache 的路径。
 
 use crate::utils::error::SyscallErr;
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use super::vfs::IndexNode;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::mm::{frame_alloc, FrameTracker};
+use crate::mm::{FileVmaSnapshot, RetryWait, Vma};
 use crate::task::perf;
 
 // ── Global dirty page accounting ──────────────────────────────────────
@@ -176,6 +177,12 @@ pub enum PageState {
     Error = 4,
 }
 
+/// file fault 对 PageCache 非阻塞 admission 的结果。
+pub(crate) enum PageCacheFault {
+    Retry(Arc<dyn RetryWait>),
+    Error(SyscallErr),
+}
+
 // ── RaState (read-ahead state) ───────────────────────────────────────────
 
 /// 顺序读预取状态，对标 Linux `file_ra_state`
@@ -268,6 +275,12 @@ struct PageEntry {
     valid_mask: AtomicU8,
     /// 通用标志位（目前仅 PG_REFERENCED），供 clock eviction 使用
     flags: AtomicU8,
+    /// 已安装到用户页表的 file-backed PTE 数量。
+    ///
+    /// 该计数只作为 rmap/unmap 的快速判定；真正的 VMA→VA 定位由 PageCache
+    /// 的 i_mmap 注册表完成。PTE 安装和 zap 都在所属 VM 锁内更新它，因而不能
+    /// 用它替代 PTE 或 VMA 的权威状态。
+    map_count: AtomicUsize,
 }
 
 impl PageEntry {
@@ -278,6 +291,7 @@ impl PageEntry {
             state: AtomicU8::new(state as u8),
             valid_mask: AtomicU8::new(VALID_ALL),
             flags: AtomicU8::new(0),
+            map_count: AtomicUsize::new(0),
         }
     }
 
@@ -290,6 +304,7 @@ impl PageEntry {
             state: AtomicU8::new(PageState::UpToDate as u8),
             valid_mask: AtomicU8::new(valid_mask),
             flags: AtomicU8::new(0),
+            map_count: AtomicUsize::new(0),
         }
     }
 
@@ -508,6 +523,14 @@ pub struct PageCache {
     /// 普通读写/回写持读锁；截断、失效、回收和 I/O 后发布持写锁。
     /// 锁内不得进入用户态 copy、等待或调度。
     op_gate: RwLock<()>,
+    /// 所有 file-backed MAP_SHARED VMA 的弱索引。注册/摘除只发生在
+    /// mmap/fork/munmap/exec，不在 fault 热路径建立反向映射。
+    ///
+    /// `BTreeMap` 是 no_std 当前可用的有序映射；键仍是 VMA 地址身份，语义等同
+    /// blueprint 的 HashMap，读侧通过 `i_mmap_seq` 重新验证并不依赖遍历顺序。
+    i_mmap: Mutex<BTreeMap<usize, Weak<Vma>>>,
+    /// VMA 注册表代际；rmap walker 在无锁 VM 遍历后必须重验。
+    i_mmap_seq: AtomicU64,
     /// 内部状态
     inner: Mutex<InnerPageCache>,
     /// 缓存后端
@@ -528,6 +551,27 @@ pub struct PageCache {
     test_hook: Option<PageCacheTestHook>,
 }
 
+struct PageCacheFaultWait {
+    cache: Arc<PageCache>,
+    page_index: usize,
+}
+
+impl RetryWait for PageCacheFaultWait {
+    fn wait(&self) {
+        // 此处由 trap/uaccess 外层保证已经释放 VM 锁。op_gate/read 和加载 I/O
+        // 可以自旋等待，但绝不能从仍持 VM 锁的 fault handler 直接进入。
+        let _op = self.cache.op_gate.read();
+        if let Ok(entry) = self.cache.get_or_create_entry(self.page_index, true, None) {
+            let _ = self.cache.ensure_fully_valid(self.page_index);
+            if entry.state() == PageState::Writeback {
+                while entry.state() == PageState::Writeback {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+}
+
 impl PageCache {
     /// 创建一个不含 backend 和 inode 关联的空 PageCache，自动注册到全局列表。
     pub fn new() -> Arc<Self> {
@@ -540,6 +584,8 @@ impl PageCache {
     pub(crate) fn new_with_test_hook(hook: Option<PageCacheTestHook>) -> Arc<Self> {
         let pc = Arc::new(PageCache {
             op_gate: RwLock::new(()),
+            i_mmap: Mutex::new(BTreeMap::new()),
+            i_mmap_seq: AtomicU64::new(0),
             inner: Mutex::new(InnerPageCache::new()),
             backend: Mutex::new(None),
             inode: Mutex::new(None),
@@ -566,6 +612,55 @@ impl PageCache {
     /// 设置不可回收标志（用于 tmpfs/shmem，数据无持久化后端）
     pub fn set_unevictable(&self, val: bool) {
         self.unevictable.store(val, Ordering::Release);
+    }
+
+    /// 在 VMA 已绑定所属 AddressSpace 后建立 file rmap 条目。
+    pub(crate) fn register_file_vma(&self, vma: &Arc<Vma>) {
+        let id = Arc::as_ptr(vma) as usize;
+        self.i_mmap.lock().insert(id, Arc::downgrade(vma));
+        // Release 发布新索引；walker 的 Acquire 重验保证不会把摘除后的 VMA
+        // 当成权威映射使用。
+        self.i_mmap_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 在 VMA 从 VmaSet 移除前摘除其 rmap 条目。
+    pub(crate) fn unregister_file_vma(&self, vma_id: usize) {
+        self.i_mmap.lock().remove(&vma_id);
+        self.i_mmap_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 对映射指定文件页的所有现存共享 VMA 执行写保护/清 dirty 或 truncate zap。
+    ///
+    /// 先在 i_mmap 锁内取弱引用快照，再转换为纯标量 VMA 快照并释放所有 VMA
+    /// Arc；随后才逐个获取 VM 锁。每个 VM 修改经其 `MmuGather` 在解锁后完成 TLB
+    /// ack，最后复查注册表序号，保证 mmap/munmap 并发不会遗漏新旧 VMA。
+    fn mkclean_page(&self, page_index: usize, unmap: bool) {
+        loop {
+            let seq = self.i_mmap_seq.load(Ordering::Acquire);
+            let mut snapshots: Vec<FileVmaSnapshot> = Vec::new();
+            {
+                let index = self.i_mmap.lock();
+                for weak in index.values() {
+                    if let Some(vma) = weak.upgrade() {
+                        if let Some(snapshot) = Vma::file_rmap_snapshot(&vma) {
+                            let first = snapshot.file_offset >> PAGE_SIZE_BITS;
+                            let pages = snapshot.end.0.saturating_sub(snapshot.start.0);
+                            if page_index >= first && page_index < first.saturating_add(pages) {
+                                snapshots.push(snapshot);
+                            }
+                        }
+                    }
+                }
+            }
+            for snapshot in snapshots {
+                if let Some(vm) = snapshot.owner.upgrade() {
+                    vm.mkclean_file_page(snapshot.vma_id, page_index, unmap);
+                }
+            }
+            if self.i_mmap_seq.load(Ordering::Acquire) == seq {
+                return;
+            }
+        }
     }
 
     /// 返回当前绑定的 `PageCacheBackend`（克隆 `Arc`）。
@@ -712,6 +807,44 @@ impl PageCache {
             return None;
         }
         entries[page_index].as_ref().map(|e| e.state())
+    }
+
+    /// 在所属 VM 锁内记录一个 file-backed PTE 已安装。
+    pub fn map_page(&self, page_index: usize) {
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        if let Some(entry) = entry {
+            entry.map_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// 在所属 VM 锁内记录一个 file-backed PTE 已撤销。
+    pub fn unmap_page(&self, page_index: usize) {
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        if let Some(entry) = entry {
+            let _ = entry
+                .map_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_sub(1));
+        }
+    }
+
+    /// 返回当前由用户 PTE 引用的数量，仅供截断/回收快速判定。
+    pub fn map_count(&self, page_index: usize) -> usize {
+        self.entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .map(|entry| entry.map_count.load(Ordering::Acquire))
+            .unwrap_or(0)
     }
 
     /// 获取所有脏页索引的快照
@@ -988,6 +1121,46 @@ impl PageCache {
         }
         self.mark_dirty_after_copy(page_index, &entry);
         Ok(entry.page.clone())
+    }
+
+    /// file shared-write fault 的 VM 锁内快路径。它只做 try-read 和既有 entry
+    /// 检查；任何可能加载/等待的工作都包装为 RetryWait 交给外层锁外执行。
+    pub(crate) fn try_frame_for_write(
+        self: &Arc<Self>,
+        page_index: usize,
+    ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            })));
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            })));
+        };
+        if !entry.is_fully_valid() || entry.state() == PageState::Loading || entry.state() == PageState::Writeback {
+            return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            })));
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                self.mark_dirty_after_copy(page_index, &entry);
+                Ok(entry.page.clone())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => unreachable!(),
+        }
     }
 
     /// 确保页面所有 segment 均已有效（读取缺失的 segment 并合并）。
@@ -1670,9 +1843,13 @@ impl PageCache {
                 self.inner.lock().mark_dirty(page_index);
                 return Err(error);
             }
-            // data 读锁覆盖 backend I/O；并发 writer 先发布 PG_REDIRTIED，
-            // 再等待当前快照结束，完成路径因此不会丢失新数据。
-            let result = entry.with_bytes(|data| backend.write_page(page_index, data));
+            // data 读锁是 file page 的线性化点：Dirty→Writeback 后先在同一
+            // 临界区 mkclean，所有共享 PTE 从此刻起都不可写且 dirty 已清；VM
+            // 锁内只收集 TLB，实际 shootdown 由 AddressSpace 解锁后执行。
+            let snapshot = entry.read_bytes();
+            self.mkclean_page(page_index, false);
+            let result = backend.write_page(page_index, snapshot.bytes());
+            drop(snapshot);
             match result {
                 Ok(_) => {
                     // Writeback succeeded: check PG_REDIRTIED
@@ -1789,6 +1966,14 @@ impl PageCache {
                 restore_dirty(&page_slices);
                 return Err(error);
             }
+        }
+
+        // 每个页在取 backend 快照前完成 wrprotect+cleandirty。rmap walker 不持
+        // entries/inner 锁；它只短暂取得各 AddressSpace 的 VM 锁并由其锁外 flush。
+        for (idx, entry) in &page_slices {
+            let snapshot = entry.read_bytes();
+            self.mkclean_page(*idx, false);
+            drop(snapshot);
         }
 
         let result = if let Some(backend) = self.backend() {
@@ -1968,6 +2153,18 @@ impl PageCache {
         // 写锁与所有普通读写/回写排序；持锁期间不得进入用户态 copy 或等待。
         let _op = self.op_gate.write();
         let hole_start_page = new_size.div_ceil(PAGE_SIZE);
+        // Pass A：在移除 PageCache entry 前先 zap 所有仍映射该页的 VMA。fault
+        // 若已持 VM 锁会在 op_gate.try_read 处返回 Retry，绝不反向等待；每轮
+        // mkclean 自带 i_mmap_seq 重验，因此 mmap/munmap 不会留下旧 PTE。
+        let tail_indices: Vec<usize> = {
+            let entries = self.entries.lock();
+            (hole_start_page..entries.len())
+                .filter(|index| entries[*index].as_ref().is_some_and(|entry| entry.map_count.load(Ordering::Acquire) != 0))
+                .collect()
+        };
+        for page_index in tail_indices {
+            self.mkclean_page(page_index, true);
+        }
         persistent()?;
 
         let tail_entry = {
