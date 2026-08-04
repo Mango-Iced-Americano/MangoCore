@@ -141,7 +141,8 @@ let should_poll_console = true;
 schedule_tick += 1
 console poll                       [rv64 每 64 tick，其他架构每 tick]
 do_wake_expired()
-NET_INTERFACE.try_poll()           [每 64 tick]
+NET_INTERFACE.run_deferred_poll_retry() [每 tick]
+NET_INTERFACE.request_poll()       [每 64 tick]
 fs::reclaim::maybe_reclaim_fs_caches()
 zombie queue drain
 stale zombie cleanup + queue stats [每 64 tick]
@@ -154,10 +155,10 @@ switch or idle
 
 | 场景 | 行为 |
 |------|------|
-| 有调度循环进展 | 每 `BACKGROUND_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.try_poll()` |
-| 没有 ready task | 每 `IDLE_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.poll()`，否则 `spin_loop()` |
+| 有调度循环进展 | 每 tick 消费 retry 位；每 `BACKGROUND_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()` |
+| 没有 ready task | 每 `IDLE_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()`，否则 `spin_loop()` |
 
-后台 poll 使用 `try_poll()` 避免阻塞在网络接口锁上；idle 路径允许调用 `poll()` 驱动网络进展。
+housekeeping 只异步 request，真正 smoltcp 推进固定由 CPU0 poll worker 执行；忙栈 retry 延后一整个 scheduler tick，避免 worker 内空转。
 
 ### 4.2 timeout 唤醒
 

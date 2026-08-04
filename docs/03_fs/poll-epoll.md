@@ -53,7 +53,7 @@ MangoCore 提供两套 I/O 事件通知机制：传统的 poll/select（同步�
 
 一次完整的 poll 扫描分为三个阶段：
 
-1. **预扫描（collect_wait=true）**：调用 `scan_ppoll()` 或 `scan_pselect()`，对每个 fd 执行 `file.poll_events()` 获取就绪事件。如果 fd 未就绪且 `collect_wait=true`，收集其 `PollWaitQueue` 用于后续阻塞等待。
+1. **预扫描（collect_wait=true）**：调用 `scan_ppoll()` 或 `scan_pselect()`，对每个 fd 执行 `file.poll_events()` 获取就绪事件。如果 fd 未就绪且 `collect_wait=true`，收集其 `PollWaitQueue` 用于后续阻塞等待。`timeout=0` 的首扫先等待一张内部网络 poll ticket，避免只读取 CPU0 worker 尚未消费的旧网络状态；这不消耗用户 timeout，下一测试批次会用 ktest 覆盖该边界。
 2. **等待**：如果预扫描没有找到就绪 fd，调用 `poll_wait()` 在收集到的 wait_queue 上阻塞。`poll_wait` 使用 `WaitQueue::wait_on_queues_interruptible_timeout` 实现可中断、带超时的多队列等待。条件闭包在每次被唤醒时重新扫描。
 3. **结果写回**：将 `revents` 写回用户空间。
 

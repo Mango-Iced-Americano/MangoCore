@@ -102,14 +102,14 @@ impl Socket for UdpSocket {
         log::info!("[Udp::bind] bind to {:?}", addr);
         // PortRegistry 已在 N0 为 port=0 选择并保留端口；这里绝不能重新分配。
         let bind_addr = addr;
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {
                 socket.bind(bind_addr).ok().ok_or(SyscallErr::EINVAL)
             })
             .ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(bind_addr);
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         let ifindex = crate::net::net_core::ifindex_for_local_addr(bind_addr.addr);
         self.bound
             .lock()
@@ -200,7 +200,7 @@ impl Socket for UdpSocket {
             let mut inner = self.inner.lock();
             inner.remote_endpoint = Some(remote_endpoint);
         }
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         let local_ep = NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {
                 let local = socket.endpoint();
@@ -246,7 +246,7 @@ impl Socket for UdpSocket {
             remote_endpoint,
             ifindex
         );
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         Ok(0)
     }
 
@@ -280,10 +280,13 @@ impl Socket for UdpSocket {
     }
 
     fn local_endpoint(&self) -> Option<Endpoint> {
-        NET_INTERFACE.poll();
+        // 状态查询需要观察本次调用前已抵达的 worker 结果；等待发生在任何 socket/N2
+        // 锁之外，不把异步 request 当作即时 smoltcp 进度。
+        let ticket = NET_INTERFACE.request_poll_ticket();
+        let _ = NET_INTERFACE.wait_poll_completion(ticket);
         let local: Option<IpListenEndpoint> =
             NET_INTERFACE.udp_routed_socket(self.socket_handler, |socket| socket.endpoint());
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         local.map(|ep| {
             let addr = ep.addr.unwrap_or_else(|| match self.ip_version {
                 IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
@@ -459,7 +462,7 @@ impl Socket for UdpSocket {
     ///
     /// 从 `self.inner.rx_queue` 弹出最早的数据报（`VecDeque` 前端）。
     /// 将最多 `buf.len()` 字节数据复制到 `buf` 中，返回 `(本地读取长度, Some(Endpoint::Ip(remote)))`。
-    /// 队列由 `dispatch_udp_packets()` 填充，该函数在每次 `NET_INTERFACE.poll()` 后调用。
+    /// 队列由 CPU0 poll worker 的 `dispatch_udp_packets()` 填充。
     ///
     /// **阻塞模型**：`try_xxx` 模式——仅消费已有数据，不等待。队列为空时返回
     /// `EAGAIN`，调用者通过 `recv_wait_queue` 进入阻塞等待。
@@ -590,7 +593,7 @@ impl Socket for UdpSocket {
     fn socket_r_ready(&self) -> bool {
         // epoll/poll 的 state scan 只能读取已发布队列状态；poll worker 会在锁外
         // 分发 UDP 包并通知 recv_waiters，不能从这里重入 smoltcp。
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         self.recv_ready()
     }
 
@@ -652,7 +655,7 @@ impl UdpSocket {
             .add_routed_socket(InetProtocol::Udp, socket)
             .unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         Self {
             inner: Mutex::new(UdpSocketInner {
                 remote_endpoint: None,
@@ -778,7 +781,8 @@ impl Drop for UdpSocket {
 
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        NET_INTERFACE.poll();
+        let ticket = NET_INTERFACE.request_poll_ticket();
+        let _ = NET_INTERFACE.wait_poll_completion(ticket);
 
         let mut inner = self.inner.lock();
         if let Some((data, remote)) = inner.rx_queue.pop_front() {

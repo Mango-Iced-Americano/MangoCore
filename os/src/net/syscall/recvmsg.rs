@@ -72,7 +72,8 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             Ok(b) => b,
             Err(errno) => return errno,
         };
-        NET_INTERFACE.try_poll();
+        let ticket = NET_INTERFACE.request_poll_ticket();
+        let _ = NET_INTERFACE.wait_poll_completion(ticket);
         let nbytes = match socket.try_recv_user(&mut ubuf, msg_flags) {
             Ok(n) if n >= 0 => n as usize,
             Ok(_) => 0usize,
@@ -135,7 +136,8 @@ pub fn sys_recvmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
     // 不持有 socket 内部锁或 `NET_INTERFACE` 全局锁，不会导致锁顺序反转。
     let ret = if let Some(wq) = socket.recv_wait_queue() {
         if is_nonblock {
-            NET_INTERFACE.try_poll();
+            let ticket = NET_INTERFACE.request_poll_ticket();
+            let _ = NET_INTERFACE.wait_poll_completion(ticket);
             match try_recv() {
                 Ok((n, _)) => n as isize,
                 Err(e) => -(e as isize),

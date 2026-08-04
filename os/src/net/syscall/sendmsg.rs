@@ -186,7 +186,9 @@ fn send_stream_chunked(
                 Err(errno) => return if done > 0 { done as isize } else { errno },
             };
 
-            NET_INTERFACE.try_poll();
+            // 非阻塞首发前等一张 ticket；此时没有持有用户页、socket 或 N2 锁。
+            let ticket = NET_INTERFACE.request_poll_ticket();
+            let _ = NET_INTERFACE.wait_poll_completion(ticket);
             let sent = match socket.try_sendmsg_user(&ubuf, dest.clone(), msg_flags) {
                 Ok(n) => {
                     if n <= 0 {
@@ -202,6 +204,8 @@ fn send_stream_chunked(
                     };
                 }
             };
+            // 成功入队后的网络推进只需异步请求，不能再把 kick 当作同步 flush。
+            NET_INTERFACE.request_poll();
 
             done += sent as usize;
 

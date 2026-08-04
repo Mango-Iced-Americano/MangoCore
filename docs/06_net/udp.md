@@ -123,7 +123,7 @@ buffer > 65507 --> EMSGSIZE
 
 ### socket_r_ready
 
-先调用 `NET_INTERFACE.poll()` 驱动协议栈，再检查 `rx_queue` 是否非空。
+只异步请求 CPU0 poll worker，再检查已发布的 `rx_queue`；零超时和非阻塞 syscall 首试由调用层等待内部 ticket，不在 readiness scan 内同步 poll。
 
 ## 本地环路优化
 

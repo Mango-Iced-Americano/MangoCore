@@ -374,9 +374,12 @@ pub fn run_tasks() -> ! {
             &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
             stage_t0,
         );
+        // busy DeviceStack 的 retry 只能由下一 CPU0 scheduler tick 提交，避免 poll
+        // worker 在拿不到 N2 时立刻重发 ticket 形成紧循环。
+        NET_INTERFACE.run_deferred_poll_retry();
         if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
             let stage_t0 = sched_profile_start(sched_profile);
-            NET_INTERFACE.try_poll();
+            NET_INTERFACE.request_poll();
             sched_record_stage(
                 sched_profile,
                 &SCHED_STAGE_NET_POLL_CALLS,
@@ -506,7 +509,7 @@ pub fn run_tasks() -> ! {
             // 没有就绪的任务 → CPU idle
             let stage_t0 = sched_profile_start(sched_profile);
             if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
-                NET_INTERFACE.poll();
+                NET_INTERFACE.request_poll();
             } else {
                 spin_loop();
             }

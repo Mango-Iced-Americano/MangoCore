@@ -181,24 +181,44 @@ pub(crate) enum NetPollTestHookPoint {
 /// 回调运行在 IRQ 路径，禁止加锁、睡眠、分配或打印。
 pub(crate) type NetPollTestHook = fn(NetPollTestHookPoint);
 
-/// 网络轮询 worker 的单调请求序列。
+/// 一张 poll ticket 的完成结果。
 ///
-/// `requested` 与 `completed` 只表达“至少有一次 poll 请求尚未处理”，不记录包数。
-/// IRQ 只能发布 generation 和 deferred 标志；WaitQueue 唤醒必须由任务/idle 安全点完成。
+/// 完成只表示 CPU0 已对该 ticket 做过一轮有界扫描；某个忙碌的 DeviceStack 会由
+/// 后续 housekeeping retry，不把“拿不到 N2 锁”伪装成同步轮询已经推进。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PollCompletion {
+    Completed,
+    Interrupted,
+}
+
+/// 网络轮询 worker 的单调提交序列与两个独立等待域。
+///
+/// `submitted`/`completed` 表示有界扫描 ticket，不记录包数。`pending` 是合并门：
+/// 生产者只在 false -> true 时唤醒 worker；worker 先清门，再扫描，从而不会把
+/// 扫描期间的新请求吞入旧轮。IRQ 只发布原子状态，WaitQueue 唤醒留给安全点。
 struct NetPollControl {
-    requested: AtomicU64,
+    submitted: AtomicU64,
     completed: AtomicU64,
+    pending: AtomicBool,
     deferred_wake: AtomicBool,
-    wait_queue: Mutex<Option<crate::task::WaitQueue>>,
+    /// DeviceStack try_lock 失败只置位；CPU0 下一 scheduler tick 才重新提交。
+    retry_armed: AtomicBool,
+    /// 静态控制块延迟分配，lazy wait 在登记后再次检查 pending 关闭丢唤醒窗口。
+    worker_wait: Mutex<Option<crate::task::WaitQueue>>,
+    /// 同上；completion 的权威条件仍是 completed ticket。
+    completion_wait: Mutex<Option<crate::task::WaitQueue>>,
 }
 
 impl NetPollControl {
     const fn new() -> Self {
         Self {
-            requested: AtomicU64::new(0),
+            submitted: AtomicU64::new(0),
             completed: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
             deferred_wake: AtomicBool::new(false),
-            wait_queue: Mutex::new(None),
+            retry_armed: AtomicBool::new(false),
+            worker_wait: Mutex::new(None),
+            completion_wait: Mutex::new(None),
         }
     }
 }
@@ -628,12 +648,39 @@ impl<'a> NetInterface<'a> {
         }
     }
 
-    /// 从普通任务上下文请求一次网络推进。Release 使 worker 在 Acquire 后观察到
-    /// 请求前已提交的 socket 状态；唤醒不持有 DeviceStack/socket 锁。
-    pub fn kick_from_task(&self) {
-        self.poll.requested.fetch_add(1, Ordering::Release);
-        if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
-            wait_queue.wake_all();
+    /// 纯异步地请求 CPU0 poll worker 推进网络状态。
+    ///
+    /// `submitted` 的 Release 发布请求前已提交的 socket 状态；`pending` 的 AcqRel
+    /// test-and-set 是合并门，只有第一个未处理请求取得 worker_wait 并唤醒它。
+    /// 调用方不得持有 DeviceStack、socket 或 task.inner 锁。
+    pub fn request_poll(&self) {
+        let _ = self.request_poll_ticket();
+    }
+
+    /// 请求一次网络推进并返回可等待的单调 ticket。
+    pub fn request_poll_ticket(&self) -> u64 {
+        let ticket = self.poll.submitted.fetch_add(1, Ordering::Release) + 1;
+        if !self.poll.pending.swap(true, Ordering::AcqRel) {
+            if let Some(wait_queue) = self.poll.worker_wait.lock().as_mut() {
+                wait_queue.wake_all();
+            }
+        }
+        ticket
+    }
+
+    /// 等待 CPU0 完成包含 `ticket` 的一轮有界扫描。
+    ///
+    /// completion 的 Release store 与这里的 Acquire load 配对；先检查、登记等待者、
+    /// 再检查的 WaitQueue 协议保证 completion publish 与 wake 之间没有 lost wake。
+    /// 此等待不计入用户 I/O timeout，调用前必须释放 fd/socket/DeviceStack/task.inner 锁。
+    pub fn wait_poll_completion(&self, ticket: u64) -> PollCompletion {
+        match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.completion_wait, || {
+            (self.poll.completed.load(Ordering::Acquire) >= ticket).then_some(0)
+        }) {
+            crate::task::WaitResult::Ready(_) => PollCompletion::Completed,
+            crate::task::WaitResult::Interrupted | crate::task::WaitResult::TimedOut => {
+                PollCompletion::Interrupted
+            }
         }
     }
 
@@ -641,14 +688,16 @@ impl<'a> NetInterface<'a> {
     ///
     /// 此路径不得轮询、拿 WaitQueue、分配或输出；安全点随后把 deferred 标志转换为唤醒。
     fn kick_from_irq(&self) {
-        self.poll.requested.fetch_add(1, Ordering::Release);
-        self.poll.deferred_wake.store(true, Ordering::Release);
+        self.poll.submitted.fetch_add(1, Ordering::Release);
+        if !self.poll.pending.swap(true, Ordering::AcqRel) {
+            self.poll.deferred_wake.store(true, Ordering::Release);
+        }
     }
 
     /// 供 ktest 观察 publish 与 worker consume 的 generation，不改变 poll 状态。
     pub(crate) fn poll_generation_snapshot(&self) -> (u64, u64) {
         (
-            self.poll.requested.load(Ordering::Acquire),
+            self.poll.submitted.load(Ordering::Acquire),
             self.poll.completed.load(Ordering::Acquire),
         )
     }
@@ -656,9 +705,17 @@ impl<'a> NetInterface<'a> {
     /// 在任务或 idle 安全点把 IRQ 的发布转换为 worker 唤醒。
     pub fn run_deferred_net_wake(&self) {
         if self.poll.deferred_wake.swap(false, Ordering::AcqRel) {
-            if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
+            if let Some(wait_queue) = self.poll.worker_wait.lock().as_mut() {
                 wait_queue.wake_all();
             }
+        }
+    }
+
+    /// CPU0 housekeeping 消费一次忙栈 retry。不能从 worker 立即重发 generation，
+    /// 否则持续持有 N2 的调用者会让 worker 在内核栈上空转。
+    pub fn run_deferred_poll_retry(&self) {
+        if self.poll.retry_armed.swap(false, Ordering::AcqRel) {
+            self.request_poll();
         }
     }
 
@@ -894,16 +951,6 @@ impl<'a> NetInterface<'a> {
         (tcp, udp, raw, pending)
     }
 
-    pub fn poll(&self) {
-        self.kick_from_task();
-    }
-
-    /// 兼容旧调用方的 task-context kick。真实 smoltcp 推进只由 poll worker 完成。
-    pub fn try_poll(&self) -> bool {
-        self.kick_from_task();
-        true
-    }
-
     /// Hard-IRQ publish-only network kick。
     ///
     /// 此函数的上界仅为两个原子 store 与可选 ktest hook；不得触碰目录、
@@ -922,9 +969,9 @@ impl<'a> NetInterface<'a> {
         let mut stack_guard = match stack.inner.try_lock() {
             Some(guard) => guard,
             None => {
-                // 某个 DeviceStack 忙时不能阻塞 worker；重新发布 generation，使本轮
-                // 已完成的其它 stack 不受影响，且该 stack 在锁释放后必定获得重试。
-                self.kick_from_task();
+                // N2 忙时 worker 只记录下一 scheduler tick 的 retry，不能在此处重发
+                // ticket；否则同一忙栈会驱动 worker 紧循环并饿死真正的锁持有者。
+                self.poll.retry_armed.store(true, Ordering::Release);
                 crate::task::perf::record_net_poll(false, true);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(true, false, true, 0);
@@ -1015,14 +1062,13 @@ impl<'a> NetInterface<'a> {
 
     /// CPU0 专属的网络轮询 worker。
     ///
-    /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；这里不再修改
-    /// 运行期 affinity。`completed` 只写入本轮开始取得的 target，防止 poll 中的新
-    /// 请求被旧轮次吞掉。
+    /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；每次醒来最多
+    /// 消费两张 pending ticket。第一轮清门后到来的请求由第二轮处理；第二轮之后
+    /// 仍有新请求则保留 pending，交还 scheduler 后重新走等待协议，不在此处自旋。
     pub fn net_poll_worker(&self) {
-        let mut observed = self.poll.completed.load(Ordering::Acquire);
         loop {
-            match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.wait_queue, || {
-                (self.poll.requested.load(Ordering::Acquire) != observed).then_some(0isize)
+            match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.worker_wait, || {
+                self.poll.pending.load(Ordering::Acquire).then_some(0isize)
             }) {
                 crate::task::WaitResult::Ready(_) => {}
                 crate::task::WaitResult::Interrupted => {
@@ -1036,20 +1082,25 @@ impl<'a> NetInterface<'a> {
                 crate::task::WaitResult::TimedOut => {}
             }
 
-            loop {
-                let target = self.poll.requested.load(Ordering::Acquire);
+            for _ in 0..2 {
+                // AcqRel 清门与 producer 的 AcqRel test-and-set 配对：清门后的新
+                // 提交必定重新置 pending，因而不会丢失下一轮扫描请求。
+                if !self.poll.pending.swap(false, Ordering::AcqRel) {
+                    break;
+                }
+                let target = self.poll.submitted.load(Ordering::Acquire);
                 self.poll_each_stack_bounded();
                 self.poll.completed.store(target, Ordering::Release);
-                observed = target;
-                if self.poll.requested.load(Ordering::Acquire) == target {
-                    break;
+                // N2 已全部释放，才允许进入 completion WaitQueue 的唤醒路径。
+                if let Some(wait_queue) = self.poll.completion_wait.lock().as_mut() {
+                    wait_queue.wake_all();
                 }
             }
         }
     }
 
     pub fn _poll(&self) {
-        self.kick_from_task();
+        self.request_poll();
     }
 
     #[cfg(any())]
@@ -1246,12 +1297,6 @@ impl<'a> NetInterface<'a> {
         progressed
     }
 
-    pub fn poll_until_quiescent(&self) {
-        while self.try_poll() {
-            // 继续推进，直到没有数据可处理
-            crate::task::try_yield(); // 可选：避免占着 CPU 不放
-        }
-    }
     #[cfg(any())]
     pub fn old_poll(&self) {
         log::trace!("[NetInterface::poll] poll...");

@@ -278,6 +278,10 @@ fn checked_timeout_deadline(timeout: Option<TimeSpec>) -> Result<Option<TimeSpec
     }
 }
 
+fn is_zero_timeout(timeout: Option<TimeSpec>) -> bool {
+    timeout.is_some_and(|value| value.tv_sec == 0 && value.tv_nsec == 0)
+}
+
 struct PPollScan {
     ready: isize,
     wait_queues: Vec<PollWaitQueue>,
@@ -288,7 +292,8 @@ fn scan_ppoll(
     poll_fds: &mut [PollFd],
     collect_wait: bool,
 ) -> PPollScan {
-    NET_INTERFACE.poll();
+    // 状态扫描只异步请求 CPU0 worker；不得再把 publish-only 请求误当作同步进度。
+    NET_INTERFACE.request_poll();
     let fd_table = fds.lock();
     let mut ready = 0;
     let mut wait_queues = Vec::new();
@@ -337,7 +342,8 @@ fn scan_pselect(
     exception_fds: &Option<FdSet>,
     collect_wait: bool,
 ) -> PSelectScan {
-    NET_INTERFACE.poll();
+    // WaitQueue 条件闭包也会调用本扫描函数，因此这里只能异步 kick，不能进入 smoltcp。
+    NET_INTERFACE.request_poll();
     let fd_table = fds.lock();
     let mut ready = 0;
     let mut wait_queues = Vec::new();
@@ -479,11 +485,13 @@ pub fn ppoll(
     }
     let task = current_task().unwrap();
     let token = task.get_user_token();
-    let timeout: Option<TimeSpec> = match UserPtr::new(tmo_p).read_optional(token) {
-        Ok(tmo) => match checked_timeout_deadline(tmo) {
-            Ok(deadline) => deadline,
-            Err(errno) => return errno,
-        },
+    let timeout_spec: Option<TimeSpec> = match UserPtr::new(tmo_p).read_optional(token) {
+        Ok(tmo) => tmo,
+        Err(errno) => return errno,
+    };
+    let timeout_is_zero = is_zero_timeout(timeout_spec);
+    let timeout: Option<TimeSpec> = match checked_timeout_deadline(timeout_spec) {
+        Ok(deadline) => deadline,
         Err(errno) => return errno,
     };
     let files = task.process.files();
@@ -528,6 +536,12 @@ pub fn ppoll(
                 }
             }
         } else {
+            // timeout=0 仍要观察调用前已经到达的网络状态。该内部 ticket 等待不使用
+            // 用户 deadline，且此处尚未取得 fd table 或任一 File/private 锁。
+            if timeout_is_zero {
+                let ticket = NET_INTERFACE.request_poll_ticket();
+                let _ = NET_INTERFACE.wait_poll_completion(ticket);
+            }
             let scan = scan_ppoll(&files, &mut poll_fd, true);
             done = scan.ready;
             if done == 0
@@ -675,6 +689,7 @@ pub fn pselect(
     timeout: &Option<TimeSpec>,
     sigmask: *const Signals,
 ) -> isize {
+    let timeout_is_zero = is_zero_timeout(*timeout);
     let timeout: Option<TimeSpec> = match checked_timeout_deadline(*timeout) {
         Ok(deadline) => deadline,
         Err(errno) => return errno,
@@ -692,6 +707,12 @@ pub fn pselect(
 
     let has_requested_fds = pselect_has_requested_fds(nfds, read_fds, write_fds, exception_fds);
     let files = current_task().unwrap().process.files();
+    // 与 ppoll 一样，零超时的首扫可等待一张内部 poll ticket，避免只看到 worker
+    // 尚未消费的旧 pollee 状态。后续阻塞重扫仍完全由事件队列驱动。
+    if has_requested_fds && timeout_is_zero {
+        let ticket = NET_INTERFACE.request_poll_ticket();
+        let _ = NET_INTERFACE.wait_poll_completion(ticket);
+    }
     let initial_scan = if has_requested_fds {
         scan_pselect(&files, nfds, read_fds, write_fds, exception_fds, true)
     } else {

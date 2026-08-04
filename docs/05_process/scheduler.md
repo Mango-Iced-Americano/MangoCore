@@ -363,7 +363,8 @@ CPU0 的 `run_tasks()` 每轮执行：
 schedule_tick += 1
   ├── console poll
   ├── do_wake_expired()
-  ├── NET_INTERFACE.try_poll()        每 64 tick
+  ├── NET_INTERFACE.run_deferred_poll_retry() 每 tick
+  ├── NET_INTERFACE.request_poll()    每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
   ├── drain 本 CPU local_zombies
   ├── 每 64 tick 清理 interruptible zombie 并记录本地/全局队列统计
@@ -371,7 +372,7 @@ schedule_tick += 1
   ├── fetch_task()
   ├── queue sample / perf
   ├── switch to task
-  └── idle path: NET_INTERFACE.poll() 或 spin_loop()
+  └── idle path: NET_INTERFACE.request_poll() 或 spin_loop()
 ```
 
 调度循环承担了若干后台维护职责，不能把它理解成单纯的 “while fetch ready task”。
@@ -435,11 +436,11 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 | 操作 | 频率 |
 |------|------|
-| `NET_INTERFACE.try_poll()` | 每 64 tick |
-| idle 时 `NET_INTERFACE.poll()` | 每 64 idle tick |
+| `NET_INTERFACE.run_deferred_poll_retry()` | 每 tick，消费忙栈 retry 位 |
+| `NET_INTERFACE.request_poll()` | 每 64 tick 与每 64 idle tick |
 | `fs::reclaim::maybe_reclaim_fs_caches()` | 每轮 |
 
-网络 syscall 自己也会 poll；调度循环中的 poll 是后台兜底，避免没有 socket syscall 时网络状态完全不推进。
+网络 syscall 只请求或在非阻塞首试前等待一张内部 ticket；调度循环的异步 request 是后台兜底，避免没有 socket syscall 时网络状态完全不推进。
 
 ## 9. Per-CPU zombie 回收
 

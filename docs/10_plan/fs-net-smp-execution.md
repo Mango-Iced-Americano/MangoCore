@@ -240,7 +240,7 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 - [ ] A1 lwext4 全局门
 - [ ] A2 测试真实性（SKIP 机制 + AP 违规修复 + 真实交错）
 - [ ] B MAP_SHARED
-- [ ] C poll 契约
+- [~] C poll 契约 — 实现完成，等待协调器串行构建/ktest；零超时 ticket ktest 归入下一测试批次
 - [ ] D auto-bind
 - [ ] E ext4 事务
 - [ ] F affinity + 门禁

@@ -111,7 +111,9 @@ PortRegistry / NetDirectory：只快照或提交 route、不得进入 smoltcp
   至多持有 source 或 target 其中一把 `DeviceStack` 锁。
 - `DeviceStack -> NetDirectory`、`DeviceStack -> socket lifecycle`、
   `DeviceStack -> EventWaitQueue/WaitQueue` 均禁止。UDP poll 仅在栈锁内提取内核所有
-  packet，释放栈锁后才取得 OS socket/事件队列锁。
+  packet，释放栈锁后才取得 OS socket/事件队列锁。poll ticket 的 `worker_wait` 与
+  `completion_wait` 同样只能在 N0/N1/N2 全部释放后取得；worker 先 Release 发布
+  completed，再进入 completion waitqueue 唤醒，等待者不得持有 fd/socket/N2/task.inner。
 - `NetNamespace.ports` 与 route directory 都是 N0 短提交域，二者不嵌套；port reserve
   完成后才进入 socket lifecycle/DeviceStack。目录或栈锁不得跨 faultable uaccess、
   context switch、IPI/TLB 等待或 console 输出。

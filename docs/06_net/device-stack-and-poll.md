@@ -12,9 +12,9 @@ code_paths:
 entry_points:
   - "NET_INTERFACE"
   - "NetInterface::init"
-  - "NetInterface::poll"
-  - "NetInterface::try_poll"
-  - "NetInterface::poll_until_quiescent"
+   - "NetInterface::request_poll"
+   - "NetInterface::request_poll_ticket"
+   - "NetInterface::wait_poll_completion"
   - "NetInterface::add_routed_socket"
   - "NetInterface::remove_routed"
 arch:
@@ -52,7 +52,7 @@ related_docs:
 
 `NetDirectory` 是 N0 短提交域：读取 route 后升级 `Weak<DeviceStackCell>` 并立即释放目录锁；进入 N2 后必须以 route ID、protocol 与 local binding 重验。add 先建立栈内 binding 再发布 route；remove 先撤 route 再摘 binding/socket；rebind 经 `Migrating`，从不同时持有两把栈锁。N1 socket lifecycle 只能以 N1→N2 方向快照，N2 不得反向取 N1、EventPoll 或 WaitQueue。
 
-`NetPollControl` 用单调 `requested/completed` generation 关闭 clear/set ABA：task kick 增加 generation 后唤醒，IRQ 只增加 generation 并置 deferred wake；worker 在 task context 逐栈 `try_lock`，busy 栈重新发布 request，DHCP、socket readiness 与 epoll/WaitQueue 通知均在 N2 释放后处理。WaitQueue 条件闭包只检查已发布状态，不能 inline poll；同一 `SocketSet` 仍不是 per-socket 并行数据平面。
+`NetPollControl` 用 `submitted/completed` ticket 与 `pending` 合并门关闭 clear/set ABA：task 只在 `pending` 的 false→true 时唤醒 worker，IRQ 只发布 ticket 和 deferred wake；两个静态 WaitQueue 以 `Mutex<Option<...>>` 延迟创建，lazy wait 的检查→登记→复查保持首次请求不丢 wake。worker 先清 pending，至多执行两轮逐栈 `try_lock` 的有界扫描，再 Release 发布 completed 并在 N2 释放后唤醒 completion waiters。忙栈只设置 retry 位，由下一 CPU0 scheduler tick 重新请求，不能在 worker 内立刻重发造成空转。零超时 poll/epoll 与非阻塞 socket 首试可等待一张内部 ticket；普通阻塞路径仍只靠 EventWaitQueue，条件闭包只检查已发布状态，不能 inline poll；同一 `SocketSet` 仍不是 per-socket 并行数据平面。
 
 ---
 
@@ -134,43 +134,33 @@ veth 设备栈通过 `add_veth_stack()` 动态注册，在 `NetInterface::init()
 
 轮询是单核环境下驱动整个网络协议栈的核心机制。所有 socket 的数据收发、TCP 状态机推进、ARP 解析、UDP 数据分发全部依赖轮询触发。
 
-### `poll()` — 阻塞入口
+### `request_poll()` — 纯异步入口
 
 ```rust
-pub fn poll(&self) {
-    if self.inner.lock().is_none() {
-        return;
-    }
-    self.poll_once(true);
+pub fn request_poll(&self) {
+    let _ = self.request_poll_ticket();
 }
 ```
 
-标准轮询入口，由定时器中断和 syscall 路径调用。内部使用 `lock()` 阻塞等待 `Mutex`，拿到锁后委托 `poll_once()`。
+标准任务上下文 kick，由 scheduler housekeeping 和 socket 路径调用；它不执行 smoltcp。
+需要调用前可观察进度的路径使用 `request_poll_ticket()` 取得 generation，再在没有 fd/socket/
+DeviceStack/task 锁时通过 `wait_poll_completion()` 等待对应 worker 完成一轮有界扫描。
 
-### `try_poll()` — 非阻塞入口
+### ticket completion 与 IRQ 入口
 
 ```rust
-pub fn try_poll(&self) -> bool {
-    let guard = self.inner.try_lock();
-    match guard {
-        Some(inner) if inner.is_some() => {
-            drop(inner);
-            self.poll_once(true);
-            true
-        }
-        _ => false,
-    }
-}
+pub fn request_poll_ticket(&self) -> u64
+pub fn wait_poll_completion(&self, ticket: u64) -> PollCompletion
+pub fn try_poll_irq(&self) -> bool
 ```
 
-**`try_poll()` 使用 `try_lock()` 而非 `lock()`，这是防止死锁的关键设计。**
+`request_poll_ticket()` 增加单调 `submitted` 并以 `pending` 合并唤醒；
+`wait_poll_completion()` 仅等待对应 `completed` 发布，绝不拿 DeviceStack。hard IRQ 的
+`try_poll_irq()` 仍是 publish-only：不拿 WaitQueue、不轮询、不分配，安全点才转换 deferred wake。
 
-在单核环境下，场景如下：一个 syscall 处理函数（如 `sys_sendto`）持有 `NET_INTERFACE.inner` 锁并调用 `poll_once()`。如果在 `poll_once()` 执行期间触发了定时器中断，中断处理函数若调用 `poll()` 会尝试获取同一把锁，导致死锁。
-
-`try_poll()` 在锁已被持有时不等待不重试，直接返回 `false`，用于普通任务
-上下文。定时器中断使用 `try_poll_irq()`：它可以推进 smoltcp，但只把 DHCP
-事件保存在 DeviceStack，下一次任务上下文轮询才提交设备地址、路由和 DNS，
-避免中断代码自旋等待 device_list/router 锁。
+worker 每次醒来先清 `pending`，最多完成两轮 `poll_each_stack_bounded()`；扫描期间到达的请求
+可占用第二轮，之后的请求保留 pending 并经调度器重新进入等待协议。忙栈只置 `retry_armed`，
+由下一 CPU0 scheduler tick 重新 request，不能在 worker 内紧循环。
 
 ### `try_poll_stack()` — 单栈非阻塞轮询
 
@@ -178,7 +168,8 @@ pub fn try_poll(&self) -> bool {
 pub fn try_poll_stack(&self, ifindex: u32) -> bool
 ```
 
-选择性地仅轮询指定 ifindex 的 DeviceStack。适用于仅需推进特定设备（如 veth）的场景。跳过移除列表 drain 和 accept 扫描，只做 smoltcp 协议栈推进和 UDP 分发。这些轻量操作由周期性全量 `poll()` 在空闲循环中补充。
+选择性地仅尝试轮询指定 ifindex 的 DeviceStack。worker 拿不到 N2 时只置 retry 位；
+CPU0 下一 scheduler tick 才重新 request，而不是立刻增加 ticket。
 
 ### `poll_once()` — 五阶段核心逻辑
 
@@ -239,20 +230,6 @@ poll_once()
 
 `_poll()` 目前不参与主路径轮询，保留用于兼容和调试参考。
 
-### `poll_until_quiescent()`
-
-```rust
-pub fn poll_until_quiescent(&self) {
-    while self.try_poll() {
-        crate::task::try_yield();
-    }
-}
-```
-
-反复调用 `try_poll()` 直到锁竞争停止。当前实现中 `try_poll()` 成功获取锁时始终返回 `true`（无论 `poll_once()` 是否推进了协议栈），因此循环条件实际是"锁可用且 `poll_once` 已执行"。每次迭代插入 `try_yield()` 防止独占 CPU。适用于设备初始化后的快速 flush 和批量数据接收场景。
-
-> **注意**：当前 `try_poll()` 不返回 `poll_once()` 的 `progressed` 状态，因此循环不能判断"是否有数据可处理"。如需要精确的空闲检测，需先修改 `try_poll()` 的返回值语义。
-
 ### 默认关闭的性能诊断
 
 通用 `perf_diag` 构建可在运行时选择 `network_runtime` profile，通过
@@ -286,8 +263,8 @@ LA64 QEMU 使用宿主本地 HTTP 服务传输 71.9 MB 时，通用路径稳定�
 造成。无性能诊断的正式 48/16 persist-shell 镜像三轮平均进一步达到
 `12529330 B/s`，相对旧生产基线提升约 96.64 倍；空 poll 仍是独立的 CPU 效率问题。
 
-在优化空闲轮询前必须先修正 `try_poll()` 的返回值语义：当前布尔值表示“拿到锁并
-执行过 poll”，不是“协议栈有 progress”，直接拿它作退避信号会得到错误判断。
+当前 worker 的 `progressed` 仅用于诊断；调度与重试只使用 `pending`、ticket completion
+和下一 tick 的 retry 位，不能把单次 smoltcp 返回值误作 liveness 判定。
 
 ---
 
@@ -377,15 +354,14 @@ pub fn route_check(dest: IpAddress) -> Result<(), SyscallErr>
 
 | 特性 | 测试覆盖 | 状态 |
 |------|----------|------|
-| `poll()` 定时器驱动 | 集成测试（QEMU 运行基础网络） | pass |
-| `try_poll()` 非阻塞路径 | 隐式覆盖（syscall 路径调用） | pass |
+| `request_poll()` worker 驱动 | 集成测试（QEMU 运行基础网络） | pass |
+| ticket completion（零超时/非阻塞首试） | 下一批 ktest | pending |
 | `add_routed_socket` / `remove_routed` | TCP/UDP socket 生命周期测试 | pass |
 | `rebind_routed_udp` | UDP 跨接口迁移 | not_run |
 | RAW 按 ifindex 选择 handler | 2K1000LA loopback/网关/公网/domain ping | pass，无 DUP |
 | `add_ip_to_stack` / `remove_ip_from_stack` | ifconfig 类操作 | not_run |
 | `stack_ifindexes` | 多接口枚举 | not_run |
 | `socket_stats` | 统计信息准确性 | not_run |
-| `poll_until_quiescent` | 批量数据 flush | not_run |
 | veth `add_veth_stack` / `remove_veth_stack` | 容器网络命名空间测试 | not_run |
 
 大多数统计和管理 API 尚未有针对性测试用例，由 QEMU 集成测试隐式覆盖。

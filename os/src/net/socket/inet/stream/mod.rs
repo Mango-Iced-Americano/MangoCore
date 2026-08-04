@@ -249,7 +249,7 @@ impl TcpSocket {
         ready
     }
 
-    /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
+    /// 在 CPU0 poll worker 完成有界扫描后刷新各状态的事件
     pub fn update_io_events(&self) -> (usize, usize) {
         let previous = self.pollee.load(Ordering::Acquire);
         let inner = self.inner.lock();
@@ -536,8 +536,8 @@ impl Socket for TcpSocket {
     /// # Semantics
     ///
     /// 通过 `Inner::connect()` 在 smoltcp 中创建新的 TCP 控制块并进入
-    /// `Connecting` 状态。调用后立即做一次 `NET_INTERFACE.poll()` 并检查
-    /// 握手是否已完成（`is_connected()` 或 `failure_reason()`）。
+    /// `Connecting` 状态。调用后异步请求 CPU0 poll worker，并检查已发布的
+    /// 握手状态（`is_connected()` 或 `failure_reason()`）。
     /// 若已完成，内部 `finish_connecting()` 将状态转为 `Established` 并返回
     /// `Ok(0)`（同步连接成功）；否则返回 `Err(EAGAIN)`，上层 `sys_connect`
     /// 将根据阻塞/非阻塞模式分别进入 `WaitQueue` 或返回 `EINPROGRESS`。
@@ -595,7 +595,7 @@ impl Socket for TcpSocket {
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
                 // 握手推进由 poll worker 异步完成；不得在 socket 路径内重入 smoltcp。
-                NET_INTERFACE.kick_from_task();
+                NET_INTERFACE.request_poll();
                 let inner = self.inner.lock();
                 match &*inner {
                     Inner::Connecting(c) => {
@@ -646,7 +646,7 @@ impl Socket for TcpSocket {
     /// - `ECONNREFUSED`：对端 RST
     /// - `EAGAIN`：仍在握手中
     fn try_connect(&self) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -692,7 +692,7 @@ impl Socket for TcpSocket {
     }
 
     fn take_error(&self) -> Option<SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         let mut inner = self.inner.lock();
         match &mut *inner {
             Inner::Init(Init::Bound { pending_error, .. }) => pending_error.take(),
@@ -968,7 +968,7 @@ impl Socket for TcpSocket {
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
             // route/ifindex 仍由后续 target-stack access 重验；此处仅请求 worker，
             // 不在 syscall/WaitQueue 路径同步推进任何 DeviceStack。
-            NET_INTERFACE.kick_from_task();
+            NET_INTERFACE.request_poll();
         }
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
@@ -1058,7 +1058,7 @@ impl Socket for TcpSocket {
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
-            NET_INTERFACE.kick_from_task();
+            NET_INTERFACE.request_poll();
         }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
@@ -1114,7 +1114,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
             #[cfg(feature = "net_perf_diag")]
@@ -1148,7 +1148,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }

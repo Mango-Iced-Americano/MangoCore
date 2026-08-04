@@ -18,14 +18,14 @@ use super::common::{read_sockaddr, MsgFlags};
 /// 按 socket 类型（`Stream`/`Datagram`/`Raw`）分发：
 /// - 校验 `MsgFlags`（`MSG_OOB` → `-EOPNOTSUPP`，`MSG_ERRQUEUE` → `-EOPNOTSUPP`）。
 /// - 非阻塞模式（fd `O_NONBLOCK` 或 `MSG_DONTWAIT`）：直接调用 `try_sendmsg`/`try_send`，
-///   前后各做一次 `NET_INTERFACE.try_poll()` 防止 livelock。
+///   非阻塞首试前等待内部 poll ticket，发送后仅异步请求后续推进。
 /// - 阻塞模式：复制用户数据到内核 buf，通过 `WaitQueue::wait_until_interruptible`
 ///   或 `wait_io` 等待发送就绪。
 /// - `Datagram` 类型端口未绑定时自动分配临时端口（`Endpoint::Ip(port=0)`）。
 /// - `Stream` 类型忽略 `dest_addr` 参数（POSIX 语义），但仍验证指针以防 `EFAULT` 泄露。
 ///
-/// **关键约束**：`NET_INTERFACE.try_poll()` 必须在 `try_xxx` 调用前执行，
-/// 否则 smoltcp 网络栈可能不推进状态机（参见 `recvfrom.rs` 中的相同模式）。
+/// **关键约束**：非阻塞 `try_xxx` 前必须等待一张 poll ticket；发送后的请求仅为
+/// 异步 kick，不能依赖它在 syscall 返回前完成状态机推进。
 ///
 /// # Errors
 ///
@@ -125,7 +125,8 @@ pub fn sys_sendto(
             }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    NET_INTERFACE.try_poll();
+                    let ticket = NET_INTERFACE.request_poll_ticket();
+                    let _ = NET_INTERFACE.wait_poll_completion(ticket);
                     let reader = match UserBufferReader::new(token, buf as *const u8, len) {
                         Ok(r) => r,
                         Err(e) => return e,
@@ -135,7 +136,7 @@ pub fn sys_sendto(
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 } else {
                     let mut kernel_buf = alloc::vec![0u8; len];
@@ -152,7 +153,7 @@ pub fn sys_sendto(
                         }
                     })
                     .unwrap_or_else(|e| e);
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 }
             } else {
@@ -171,7 +172,8 @@ pub fn sys_sendto(
         PSOCK::Stream => {
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    NET_INTERFACE.try_poll();
+                    let ticket = NET_INTERFACE.request_poll_ticket();
+                    let _ = NET_INTERFACE.wait_poll_completion(ticket);
                     let reader = match UserBufferReader::new(token, buf as *const u8, len) {
                         Ok(r) => r,
                         Err(e) => return e,
@@ -181,7 +183,7 @@ pub fn sys_sendto(
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 } else {
                     let mut kernel_buf = alloc::vec![0u8; len];
@@ -198,7 +200,7 @@ pub fn sys_sendto(
                         }
                     })
                     .unwrap_or_else(|e| e);
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 }
             } else {
@@ -232,12 +234,13 @@ pub fn sys_sendto(
             }
             if let Some(wait_queue) = socket.send_wait_queue() {
                 if is_nonblock {
-                    NET_INTERFACE.try_poll();
+                    let ticket = NET_INTERFACE.request_poll_ticket();
+                    let _ = NET_INTERFACE.wait_poll_completion(ticket);
                     let ret = match socket.try_sendmsg(&kernel_buf, dest_endpoint, msg_flags) {
                         Ok(n) => n as isize,
                         Err(e) => -(e as isize),
                     };
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 } else {
                     let ret = WaitQueue::wait_until_interruptible(wait_queue, || {
@@ -248,7 +251,7 @@ pub fn sys_sendto(
                         }
                     })
                     .unwrap_or_else(|e| e);
-                    NET_INTERFACE.try_poll();
+                    NET_INTERFACE.request_poll();
                     ret
                 }
             } else {

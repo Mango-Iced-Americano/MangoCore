@@ -15,15 +15,15 @@ use core::sync::atomic::Ordering;
 /// `TCP_SOCKETS` 表。若 `addr != 0`，将 peer 地址写入用户空间。
 ///
 /// **阻塞模式**：在 `WaitQueue::wait_until_interruptible` 中循环，每次迭代
-/// 调用 `socket.accept()`。遵循 harness-patterns 规则：`NET_INTERFACE.try_poll()`
-/// 在循环外调用，永不放入 `WaitQueue` 条件闭包内。
+/// 调用 `socket.accept()`。阻塞路径只在循环外异步请求 worker；非阻塞路径在首试前
+/// 等待一张内部 ticket。两种路径都绝不把 poll 放入 `WaitQueue` 条件闭包。
 /// 计数器 `ACCEPT_WAITER_COUNT` 防止无阻塞任务时的昂贵监听器扫描。
 ///
 /// **非阻塞模式**：单次 `socket.accept()` 尝试。
 ///
 /// # Locking
 ///
-/// `WaitQueue` 条件闭包内不得调用 `NET_INTERFACE.poll()` —— 这在 smoltcp
+/// `WaitQueue` 条件闭包内不得调用 smoltcp poll —— 这在 smoltcp
 /// 内部持锁时会导致死锁或活锁。
 ///
 /// # Errors
@@ -47,6 +47,8 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
         if is_nonblock {
+            let ticket = NET_INTERFACE.request_poll_ticket();
+            let _ = NET_INTERFACE.wait_poll_completion(ticket);
             match socket.accept(sockfd, addr, addrlen) {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
@@ -54,7 +56,7 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
         } else {
             // Pre-poll OUTSIDE the WaitQueue closure — harness-patterns rule:
             // never put poll inside WaitQueue condition closure.
-            NET_INTERFACE.try_poll();
+            NET_INTERFACE.request_poll();
 
             ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
             let result = loop {

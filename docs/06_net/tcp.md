@@ -322,7 +322,7 @@ pub accept_waiters: EventWaitQueue,    // 等待新连接 (accept)
 
 ## 唤醒机制
 
-`wake_tcp_waiters()` 定义在 `net/socket/mod.rs:854`，每次 `NET_INTERFACE.poll()` 后调用：
+`wake_tcp_waiters()` 定义在 `net/socket/mod.rs:854`，由 CPU0 poll worker 在释放 DeviceStack 后调用：
 
 ```rust
 pub fn wake_tcp_waiters() {

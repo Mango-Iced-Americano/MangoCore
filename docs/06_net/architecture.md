@@ -2,7 +2,7 @@
 title: "网络子系统架构设计"
 module: "net"
 category: net
-status: current
+status: draft
 owner: MangoCore Team
 last_updated: 2026-08-04
 code_paths:

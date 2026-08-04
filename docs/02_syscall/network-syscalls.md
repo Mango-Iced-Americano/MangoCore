@@ -146,14 +146,15 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
         if is_nonblock {
+            let ticket = NET_INTERFACE.request_poll_ticket();
+            let _ = NET_INTERFACE.wait_poll_completion(ticket);
             match socket.accept(sockfd, addr, addrlen) {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
             }
         } else {
-            // Pre-poll OUTSIDE the WaitQueue closure — harness-patterns rule:
-            // never put poll inside WaitQueue condition closure.
-            NET_INTERFACE.try_poll();
+            // 只在 WaitQueue 外异步请求 worker；闭包绝不 poll。
+            NET_INTERFACE.request_poll();
 
             ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
             let result = loop {
@@ -182,7 +183,7 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 }
 ```
 
-这个实现体现了网络 syscall 的等待边界：非阻塞 accept 只尝试一次；阻塞 accept 在进入 `WaitQueue` 前调用 `NET_INTERFACE.try_poll()`，等待闭包内部只执行 `socket.accept()`。
+这个实现体现了网络 syscall 的等待边界：非阻塞 accept 在首试前等待一张内部 poll ticket；阻塞 accept 只在进入 `WaitQueue` 前异步 request，等待闭包内部只执行 `socket.accept()`。
 
 `accept4()` 复用 `sys_accept()`，成功后再修改新 fd 的 CLOEXEC 和 NONBLOCK 标志：
 

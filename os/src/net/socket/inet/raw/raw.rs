@@ -217,7 +217,9 @@ impl Socket for RawSocket {
                 ip_pkg.payload_mut().copy_from_slice(user_buf);
                 ip_pkg.fill_checksum();
 
-                NET_INTERFACE.poll();
+                // RAW 首发前要等 CPU0 完成一轮，而不是假定 publish-only request 已推进。
+                let ticket = NET_INTERFACE.request_poll_ticket();
+                let _ = NET_INTERFACE.wait_poll_completion(ticket);
                 let ret = NET_INTERFACE
                     .raw_routed_socket(tx_handler, |socket| {
                         log::info!(
@@ -231,10 +233,8 @@ impl Socket for RawSocket {
                         }
                     })
                     .ok_or(SyscallErr::EAGAIN)?;
-                // Poll twice: first to flush TX from our stack to peer's rx_queue,
-                // second to process the peer's reply back to our rx_queue.
-                NET_INTERFACE.poll();
-                NET_INTERFACE.poll();
+                // 后续 TX/RX 推进由 worker 异步完成；不得假定两次 request 已完成往返。
+                NET_INTERFACE.request_poll();
                 ret
             }
             IpVersion::Ipv6 => {
@@ -322,7 +322,8 @@ impl Socket for RawSocket {
                     }
                 }
 
-                NET_INTERFACE.poll();
+                let ticket = NET_INTERFACE.request_poll_ticket();
+                let _ = NET_INTERFACE.wait_poll_completion(ticket);
                 let ret = NET_INTERFACE
                     .raw_routed_socket(tx_handler, |socket| {
                         log::info!(
@@ -336,8 +337,7 @@ impl Socket for RawSocket {
                         }
                     })
                     .ok_or(SyscallErr::EAGAIN)?;
-                NET_INTERFACE.poll();
-                NET_INTERFACE.poll();
+                NET_INTERFACE.request_poll();
                 ret
             }
         }
@@ -603,7 +603,7 @@ impl RawSocket {
             }
         }
 
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         let inner = RawSocketInner {
             local_endpoint: None,
             remote_endpoint: None,
