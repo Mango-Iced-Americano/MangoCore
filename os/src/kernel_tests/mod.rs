@@ -32,6 +32,10 @@ mod kt_smp;
 mod kt_mm;
 #[path = "ext4.rs"]
 mod kt_ext4;
+#[path = "fs_smp.rs"]
+mod kt_fs_smp;
+#[path = "net_smp.rs"]
+mod kt_net_smp;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -55,6 +59,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("smp", kt_smp::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
+        ("fs_smp", kt_fs_smp::tests()),
+        ("net_smp", kt_net_smp::tests()),
     ]
 }
 
