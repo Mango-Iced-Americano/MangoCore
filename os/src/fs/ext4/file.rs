@@ -780,20 +780,41 @@ impl Ext4FileSystem {
         );
         let old_size = inode_ref.inode.size();
 
-        // 文件扩展或不变：只更新 size 后返回（block 分配由 write 路径按需触发）
-        if old_size < new_size {
-            inode_ref.inode.set_size(new_size);
-            self.write_back_inode(inode_ref);
-            return Ok(EOK);
-        }
-
         if old_size == new_size {
             return Ok(EOK);
         }
 
+        self.truncate_inode_persistent(inode_ref, new_size)?;
+        inode_ref.inode.set_size(new_size);
+        self.write_back_inode(inode_ref);
+
+        log::info!(
+            "[debug_truncate] after: ino: {}, mode: {:#o}, size: {}",
+            inode_ref.inode_num,
+            inode_ref.inode.mode,
+            inode_ref.inode.size()
+        );
+        Ok(EOK)
+    }
+
+    /// 完成截断的持久化部分，但不发布新的 EOF。
+    ///
+    /// 调用者负责在与 PageCache 的同一事务中提交 size，避免 cache 已剪枝而
+    /// inode EOF 仍可见的窗口。扩展不预分配块，仍由写路径按需分配。
+    pub fn truncate_inode_persistent(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        new_size: u64,
+    ) -> Result<(), isize> {
+        let old_size = inode_ref.inode.size();
+
+        if old_size <= new_size {
+            return Ok(());
+        }
+
         // 如果是 Fast Symlink，它没有分配任何数据块，
         // 它的数据全存在 inode.block 数组里，因此不需要释放任何物理块。
-        // 直接清零 inode.block 并更新 size 即可。
+        // 直接清零 inode.block；调用者随后提交 size。
         let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
         let uses_extents =
             (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
@@ -819,9 +840,7 @@ impl Ext4FileSystem {
                     );
                 }
             }
-            inode_ref.inode.set_size(new_size);
-            self.write_back_inode(inode_ref);
-            return Ok(EOK);
+            return Ok(());
         }
 
         let block_size = self.block_size as u64;
@@ -833,16 +852,7 @@ impl Ext4FileSystem {
             self.extent_remove_space(inode_ref, new_blocks_cnt, EXT_MAX_BLOCKS)?;
         }
 
-        inode_ref.inode.set_size(new_size);
-        self.write_back_inode(inode_ref);
-
-        log::info!(
-            "[debug_truncate] after: ino: {}, mode: {:#o}, size: {}",
-            inode_ref.inode_num,
-            inode_ref.inode.mode,
-            inode_ref.inode.size()
-        );
-        Ok(EOK)
+        Ok(())
     }
 }
 

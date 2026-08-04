@@ -80,8 +80,19 @@ pub struct Ext4OSInode {
     pub(super) ext4fs: Arc<Ext4FileSystem>,
     /// inode锁
     pub(super) inode_lock: Arc<RwLock<InodeLock>>,
+    /// 按真实 inode 号 canonicalize 的目录命名空间 gate。
+    ///
+    /// 同一 inode 的多个 VFS wrapper 必须共享该 gate；目录查找取 read，
+    /// 创建、删除和重命名取 write。registry 只管理 Weak 生命周期，绝不在
+    /// 持有本 gate 时重新取得。
+    pub(super) dir_gate: Arc<RwLock<()>>,
     /// 新 PageCache（懒初始化，仅用于普通文件数据）
     pub(super) new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
+    /// 普通文件 extent、EOF 与 truncate 的唯一事务边界。
+    ///
+    /// 固定锁序为 `io_txn -> PageCache::op_gate`；用户缓冲区必须先 bounce，
+    /// 因此这里持锁期间不会进入 faultable uaccess 或等待 IPI/TLB ack。
+    pub(super) io_txn: Mutex<()>,
 
     // ── Phase 2: children cache (opportunistic dentry cache) ──
     //
