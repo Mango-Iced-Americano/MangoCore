@@ -326,7 +326,7 @@ lazy_static! {
     /// falling back to the normal-boot reaper.
     static ref KTEST_REAPER: Arc<ProcessControlBlock> = {
         let tid_handle = tid_alloc();
-        let reaper = new_ktest_process(tid_handle, None);
+        let reaper = new_kernel_process(tid_handle, None, "[ktest]");
         reaper.set_child_subreaper(true);
         reaper
     };
@@ -348,9 +348,10 @@ pub fn add_initproc() {
 /// The root VFS and devfs are initialized before ktest enters this path.  The
 /// PCB therefore has a valid root cwd but an empty descriptor table and bare
 /// address space; ktest tasks never enter userspace and do not need tty fds.
-fn new_ktest_process(
+fn new_kernel_process(
     tid_handle: Arc<TidHandle>,
     parent: Option<Weak<ProcessControlBlock>>,
+    comm: &str,
 ) -> Arc<ProcessControlBlock> {
     let root_inode = fs::vfs_root().mountpoint_root_inode();
     let root_file = fs::vfs::File::new(
@@ -368,7 +369,7 @@ fn new_ktest_process(
         pid,
         parent,
         Arc::new(spin::Mutex::new(root_file.clone())),
-        String::from("[ktest]"),
+        String::from(comm),
         Arc::new(spin::Mutex::new(fs::vfs::FdTable::new())),
         Arc::new(spin::Mutex::new(FsStatus {
             working_inode: root_file,
@@ -431,7 +432,11 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     let kstack = crate::hal::kstack_alloc();
     let kstack_top = kstack.get_top();
     let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
-    let pcb = new_ktest_process(tid_handle.clone(), Some(Arc::downgrade(&KTEST_REAPER)));
+    let pcb = new_kernel_process(
+        tid_handle.clone(),
+        Some(Arc::downgrade(&KTEST_REAPER)),
+        "[ktest]",
+    );
     let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
     // TCB 已按 TID 登记，但尚未加入线程组或 runqueue，创建者仍独占 New 状态；
     // 从此任务的首次入队和阻塞唤醒都只能选择调用方指定的 CPU。
@@ -440,6 +445,23 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     let handle = tcb.clone();
     // 单 bit mask 保证仍精确到达指定 CPU，同时让所有 AP focused 用例
     // 覆盖普通任务使用的 affinity-aware 初始放置入口。
+    publish_task(tcb);
+    handle
+}
+
+/// 创建由普通启动路径拥有的 CPU0 kernel worker。
+///
+/// worker 不属于 ktest reaper；它在创建期固定 affinity，运行至整机 shutdown。
+/// 其 WaitQueue 必须对 thread-group stop 返回 `Interrupted`，从而可安全退栈。
+pub fn spawn_kernel_worker(f: fn()) -> Arc<TaskControlBlock> {
+    let tid_handle = tid_alloc();
+    let kstack = crate::hal::kstack_alloc();
+    let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack.get_top());
+    let pcb = new_kernel_process(tid_handle.clone(), None, "[net-poll]");
+    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
+    tcb.set_initial_cpus_allowed(1usize << crate::smp::BOOT_CPU_ID);
+    registry::register_process(&tcb.process);
+    let handle = tcb.clone();
     publish_task(tcb);
     handle
 }

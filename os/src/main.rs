@@ -170,6 +170,9 @@ fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
         );
         // Store the config so the fn()-only trampoline can access it.
         *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
+        // poll worker 与 runner 都固定在 CPU0；worker 仅在 task context 推进
+        // smoltcp，IRQ 路径只发布 generation。
+        crate::task::spawn_ktest_task(crate::net::config::net_poll_worker);
         // Spawn the test runner as a kernel task.  It will run all
         // selected tests, then call hal::shutdown().
         // Spawned test helpers (wakers, additional waiters) run and exit
@@ -181,6 +184,13 @@ fn bsp_main(cpu_id: usize, _boot_arg: usize) -> ! {
 
     // ── Normal boot ──
     task::add_initproc();
+    // 先发布 init，再发布会立即进入 WaitQueue 的 worker。CPU0 runqueue 保持 FIFO，
+    // 因而首次 dispatch 必为 init；这避免 worker 在 early boot 抢先走
+    // `Running -> Blocking`。worker 随后首次运行时先 Acquire 检查 generation，
+    // 并在入队后复查；无论 timer kick 发生在其前后都不会丢失唤醒。
+    if boot_config.mode != crate::bootargs::BootMode::Regression {
+        task::spawn_kernel_worker(crate::net::config::net_poll_worker);
+    }
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();

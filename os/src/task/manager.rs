@@ -1520,6 +1520,53 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
     }
 
+    /// 与 `wait_event_interruptible` 相同，但允许静态控制块把队列延迟到首次
+    /// 等待才分配。首次 producer 的 generation 会被条件闭包保留，故队列尚未
+    /// 创建时不需要也不能伪造 wake。
+    pub fn wait_event_interruptible_lazy<F>(
+        wq: &Mutex<Option<Self>>,
+        mut cond: F,
+    ) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        if let Some(res) = cond() {
+            return WaitResult::Ready(res);
+        }
+
+        loop {
+            let task = current_task().unwrap();
+            let mut guard = wq.lock();
+            guard
+                .get_or_insert_with(Self::new)
+                .prepare_to_wait(Arc::downgrade(&task));
+
+            if let Some(res) = cond() {
+                guard.as_mut().unwrap().finish_wait(task.as_ref());
+                return WaitResult::Ready(res);
+            }
+            if task.process.thread_must_exit(task.gettid()) {
+                guard.as_mut().unwrap().finish_wait(task.as_ref());
+                return WaitResult::Interrupted;
+            }
+            if has_waited_signal(&task) || has_actionable_signal(&task) {
+                guard.as_mut().unwrap().finish_wait(task.as_ref());
+                return WaitResult::Interrupted;
+            }
+            discard_non_actionable_unblocked_signals(&task);
+            drop(task);
+
+            block_current_and_run_next_with_lock_checked(guard, |task| {
+                !has_waited_signal(task) && !has_actionable_signal(task) && cond().is_none()
+            });
+
+            let task = current_task().unwrap();
+            if let Some(queue) = wq.lock().as_mut() {
+                queue.finish_wait(&task);
+            }
+        }
+    }
+
     /// 不可中断等待直到条件满足或绝对 deadline 到达。
     pub fn wait_event_timeout<F>(wq: &Mutex<Self>, mut cond: F, deadline: TimeSpec) -> WaitResult
     where
@@ -2298,10 +2345,14 @@ pub fn run_deferred_timer_work() -> bool {
         }
     }
 
-    // 每个 CPU 独立推进自己的调度 tick；只有 CPU0 顺带执行全局网络 poll。
+    // 每个 CPU 独立推进自己的调度 tick；CPU0 只发布网络 generation，真正 poll
+    // 由固定 CPU0 的 worker 在任务上下文完成。
     let need_resched = crate::smp::advance_local_sched_tick(now_ns, SCHED_TICK_NS);
     if need_resched && is_boot_cpu {
         crate::net::config::NET_INTERFACE.try_poll_irq();
+        // 此处是 deferred timer 的 task/idle 安全点：IRQ 已经只做原子发布，
+        // 现在才允许取得 WaitQueue 并唤醒 worker。不能把此转换移回 hard IRQ。
+        crate::net::config::NET_INTERFACE.run_deferred_net_wake();
     }
 
     rearm_local_timer();
