@@ -1454,7 +1454,7 @@ impl WaitQueue {
     ///
     /// 等价于 DragonOS 的 `wait_until`（Uninterruptible）。
     /// 适用于内核内部确定性等待（无需信号检查的场景）。
-    /// 文件和网络 IO 通用——`NET_INTERFACE.poll()` 等操作由调用者在 `cond` 闭包中处理。
+    /// 文件和网络 IO 通用；网络条件闭包只查询已发布的 readiness，不能直接 poll。
     ///
     /// # Locking
     ///
