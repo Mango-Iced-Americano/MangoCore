@@ -271,8 +271,8 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 
 - 审计 item 4（开放普通用户多核 affinity）按用户决定降级，不作为本轮验收项；item 8
   为 N/A（当前非问题），未产生独立实现批次。
-- 分支为 `smp-fs-net`，HEAD 为 `0fd7a353`（close-out 最终快照）；相对
-  `origin/smp` 实际领先 **20 个提交**：`952dddcc..87507f0e` 为 8 个，
-  `87507f0e..0fd7a353` 为 12 个（含 close-out 的注释/台账/证据提交）。不是 14 个提交。
+- 分支为 `smp-fs-net`（close-out 最终快照 HEAD `8dd5d1c3`）；相对
+  `origin/smp` 领先 **8 个基线迁移提交（`952dddcc..87507f0e`）+ 12 个功能/close-out 提交
+  （`87507f0e..0fd7a353`）**，此后每笔台账/注释同步提交再 +1。不是 14 个提交。
 - close-out 时工作树保留未提交修改；最终 `git status --short` 见本次 Work Log，协调者
   负责后续暂存与提交。
