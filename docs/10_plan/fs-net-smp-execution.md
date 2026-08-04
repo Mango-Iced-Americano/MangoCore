@@ -263,7 +263,7 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 | E | 完成 | 312/314 PASS | 308/314 PASS | canonical ext4 inode transaction |
 
 所有表列 §8.2 结果均运行于 `CORE_NUM=8`、`mask=0x003`，两 libc 的
-`test_mount`/`test_umount` 均为 `5/5`。当前 HEAD `5793b44c` 的 close-out 零盘 ktest
+`test_mount`/`test_umount` 均为 `5/5`。close-out 零盘 ktest
 亦已在两架构 `CORE_NUM=4` 复验：`mm` 5P/0S，`fs_smp` 6P/2S，`net_smp` 7P/3S，
 `ext4` 7P/0S；原始日志为 `fs-net-smp-audit-closeout-{rv64,la64}-ktest-*.log`。
 
@@ -271,8 +271,8 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 
 - 审计 item 4（开放普通用户多核 affinity）按用户决定降级，不作为本轮验收项；item 8
   为 N/A（当前非问题），未产生独立实现批次。
-- 分支为 `smp-fs-net`，HEAD 为 `5793b44cc568e001438c3f84767a5ecf021be080`；相对
-  `origin/smp` 实际领先 **18 个提交**：`952dddcc..87507f0e` 为 8 个，
-  `87507f0e..5793b44c` 为 10 个。不是 14 个提交。
+- 分支为 `smp-fs-net`，HEAD 为 `0fd7a353`（close-out 最终快照）；相对
+  `origin/smp` 实际领先 **20 个提交**：`952dddcc..87507f0e` 为 8 个，
+  `87507f0e..0fd7a353` 为 12 个（含 close-out 的注释/台账/证据提交）。不是 14 个提交。
 - close-out 时工作树保留未提交修改；最终 `git status --short` 见本次 Work Log，协调者
   负责后续暂存与提交。
