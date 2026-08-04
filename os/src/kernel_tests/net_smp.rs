@@ -7,12 +7,13 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use lazy_static::lazy_static;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpVersion};
-use spin::Mutex;
 
 use crate::{
-    kernel_tests::runner::KernelTest,
+    kernel_tests::{
+        probe::{attach_probe_to_runner, build_udp_bind_probe, deadline_after, probe_quiesced, reap_probe, stop_probe},
+        runner::KernelTest,
+    },
     net::{
         config::{NetPollTestHookPoint, NET_INTERFACE},
         socket::{
@@ -27,20 +28,13 @@ use crate::{
 };
 
 const IRQ_POLL_WAIT_TICKS_DIVISOR: usize = 8;
-const PORT_RACE: u16 = 61_101;
+const PORT_RACE: u16 = 61_105;
 const PORT_REUSE: u16 = 61_102;
 const PORT_PROTO: u16 = 61_103;
 const PORT_NETNS: u16 = 61_104;
 
 static IRQ_HOOK_FIRED: AtomicUsize = AtomicUsize::new(0);
 static IRQ_HOOK_ERRORS: AtomicUsize = AtomicUsize::new(0);
-static PORT_RACE_START: AtomicUsize = AtomicUsize::new(0);
-static PORT_RACE_HELPER_SUCCESS: AtomicUsize = AtomicUsize::new(0);
-
-lazy_static! {
-    /// CPU1 只在 port race 的短窗口内取得这个 Arc；runner 清理前必须 take 回。
-    static ref PORT_RACE_HELPER_SOCKET: Mutex<Option<Arc<dyn Socket>>> = Mutex::new(None);
-}
 
 /// 返回 WP1 的十个独立测试。注册由 Wave 2 协调方完成。
 pub fn tests() -> Vec<KernelTest> {
@@ -53,17 +47,20 @@ pub fn tests() -> Vec<KernelTest> {
         ),
         KernelTest::new("net_smp::tcp_udp_same_numeric_port", tcp_udp_same_numeric_port),
         KernelTest::new("net_smp::namespace_port_isolation", namespace_port_isolation),
-        KernelTest::new(
+        KernelTest::skip(
             "net_smp::route_handle_reuse_rejected",
-            route_handle_reuse_rejected,
+            "requires WP5 route revalidation machinery",
         ),
         KernelTest::new("net_smp::per_stack_poll_progress", per_stack_poll_progress),
         KernelTest::new("net_smp::poll_worker_no_lost_wake", poll_worker_no_lost_wake),
-        KernelTest::new(
+        KernelTest::skip(
             "net_smp::tcp_dual_sender_exact_bytes",
-            tcp_dual_sender_exact_bytes,
+            "requires user-probe fixture (dual sender)",
         ),
-        KernelTest::new("net_smp::epollet_concurrent_edge", epollet_concurrent_edge),
+        KernelTest::skip(
+            "net_smp::epollet_concurrent_edge",
+            "requires WP6 epoll edge machinery",
+        ),
     ]
 }
 
@@ -162,47 +159,73 @@ fn irq_poll_is_publish_only() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn bind_race_helper() {
-    while PORT_RACE_START.load(Ordering::Acquire) == 0 {
-        core::hint::spin_loop();
-    }
-    let Some(socket) = PORT_RACE_HELPER_SOCKET.lock().as_ref().cloned() else {
-        return;
-    };
-    let Some(task) = crate::task::current_task() else {
-        return;
-    };
-    if PortManager::bind_port(&task, &socket, &loopback_endpoint(PORT_RACE)).is_ok() {
-        PORT_RACE_HELPER_SUCCESS.store(1, Ordering::Release);
-    }
-}
-
-/// 两个 CPU 同时经过生产 bind_port；成功数大于一说明 check/register 不是同一 reservation。
+/// 两个完整用户 TCB 在 CPU1/CPU2 经过 socket()+bind()；runner 不占用 probe 的 current 槽。
 fn port_reserve_exactly_once() -> Result<(), &'static str> {
-    if crate::smp::configured_cpu_count() < 2 {
-        return Ok(());
+    if crate::smp::configured_cpu_count() < 3 {
+        return Err("SKIP: requires CPU1 and CPU2 user probes");
     }
     PortManager::unregister_udp_bind(PORT_RACE);
-    PORT_RACE_START.store(0, Ordering::Relaxed);
-    PORT_RACE_HELPER_SUCCESS.store(0, Ordering::Relaxed);
-    let local = new_udp_socket();
-    let remote = new_udp_socket();
-    *PORT_RACE_HELPER_SOCKET.lock() = Some(remote);
-    let helper = crate::task::spawn_ktest_task_on(1, bind_race_helper);
-    PORT_RACE_START.store(1, Ordering::Release);
-    let task = crate::task::current_task().ok_or("port race has no current task")?;
-    let local_success = PortManager::bind_port(&task, &local, &loopback_endpoint(PORT_RACE)).is_ok();
-    drop(task);
-    let cleanup = wait_for_zombie(&helper, 1, "port reservation helper did not reach Zombie");
-    let remote = PORT_RACE_HELPER_SOCKET.lock().take();
+    let first = build_udp_bind_probe()?;
+    let second = build_udp_bind_probe()?;
+    first.set_initial_cpus_allowed(1 << 1);
+    second.set_initial_cpus_allowed(1 << 2);
+    let first_parent = attach_probe_to_runner(&first)?;
+    let second_parent = attach_probe_to_runner(&second)?;
+
+    // 两个用户任务均已完成 parent/affinity 发布，随后连续入队；不以 sleep 伪造竞争窗口。
+    crate::task::publish_task_on(first.clone(), 1);
+    crate::task::publish_task_on(second.clone(), 2);
+    let first_done = probe_quiesced(&first, &first.process, 1, deadline_after(3));
+    let second_done = probe_quiesced(&second, &second.process, 2, deadline_after(3));
+    let first_clean = first_done || stop_probe(&first, &first.process, 1);
+    let second_clean = second_done || stop_probe(&second, &second.process, 2);
+    let first_reaped = reap_probe(&first_parent, &first);
+    let second_reaped = reap_probe(&second_parent, &second);
     PortManager::unregister_udp_bind(PORT_RACE);
-    drop(remote);
-    drop(local);
-    cleanup?;
-    if local_success as usize + PORT_RACE_HELPER_SUCCESS.load(Ordering::Acquire) > 1 {
-        return Err("concurrent bind reserved one UDP endpoint more than once");
+    if !first_clean || !second_clean || !first_reaped || !second_reaped {
+        return Err("user UDP bind probes did not quiesce and reap");
+    }
+    let first_exit = first.process.exit_code();
+    let second_exit = second.process.exit_code();
+    // wait_child 返回 Linux raw wait status；probe 的 `exit(1)` 是 0x100，不是 1。
+    // 只解码低 8 位退出码，保留 raw status 诊断以便区分 signal/ABI 异常。
+    let first_code = first_exit >> 8;
+    let second_code = second_exit >> 8;
+    if first_code + second_code != 1 {
+        // 仅在断言失败时输出，区分双成功、双失败和 probe 非预期退出；正常路径零噪声。
+        crate::println!(
+            "# net_smp UDP bind probe exits: CPU1={}, CPU2={}",
+            first_exit,
+            second_exit
+        );
+        return Err("concurrent user bind did not produce exactly one success");
     }
     Ok(())
+}
+
+/// 通过 IRQ publish 请求 generation，再等待 CPU0 worker 发布相同 completed generation。
+fn poll_worker_no_lost_wake() -> Result<(), &'static str> {
+    let (requested_before, completed_before) = NET_INTERFACE.poll_generation_snapshot();
+    let _ = NET_INTERFACE.try_poll_irq();
+    NET_INTERFACE.run_deferred_net_wake();
+    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    let completed = crate::hal::with_local_interrupts_enabled(|| loop {
+        let (requested, completed) = NET_INTERFACE.poll_generation_snapshot();
+        if requested > requested_before && completed >= requested && completed > completed_before {
+            break true;
+        }
+        if crate::hal::get_time() >= deadline {
+            break false;
+        }
+        // worker 与 runner 都固定在 CPU0；IRQ 只发布 deferred wake，必须由此安全点让出 CPU。
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    });
+    if completed {
+        Ok(())
+    } else {
+        Err("net poll worker did not complete the published generation")
+    }
 }
 
 /// WP4 的 owner 精度测试直接观察现有 UDP bucket：关闭一个 reuse owner 不能删除 peer。
@@ -277,12 +300,6 @@ fn namespace_port_isolation() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// WP5 才引入 stack-local route directory 与 generation revalidation；WP1 仅保留测试位。
-fn route_handle_reuse_rejected() -> Result<(), &'static str> {
-    // protective: requires WP5 route directory and reusable-slot test hook.
-    Ok(())
-}
-
 /// WP5 前全局 NET_INTERFACE 锁是已知实现；本测试只验证 veth fixture 可反复创建并清理。
 fn per_stack_poll_progress() -> Result<(), &'static str> {
     let (left, right) = crate::drivers::net::veth::veth_pair_new("wp1veth0", "wp1veth1");
@@ -298,25 +315,4 @@ fn per_stack_poll_progress() -> Result<(), &'static str> {
     crate::net::net_core::remove_device(left as usize);
     crate::net::net_core::remove_device(right as usize);
     result
-}
-
-/// WP6 才有 requested/completed generation worker；现阶段只证明 loopback poll 路径可调用。
-fn poll_worker_no_lost_wake() -> Result<(), &'static str> {
-    // protective: requires WP6 poll-worker generation state and window hooks.
-    let _ = NET_INTERFACE.try_poll_irq();
-    NET_INTERFACE.poll();
-    Ok(())
-}
-
-/// 当前 TCP accept 只能产出 fd，缺少把 accepted SocketFile 取回为内核 Socket 的公共入口。
-/// WP6 增加 socket/worker fixture 后替换为 CPU1/CPU2 同 socket 的编号 frame 精确校验。
-fn tcp_dual_sender_exact_bytes() -> Result<(), &'static str> {
-    // protective: requires WP6 accepted-socket kernel entry for frame verification.
-    Ok(())
-}
-
-/// EventPoll 的 add/modify/wait 仍是私有 API；WP6 之前不能在无用户页 ktest 中诚实驱动 EPOLLET。
-fn epollet_concurrent_edge() -> Result<(), &'static str> {
-    // protective: requires WP6 eventpoll kernel entry or mapped-user probe fixture.
-    Ok(())
 }

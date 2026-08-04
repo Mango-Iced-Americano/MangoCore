@@ -18,6 +18,8 @@ const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_RED: &str = "\x1b[31m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RESET: &str = "\x1b[0m";
+/// `Result`-based legacy tests return this prefix to report a runtime prerequisite SKIP.
+pub const SKIP_PREFIX: &str = "SKIP: ";
 
 /// A single kernel test case.
 pub struct KernelTest {
@@ -29,6 +31,8 @@ pub struct KernelTest {
     pub timeout_ms: usize,
     /// 终态测试会永久改变机器状态，只在全部普通 repeat 完成后执行一次。
     pub terminal: bool,
+    /// 被当前零盘 ktest fixture 明确排除的测试原因；SKIP 不会调用 `func`。
+    pub skip_reason: Option<&'static str>,
 }
 
 impl KernelTest {
@@ -38,6 +42,7 @@ impl KernelTest {
             func,
             timeout_ms: 0, // use global default
             terminal: false,
+            skip_reason: None,
         }
     }
 
@@ -51,6 +56,7 @@ impl KernelTest {
             func,
             timeout_ms,
             terminal: false,
+            skip_reason: None,
         }
     }
 
@@ -61,8 +67,26 @@ impl KernelTest {
             func,
             timeout_ms: 0,
             terminal: true,
+            skip_reason: None,
         }
     }
+
+    /// 创建明确不计为 PASS 的已注册测试。
+    ///
+    /// 保留测试计划中的条目和 TAP 编号，让缺少 fixture 与真正通过可被机器区分。
+    pub const fn skip(name: &'static str, reason: &'static str) -> Self {
+        Self {
+            name,
+            func: skipped_test_stub,
+            timeout_ms: 0,
+            terminal: false,
+            skip_reason: Some(reason),
+        }
+    }
+}
+
+fn skipped_test_stub() -> Result<(), &'static str> {
+    Err("runner invoked a skipped test")
 }
 
 // ─────────────────────────────────────────────────────────
@@ -82,11 +106,14 @@ fn arch_name() -> &'static str {
 /// Test result summary returned by the runner.
 pub struct TestResults {
     pub passed: usize,
+    pub skipped: usize,
     pub failed: usize,
     pub total: usize,
 }
 
 impl TestResults {
+    // 保留给内嵌调用方按“无失败且实际选择了测试”判定，不用 total==passed 因为 SKIP 不计 PASS。
+    #[allow(dead_code)]
     pub fn all_passed(&self) -> bool {
         self.failed == 0 && self.total > 0
     }
@@ -129,6 +156,7 @@ pub fn run_tests_return(
         }
         return TestResults {
             passed: 0,
+            skipped: 0,
             failed: 0,
             total: 0,
         };
@@ -164,6 +192,7 @@ pub fn run_tests_return(
 
     let mut test_num: usize = 1;
     let mut passed: usize = 0;
+    let mut skipped: usize = 0;
     let mut failed: usize = 0;
 
     for phase in 0..=config.repeat {
@@ -179,43 +208,62 @@ pub fn run_tests_return(
                 timeout_ms
             };
 
-            let start = timer::get_time_ms();
-            let result = (test.func)();
-            let elapsed = timer::get_time_ms() - start;
-
-            match result {
-                Ok(()) => {
-                    crate::println!("{}ok{} {} {}", COLOR_GREEN, COLOR_RESET, test_num, test.name);
-                    passed += 1;
-                }
-                Err(reason) => {
-                    crate::println!("{}not ok{} {} {}", COLOR_RED, COLOR_RESET, test_num, test.name);
-                    crate::println!("  ---");
-                    crate::println!("  reason: {}", reason);
-                    crate::println!("  elapsed_ms: {}", elapsed);
-                    crate::println!("  ...");
-                    failed += 1;
-
-                    if config.failfast {
-                        crate::println!(
-                            "# failfast: stopping after {} passed, {} failed",
-                            passed,
-                            failed
-                        );
-                        return TestResults {
-                            passed,
-                            failed,
-                            total: total_tests,
-                        };
-                    }
-                }
-            }
-
-            if elapsed > per_test_timeout {
+            if let Some(reason) = test.skip_reason {
                 crate::println!(
-                    "{}# WARNING:{} {} took {}ms (timeout={}ms)",
-                    COLOR_YELLOW, COLOR_RESET, test.name, elapsed, per_test_timeout
+                    "{}ok{} {} {} # SKIP {}",
+                    COLOR_YELLOW, COLOR_RESET, test_num, test.name, reason
                 );
+                skipped += 1;
+            } else {
+                let start = timer::get_time_ms();
+                let result = (test.func)();
+                let elapsed = timer::get_time_ms() - start;
+
+                match result {
+                    Ok(()) => {
+                        crate::println!("{}ok{} {} {}", COLOR_GREEN, COLOR_RESET, test_num, test.name);
+                        passed += 1;
+                    }
+                    Err(reason) => match reason.strip_prefix(SKIP_PREFIX) {
+                        Some(skip_reason) => {
+                            crate::println!(
+                                "{}ok{} {} {} # SKIP {}",
+                                COLOR_YELLOW, COLOR_RESET, test_num, test.name, skip_reason
+                            );
+                            skipped += 1;
+                        }
+                        None => {
+                            crate::println!("{}not ok{} {} {}", COLOR_RED, COLOR_RESET, test_num, test.name);
+                            crate::println!("  ---");
+                            crate::println!("  reason: {}", reason);
+                            crate::println!("  elapsed_ms: {}", elapsed);
+                            crate::println!("  ...");
+                            failed += 1;
+
+                            if config.failfast {
+                                crate::println!(
+                                    "# failfast: stopping after {} passed, {} skipped, {} failed",
+                                    passed,
+                                    skipped,
+                                    failed
+                                );
+                                return TestResults {
+                                    passed,
+                                    skipped,
+                                    failed,
+                                    total: total_tests,
+                                };
+                            }
+                        }
+                    },
+                }
+
+                if elapsed > per_test_timeout {
+                    crate::println!(
+                        "{}# WARNING:{} {} took {}ms (timeout={}ms)",
+                        COLOR_YELLOW, COLOR_RESET, test.name, elapsed, per_test_timeout
+                    );
+                }
             }
 
             test_num += 1;
@@ -224,6 +272,7 @@ pub fn run_tests_return(
 
     TestResults {
         passed,
+        skipped,
         failed,
         total: total_tests,
     }
@@ -242,14 +291,14 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 
     if results.failed > 0 {
         crate::println!(
-            "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_RED, results.passed, results.failed, results.total, COLOR_RESET
+            "{}# results: {} passed, {} skipped, {} failed, {} total{}",
+            COLOR_RED, results.passed, results.skipped, results.failed, results.total, COLOR_RESET
         );
         shutdown_failure();
     } else {
         crate::println!(
-            "{}# results: {} passed, {} failed, {} total{}",
-            COLOR_GREEN, results.passed, results.failed, results.total, COLOR_RESET
+            "{}# results: {} passed, {} skipped, {} failed, {} total{}",
+            COLOR_GREEN, results.passed, results.skipped, results.failed, results.total, COLOR_RESET
         );
         shutdown_success();
     }
