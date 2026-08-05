@@ -271,6 +271,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 增加可观测 barrier、可 arm flush-failure wrapper、两项新增和一项更新的 P0 ktest，以及 P1 clean-unmount ktest。
 - Verification: Docker 中 RV64→LA64 serial kernel build、四格 lint、RV64/LA64 ktest 均通过 74/74；未将 close 后 raw state 作为断言。
 
+### Case 12: PageCache miss-run staging 无界堆分配
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/red-*` 与 `green-*`。
+- AI tools: Oracle, Sisyphus-Junior。
+- Problem: 实板 buildstorm rustc 编译触发 `layout: size=27262976`、`KERNEL_HEAP_SIZE=33554432`；父级 + Oracle 分析定位为 PageCache 读路径（非 smaps）：`fill_miss_runs` 把整个 6656 页 miss run 一次交给 `read_pages`，后端分配 `pages.len()*PAGE_SIZE` = 26 MiB staging，buddy 取整 32 MiB 在 rv64 约 31.8 MiB 堆上必然失败。
+- AI contribution: Oracle 指定根因与修复边界（分批 ≤256 页、不改 KERNEL_HEAP_SIZE、不动 BlockDevice trait 与 another_ext4 依赖）；Sisyphus-Junior 落地 ktest RED/GREEN 复现（27 MiB 有界写入 → invalidate → 单次 26 MiB 读）并实现分批修复，顺带修正 run 中段 hole 时 valid_mask 标记索引错误。
+- Human action: 审核最小 diff、确认 RED（`size=27262976`）与 GREEN（5/5 + 26 MiB 逐字节 round-trip）证据、跑双架构 build 与 L4 regression。
+- Verification: RED→GREEN ktest（`ext4_another_lifetime` 5/5）、page_cache 12/12、ext4_another 20/20、RV64→LA64 serial kernel build、L4 regression 22 passed/0 failed/1 skipped。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -308,6 +317,8 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-07-30 | 工作树（未提交） | another_ext4 pwrite write combining | Oracle P0/P1 建议；`docs/Work_Log/2026-07-30.md` | 双架构 build、RV64 ktest 与 lint 通过；iozone 测试资产缺失 |
 | 2026-08-01 | 工作树（未提交） | read_at_user 多页回归 | Oracle 根因与回退/游标方案；`docs/Work_Log/2026-08-01.md` | 受控 QEMU 5+5 取消 256KiB 系统性回归，并纠正原始 +16% 误报 |
 | 2026-08-01 | 工作树（未提交） | another_ext4 close 持久化语义 | Oracle 掉电重启测试方案；`docs/Work_Log/2026-08-01.md` | Docker 双架构 build、lint、ktest 74/74；证据保留 raw-remount 与 clean-RECOVER 检查 |
+| 2026-08-03 | `c628ac0d` | PageCache miss-run staging | `Root cause identified by Oracle analysis` | 分批 ≤256 页修复 miss-run 无界 staging；RED `size=27262976` → GREEN |
+| 2026-08-03 | `d2e92bae` | PageCache ktest regression | `Co-authored-by: Sisyphus-Junior` | 新增 large-miss-run OOM 复现 ktest，5/5 PASS |
 
 ## 8. Work_Log 证据表
 
@@ -329,6 +340,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md` | another_ext4 小 pwrite 写合并 | 记录 Oracle P0/P1 建议、写缓冲和 atomic dirty-cache pin 实现、双架构/ktest/lint 验证及 iozone 测试资产限制 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*` | read_at_user 多页回归 | 记录 Oracle 的 O(pages × segments) 根因、部分回退/顺序 cursor 方案、原始 +16% 纠正和受控 5+5 验证 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/power-cut-ktest-20260801T000000Z/` | another_ext4 close 持久化语义 | 记录 Oracle 对 close 非 durability barrier、fsync/global sync 可判定持久化、journal replay 和 clean RECOVER 检查的边界约束 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/red-ktest-missrun-oom-qemu-output.log`、`docs/Work_Log/evidence/2026-08-03/green-ktest-missrun-oom-qemu-output.log`、`docs/Work_Log/evidence/2026-08-03/green-regression-rv64-qemu-output.log` | PageCache miss-run staging 无界堆分配 | 记录 Oracle 根因、RED（`size=27262976`）→ GREEN（5/5 + 26 MiB round-trip）复现、分批 ≤256 页修复、双架构 build 与 L4 regression 22/22+1skipped |
 
 ## 9. 交互记录与留痕方式
 
