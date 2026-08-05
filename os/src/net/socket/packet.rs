@@ -2,18 +2,14 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::phy::{Device, TxToken};
-use smoltcp::time::Instant;
 
 use crate::fs::vfs::event::EPollEvent;
 use crate::fs::vfs::event::EventWaitQueue;
-use crate::net::adapter::IfaceDevice;
 use crate::net::config::NET_INTERFACE;
 use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Mutex, Socket, PSOCK};
 use crate::net::{PacketEndpoint, PACKET_SOCKETS};
 use crate::task::WaitQueue;
-use crate::timer::current_time_duration;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
 
 pub const ETH_P_ALL: u16 = 0x0003;
@@ -191,27 +187,8 @@ impl crate::net::Socket for PacketSocket {
             return Err(SyscallErr::ENETDOWN);
         }
 
-        let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
-
-        let result = NET_INTERFACE.inner_handler(|inner| {
-            for stack in inner.stacks.iter_mut() {
-                if stack.nic.nic_id() as u32 == ifindex {
-                    if let Some(tx_token) = stack.device.transmit(timestamp) {
-                        tx_token.consume(buf.len(), |tx_buf| {
-                            tx_buf.copy_from_slice(buf);
-                        });
-                        return Ok(buf.len() as isize);
-                    }
-                }
-            }
-            Err(SyscallErr::ENETDOWN)
-        });
-
-        match result {
-            Some(Ok(n)) => Ok(n),
-            Some(Err(e)) => Err(e),
-            None => Err(SyscallErr::ENETDOWN),
-        }
+        // 目录只定位目标 stack；实际 TX 在单个 DeviceStack 内串行，不能重建全局锁。
+        NET_INTERFACE.transmit_on_stack(ifindex, buf)
     }
 
     fn try_sendmsg(
@@ -320,5 +297,13 @@ pub fn deliver_frame_to_packet_sockets(frame: &[u8], ifindex: u32) {
 pub fn deliver_frames_from_veth_queue(ifindex: u32, rx_queue: &VecDeque<Vec<u8>>) {
     for frame in rx_queue.iter() {
         deliver_frame_to_packet_sockets(frame, ifindex);
+    }
+}
+
+/// DeviceStack 锁内只复制 veth 的待收帧；真正取得 PacketSocket/EventWaitQueue 锁必须
+/// 在释放 DeviceStack 后执行，避免 N2 -> N1/N3 反向嵌套。
+pub fn deliver_veth_frame_snapshot(ifindex: u32, frames: Vec<Vec<u8>>) {
+    for frame in frames {
+        deliver_frame_to_packet_sockets(&frame, ifindex);
     }
 }

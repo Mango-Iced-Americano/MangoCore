@@ -4,7 +4,7 @@ module: "net/socket"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 code_paths:
   - "os/src/net/socket/mod.rs"
 entry_points:
@@ -140,6 +140,7 @@ pub enum Endpoint {
 | 方法 | 签名 | 说明 |
 |------|------|------|
 | `bind` | `fn bind(&self, endpoint: &Endpoint) -> SyscallRet` | 绑定到本地端点 |
+| `auto_bind_endpoint` | `fn auto_bind_endpoint(&self, peer, purpose) -> Result<Option<Endpoint>, SyscallErr>` | 在未持 PortRegistry 时推导候选端点；已绑定或非 INET 返回 `None` |
 | `listen` | `fn listen(&self) -> SyscallRet` | 开始监听 |
 | `connect` | `fn connect(&self, endpoint: &Endpoint) -> SyscallRet` | 发起连接 |
 | `try_connect` | `fn try_connect(&self) -> Result<isize, SyscallErr>` | 非阻塞尝试一次握手检查，返回 `Ok(0)` 表示已建立，`Err(EAGAIN)` 表示需重试 |
@@ -365,7 +366,8 @@ peer_addr():
 
 ### wake_tcp_waiters()
 
-定义在 `os/src/net/socket/mod.rs`。在每个网卡 poll 后调用，遍历 `TCP_SOCKETS` 唤醒等待队列。
+定义在 `os/src/net/socket/mod.rs`。CPU0 worker 在释放 DeviceStack 后调用，遍历
+`TCP_SOCKETS` 并发布等待队列/epoll 事件。
 
 ```rust
 pub fn wake_tcp_waiters() {

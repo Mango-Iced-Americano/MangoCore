@@ -277,18 +277,30 @@ pub fn trap_handler() -> ! {
             crate::task::perf::record_page_fault();
             // 缺页修复与 LA64 software-dirty PTE 更新合并在同一 VM 锁
             // 持有期；helper 先解锁再完成远端 shootdown。
-            let pf_result = vm_ref.write(|vm| {
-                let result = vm.do_page_fault(addr, access);
-                if result.is_ok()
-                    && matches!(
-                        cause,
-                        Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
-                    )
-                {
-                    vm.set_user_page_dirty(addr.floor()).unwrap();
+            let pf_result = loop {
+                let outcome = vm_ref.write(|vm| {
+                    match vm.do_page_fault(addr, access) {
+                        crate::mm::FaultOutcome::Completed(pa) => {
+                            if matches!(
+                                cause,
+                                Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
+                            ) {
+                                if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
+                                    return crate::mm::FaultOutcome::Error(error);
+                                }
+                            }
+                            crate::mm::FaultOutcome::Completed(pa)
+                        }
+                        crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
+                        crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
+                    }
+                });
+                match outcome {
+                    crate::mm::FaultOutcome::Completed(_) => break Ok(()),
+                    crate::mm::FaultOutcome::Retry(wait) => wait.wait(),
+                    crate::mm::FaultOutcome::Error(error) => break Err(error),
                 }
-                result
-            });
+            };
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(_pf_start),

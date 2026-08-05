@@ -1000,7 +1000,7 @@ impl FatInode {
         }
         let read_len = end - offset;
         let pc = self.get_new_page_cache();
-        match pc.read(offset, &mut buf[..read_len]) {
+        match pc.read_kernel(offset, &mut buf[..read_len]) {
             Ok(n) => n,
             Err(_) => 0,
         }
@@ -1032,7 +1032,7 @@ impl FatInode {
         }
         let write_len = write_end - offset;
         let pc = self.get_new_page_cache();
-        match pc.write(offset, &buf[..write_len], None) {
+        match pc.write_kernel(offset, &buf[..write_len], old_size) {
             Ok(n) => n,
             Err(_) => 0,
         }
@@ -1259,7 +1259,7 @@ impl IndexNode for FatInode {
         }
         let read_len = end - offset;
         let pc = self.get_new_page_cache();
-        pc.read(offset, &mut buf[..read_len])
+        pc.read_kernel(offset, &mut buf[..read_len])
             .map_err(|_| SyscallErr::EIO)
     }
 
@@ -1288,7 +1288,7 @@ impl IndexNode for FatInode {
         }
         let actual_len = write_end - offset;
         let pc = self.get_new_page_cache();
-        pc.write(offset, &buf[..actual_len], None)
+        pc.write_kernel(offset, &buf[..actual_len], old_size)
             .map_err(|_| SyscallErr::EIO)
     }
 

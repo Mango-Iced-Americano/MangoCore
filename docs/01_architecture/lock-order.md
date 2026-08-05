@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-02
+last_updated: 2026-08-05
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -70,6 +70,24 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
 8. **线程组退出**：首次发布允许 `thread_group -> 单个 RunQueue` 的短嵌套；
    group-exit 快照释放 `thread_group` 后才取得 task/registry 锁、唤醒或发送 IPI。
    不存在 RunQueue 反向获取 thread-group 锁的路径。
+
+### FS/Net 已实现锁域
+
+FS、网络与调度之间不建立可任意嵌套的全局总序；跨域操作统一拆成
+“锁内快照或提交—解锁—进入下一域”。当前实现约束如下：
+
+| 子系统 | 正向锁序 | 约束 |
+|---|---|---|
+| native ext4 namespace | `rename_gate -> parent dir_gate -> victim dir_gate -> inode_txn` | 跨目录先取全局 rename 门；同类对象按 inode ID 排序，锁后重验目录项 |
+| 文件 I/O | `inode_txn -> PageCache.op_gate -> entries/inner -> PageEntry.data` | 用户访问在全部 inode/PageCache 锁外；`PageEntry.data` 不反向取得元数据锁 |
+| lwext4 | `PageCache -> LWEXT4_GLOBAL -> fs.lw -> inode state` | C 全局门不可重入，不跨 fault、调度、IPI/TLB ack 或输出锁 |
+| 网络控制面 | `PortRegistry/NetDirectory -> socket lifecycle -> one DeviceStack` | N0 只做短提交；一个线程同时最多持有一个设备栈锁 |
+| 网络通知 | 释放 DeviceStack 后再进入 EventPoll/WaitQueue | IRQ 只置原子 pending/deferred 标志，CPU0 worker 才执行 smoltcp |
+
+`RouteSocketHandle` 单调且不复用。访问者在目录中确认 route 状态并升级目标栈的
+`Weak`，释放目录锁后取得单个栈锁，再用 route ID 与 protocol 重验本地 binding。
+端口绑定则以每 netns 的 `reserve -> socket.bind -> commit/abort` 为线性化协议；
+registry 锁不跨 socket 或 DeviceStack 操作。
 
 ### 3.1 B15 历史过渡约束
 

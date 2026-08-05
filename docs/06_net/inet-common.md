@@ -2,12 +2,13 @@
 title: "INET 公共基础设施 (PortManager / BoundInner / Address)"
 module: "net/socket/inet/common"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/net/socket/inet/common/address.rs"
   - "os/src/net/socket/inet/common/port.rs"
+  - "os/src/net/socket/inet/common/port/registry.rs"
   - "os/src/net/socket/inet/common/bound.rs"
 entry_points:
   - "PortManager"
@@ -40,47 +41,42 @@ related_docs:
 
 | 文件 | 职责 |
 |------|------|
-| `port.rs` | `PortManager` 全局端口管理器：临时端口分配、端口冲突检测、绑定表维护 |
+| `port.rs` / `port/registry.rs` | `PortManager` 事务入口与每 netns 的端口预留表 |
 | `bound.rs` | `BoundInner` 结构体：每个 socket 的绑定状态（handle、ifindex、addr、port） |
 | `address.rs` | `SocketAddrv4`/`SocketAddrv6` 地址结构、`IpEndpoint`/`IpListenEndpoint` 转换、用户态地址读写 |
 
 ## PortManager
 
-`PortManager` 是一个纯静态方法集合（无实例状态），对标 Linux 内核的临时端口管理。全局状态分为两部分：
-
-- **NEXT\_EPHEMERAL\_PORT** (`AtomicU16`): 从 49152 开始递增的临时端口计数器。使用原子计数器而非 RNG，避免 `fork()` 后父子进程产生相同端口序列。
-- **TCP\_PORTS** / **UDP\_PORTS** (`Mutex<BTreeMap>`): 全局端口绑定表，分别记录 TCP 和 UDP 已占用的端口。UDP 表支持每个端口多个绑定（`Vec<UdpPortBinding>`），以处理 `SO_REUSEADDR` 场景。
+`PortManager` 保留系统调用侧的统一入口，权威状态位于每个
+`NetNamespace::ports: Mutex<PortRegistry>`。registry 以
+`(protocol, family, address, port, ifindex)` 建 bucket，每个 owner 由单调 token 与
+`Weak<dyn Socket>` 共同标识；TCP/UDP 彼此独立，不同 netns 也不共享占用状态。
 
 ### 临时端口分配
 
-```
-PortManager::alloc_ephemeral_port()
-  -> fetch_add NEXT_EPHEMERAL_PORT (起始 49152)
-  -> clamp to local_port_range() (实际范围 32768..60999)
-  -> loop: check TCP_PORTS + UDP_PORTS
-  -> return first free port, or 0 on exhaustion
-```
+显式 `bind(port=0)` 和 INET auto-bind 使用同一条事务路径。registry 锁内先清理
+dead owner，再从 49152..65534 环形扫描可用端口，创建 `Reserved` owner；释放锁后
+执行 socket 自身 bind，最后重新进入同一 netns 按 key、token 和 Weak identity
+`commit`，失败则 `abort`。因此两个 CPU 不能同时把同一非复用 endpoint 绑定成功。
 
-`SocketAddrv4`/`SocketAddrv6` 的 `From<IpListenEndpoint>` 实现中，当端口为 0 时会自动调用 `alloc_ephemeral_port()`。
+TCP connect/listen、UDP connect 与首个未连接 send 都通过
+`ensure_auto_bound()` 复用该协议。候选源地址在 registry 锁外推导，registry 锁
+绝不跨 socket lifecycle 或 DeviceStack 操作。
 
 ### 端口冲突检测
 
-`check_bind_conflict(task, endpoint, target_sock)` 分两轮检测：
-
-1. **全局表扫描** (fast path): 查询 `TCP_PORTS` 或 `UDP_PORTS`，根据协议类型检查端口 + 地址是否匹配。
-2. **fd\_table 扫描** (fallback): 遍历当前任务的 fd 表，对每个 `SocketFile` 检查 `local_endpoint()` 是否冲突。此路径处理尚未注册到全局表的 socket。
-
-UDP 冲突跳过条件:
-- 双方均启用 `SO_REUSEADDR`，跳过冲突。
-- 已连接远程端的 UDP socket 不影响同端口新 bind。
+冲突检查同时覆盖 `Reserved` 与 `Bound` owner：同地址族 wildcard 与具体地址重叠；
+未设置 `IPV6_V6ONLY` 的 IPv6 wildcard 会与 IPv4 端点重叠；ifindex 为 `None` 时
+与任意接口重叠。`SO_REUSEADDR`/`SO_REUSEPORT` 只有双方快照均兼容时才放行。
 
 ### `bind_port(task, socket, endpoint)` 统一入口
 
 `sys_bind` 应调用 `PortManager::bind_port()` 而不是手动 `check + bind`。该方法：
 
-1. 非 IP endpoint（如 Unix）直接调用 `socket.bind()`。
-2. 对 IP endpoint 先 `check_bind_conflict`，冲突返回 `EADDRINUSE`。
-3. bind 成功后写入 `TCP_PORTS` 或 `UDP_PORTS` 表。
+1. 非 TCP/UDP IP endpoint（如 Raw/Packet）直接调用 `socket.bind()`。
+2. TCP/UDP 在不持 registry 锁时从 socket 快照不可变 `BindIntent`。
+3. 执行 `reserve -> socket.bind -> commit/abort`；成功后把唯一的
+   `PortReservation` 安装进 socket，socket Drop 时精确释放自己的 owner。
 
 ## BoundInner
 
@@ -113,7 +109,7 @@ pub struct BoundInner {
 `listen_endpoint(buf)` 从用户态 `sockaddr` 字节流解析出 `IpListenEndpoint`：
 
 - 未指定地址（`0.0.0.0`）→ `addr: None`（表示监听所有接口）
-- 端口为 0 → 自动分配临时端口
+- 端口为 0 → 保持未分配；只有拿到 socket `Arc` 的 bind/auto-bind 事务才能分配
 
 `to_endpoint(listen_endpoint)` 将 `IpListenEndpoint` 转换为完整 `IpEndpoint`：将 `addr: None` 替换为实际接口 IP 或回环地址。
 
@@ -133,34 +129,27 @@ pub struct BoundInner {
 
 | Socket 类型 | reuse_addr 存储 | 冲突影响 |
 |------------|----------------|----------|
-| TcpSocket | `AtomicBool` 字段 | TCP 端口冲突检测不检查 `SO_REUSEADDR`（Linux TCP 语义：`TIME_WAIT` 时忽略，此处端口表已注销即不冲突） |
-| UdpSocket | `Inner.reuse_addr` 布尔字段 | `check_bind_conflict` 中双方都启用时跳过冲突；`check_udp_conflict` 同样处理 |
+| TcpSocket | `AtomicBool` 字段 | 作为 `BindIntent` 快照的一部分参与双方兼容判断 |
+| UdpSocket | `Inner.reuse_addr` 布尔字段 | 作为 `BindIntent` 快照的一部分参与双方兼容判断 |
 | RawSocket / Unix / 其他 | 默认 `EOPNOTSUPP` | 不参与冲突检测 |
 
 ## 测试映射
 
 | 特性 | 入口点 | LTP 用例 | 状态 |
 |------|--------|----------|------|
-| 临时端口分配 | `alloc_ephemeral_port` | — | 间接验证 |
-| TCP 端口冲突 | `check_bind_conflict` / `bind_port` | `bind01`, `bind02` | pass |
-| UDP 端口冲突 + REUSEADDR | `check_udp_conflict` | `bind03`, `bind04` | pass |
+| 并发端口预留 | `reserve` / `commit` | `KTEST=net_smp` | 双架构 8 核 pass |
+| 精确 owner 释放 | `PortReservation::drop` | `KTEST=net_smp` | 双架构 8 核 pass |
+| TCP/UDP 与 netns 隔离 | `PortRegistry` | `KTEST=net_smp` | 双架构 8 核 pass |
 | 地址回写 | `fill_with_endpoint` | `getsockname01` | pass |
 | 地址解析 | `listen_endpoint` | `socket01` | pass |
 | BoundInner 状态追踪 | `BoundInner::bind` / `is_bound` | — | 间接验证 |
 
 ## Known Issues
 
-1. **PortManager 仅支持 IPv4 端口表**
-   - `addr_to_ipv4()` 将 `Option<IpAddress>` 截断为 `Option<Ipv4Address>`，IPv6 地址被忽略。
-   - 影响: IPv6 socket 的 `check_bind_conflict` 退化为仅按端口匹配。
-   - 修复方向: `TCP_PORTS`/`UDP_PORTS` 的 key 扩展为 `(port, addr_family)` 或使用完整 `IpAddress`。
+1. **临时端口选择可预测**
+   - 当前在每个 netns 内顺序扫描，没有 Linux 的 hash/randomized ephemeral 选择。
+   - 正确性不受影响，但高并发短连接下可能形成相邻 bucket 热点。
 
-2. **临时端口耗尽不重试**
-   - `alloc_ephemeral_port` 扫描一轮后仍无空闲端口则返回 0。
-   - 影响: 防火墙或大量短连接场景可能意外端口分配失败。
-   - 修复方向: 引入端口回收机制或参考 Linux 的 `inet_csk_get_port` 重试策略。
-
-3. **fd_table 扫描竞争**
-   - `check_bind_conflict` 的 fallback 路径持有 `files_ref.lock()`。
-   - 影响: 高并发 bind 场景可能因锁竞争导致延迟。
-   - 方向: 全局端口表应覆盖全场景，消除 fd_table fallback。
+2. **reuse 语义仍是简化模型**
+   - 当前以双方 `reuse_addr` 或双方 `reuse_port` 作为兼容条件，尚未完整建模 Linux
+     针对 TCP listen、TIME_WAIT、有效 UID 和 multicast 的细分规则。

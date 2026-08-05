@@ -13,10 +13,25 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> isize {
     }
     let task = current_task().unwrap();
     let vm_ref = task.process.vm();
-    if let Err(errno) = vm_ref.read(|vm| {
-        vm.validate_msync_range(addr, length, flags.contains(MsyncFlags::MS_INVALIDATE))
+    let ranges = match vm_ref.read(|vm| {
+        vm.validate_msync_range(addr, length, flags.contains(MsyncFlags::MS_INVALIDATE))?;
+        vm.msync_page_ranges(addr, length)
     }) {
-        return errno;
+        Ok(ranges) => ranges,
+        Err(errno) => return errno,
+    };
+    // VM 锁已释放。MS_SYNC 的后端 I/O 绝不能与 VM/PTE 锁或 TLB ack 等待重叠。
+    for (inode, start_page, end_page) in ranges {
+        let Some(page_cache) = inode.page_cache() else {
+            continue;
+        };
+        if flags.contains(MsyncFlags::MS_SYNC) {
+            if page_cache.writeback_range(start_page, end_page).is_err() {
+                return EIO;
+            }
+        } else {
+            page_cache.queue_writeback();
+        }
     }
     info!(
         "[sys_msync] addr: {:X}, length: {:X}, flags: {:?}",

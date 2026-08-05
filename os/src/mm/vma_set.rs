@@ -9,13 +9,13 @@
 //! `user_area_count`/`user_page_count` 必须只统计用户 VMA。
 
 use super::user_mapper::UserMapper;
-use super::vma::{MapFlags, MapPermission, Vma, VmaUnmapReason};
-use super::{MemoryError, PageTable, VirtAddr, VirtPageNum};
+use super::vma::{FileVmaRmap, MapFlags, MapPermission, Vma, VmaUnmapReason};
+use super::{AddressSpace, MemoryError, PageTable, PageTableImpl, VirtAddr, VirtPageNum};
 use crate::config::*;
 use crate::fs::vfs::IndexNode;
 use crate::syscall::errno::{EACCES, EINVAL, ENOMEM, EPERM};
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::warn;
 
@@ -23,7 +23,13 @@ const STACK_GUARD_GAP_PAGES: usize = 256;
 const GROWSDOWN_MAX_FAULT_GAP_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE;
 
 pub(super) struct VmaSet {
-    vmas: BTreeMap<VirtPageNum, Vma>,
+    /// VMA 的唯一强引用。PageCache 的 i_mmap 仅保存对应的 Weak，因此注册表
+    /// 不会延长 munmap/exec 后 VMA 的生命周期。
+    vmas: BTreeMap<VirtPageNum, Arc<Vma>>,
+    /// 与 VMA 本体分离的 PageCache rmap 身份记录。PageCache 只弱持有该记录，
+    /// 绝不能弱持有 `Arc<Vma>`，否则 `Arc::get_mut` 无法证明 VmaSet 独占 VMA。
+    file_rmaps: BTreeMap<VirtPageNum, Arc<FileVmaRmap>>,
+    owner: Option<Weak<AddressSpace<PageTableImpl>>>,
     mmap_holes: BTreeMap<VirtPageNum, VirtPageNum>,
     user_area_count: usize,
     user_page_count: usize,
@@ -88,6 +94,58 @@ fn errno_to_memory_error(errno: isize) -> MemoryError {
 }
 
 impl VmaSet {
+    /// 绑定外层 AddressSpace；VMA 只有在此之后才可被 PageCache 注册。
+    pub(super) fn set_owner(&mut self, owner: Weak<AddressSpace<PageTableImpl>>) {
+        self.owner = Some(owner.clone());
+        for area in self.vmas.values_mut() {
+            if let Some(area) = Arc::get_mut(area) {
+                area.user_address_space = Some(owner.clone());
+            }
+        }
+        let file_rmaps: Vec<_> = self
+            .vmas
+            .iter()
+            .filter_map(|(start, area)| FileVmaRmap::from_vma(area).map(|rmap| (*start, Arc::new(rmap))))
+            .collect();
+        for (start, rmap) in file_rmaps {
+            self.insert_file_rmap(start, rmap);
+        }
+    }
+
+    /// 从唯一 owner 中取回可变 VMA。i_mmap 只保存 Weak；rmap walker 在取得 VM
+    /// 锁前已经丢弃临时 Arc，因此这里的强引用不唯一表示内部不变量被破坏。
+    fn take_vma(&mut self, start: VirtPageNum) -> Result<Vma, isize> {
+        let area = self.vmas.remove(&start).ok_or(EINVAL)?;
+        self.remove_file_rmap(start);
+        match Arc::try_unwrap(area) {
+            Ok(area) => Ok(area),
+            Err(_) => panic!("VmaSet VMA escaped its VM-lock lifetime"),
+        }
+    }
+
+    fn put_vma(&mut self, mut area: Vma) {
+        if let Some(owner) = &self.owner {
+            area.user_address_space = Some(owner.clone());
+        }
+        let area = Arc::new(area);
+        let start = area.vm_start();
+        let file_rmap = FileVmaRmap::from_vma(&area).map(Arc::new);
+        self.vmas.insert(start, area);
+        if let Some(rmap) = file_rmap {
+            self.insert_file_rmap(start, rmap);
+        }
+    }
+
+    fn insert_file_rmap(&mut self, start: VirtPageNum, rmap: Arc<FileVmaRmap>) {
+        FileVmaRmap::register(&rmap);
+        self.file_rmaps.insert(start, rmap);
+    }
+
+    fn remove_file_rmap(&mut self, start: VirtPageNum) {
+        if let Some(rmap) = self.file_rmaps.remove(&start) {
+            FileVmaRmap::unregister(&rmap);
+        }
+    }
     pub(super) fn new() -> Self {
         Self::with_capacity(0)
     }
@@ -98,6 +156,8 @@ impl VmaSet {
         mmap_holes.insert(mmap_start, mmap_end);
         let set = Self {
             vmas: BTreeMap::new(),
+            file_rmaps: BTreeMap::new(),
+            owner: None,
             mmap_holes,
             user_area_count: 0,
             user_page_count: 0,
@@ -132,29 +192,27 @@ impl VmaSet {
         self.vmas.is_empty()
     }
 
-    pub(super) fn iter(&self) -> alloc::collections::btree_map::Values<'_, VirtPageNum, Vma> {
-        self.vmas.values()
-    }
-
-    pub(super) fn iter_mut(
-        &mut self,
-    ) -> alloc::collections::btree_map::ValuesMut<'_, VirtPageNum, Vma> {
-        self.vmas.values_mut()
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Vma> {
+        self.vmas.values().map(Arc::as_ref)
     }
 
     pub(super) fn get_by_start(&self, start_vpn: VirtPageNum) -> Option<&Vma> {
-        self.vmas.get(&start_vpn)
+        self.vmas.get(&start_vpn).map(Arc::as_ref)
     }
 
     pub(super) fn get_mut_by_start(&mut self, start_vpn: VirtPageNum) -> Option<&mut Vma> {
-        self.vmas.get_mut(&start_vpn)
+        self.vmas.get_mut(&start_vpn).and_then(Arc::get_mut)
     }
 
     pub(super) fn last_non_user(&self) -> Option<&Vma> {
-        self.vmas.values().rev().find(|area| !area.vm_is_user())
+        self.vmas.values().rev().map(Arc::as_ref).find(|area| !area.vm_is_user())
     }
 
     pub(super) fn clear(&mut self) {
+        for rmap in self.file_rmaps.values() {
+            FileVmaRmap::unregister(rmap);
+        }
+        self.file_rmaps.clear();
         self.vmas.clear();
         self.mmap_holes.clear();
         self.user_area_count = 0;
@@ -196,7 +254,7 @@ impl VmaSet {
 
     pub(super) fn find_user_vma_mut(&mut self, vpn: VirtPageNum) -> Option<&mut Vma> {
         let start = self.find_user_vma_key(vpn)?;
-        self.vmas.get_mut(&start)
+        self.vmas.get_mut(&start).and_then(Arc::get_mut)
     }
 
     pub(super) fn expand_growsdown_for_fault(
@@ -247,13 +305,12 @@ impl VmaSet {
         self.reserve_mmap_range(fault_vpn, old_start)
             .map_err(errno_to_memory_error)?;
         let mut area = self
-            .vmas
-            .remove(&old_start)
-            .ok_or(MemoryError::BadAddress)?;
+            .take_vma(old_start)
+            .map_err(|_| MemoryError::BadAddress)?;
         let old_pages = area_page_count(&area);
         let is_user = area.vm_is_user();
         if let Err(errno) = area.expand_down_to(VirtAddr::from(fault_vpn)) {
-            self.vmas.insert(old_start, area);
+            self.put_vma(area);
             let _ = self.release_mmap_range(fault_vpn, old_start);
             return Err(errno_to_memory_error(errno));
         }
@@ -263,7 +320,7 @@ impl VmaSet {
                 .user_page_count
                 .saturating_add(area_page_count(&area).saturating_sub(old_pages));
         }
-        self.vmas.insert(new_start, area);
+        self.put_vma(area);
         self.debug_assert_invariants();
         Ok(Some(new_start))
     }
@@ -296,7 +353,7 @@ impl VmaSet {
         self.reserve_mmap_range(start, end)?;
         let is_user = new_area.vm_is_user();
         let pages = area_page_count(&new_area);
-        self.vmas.insert(start, new_area);
+        self.put_vma(new_area);
         if is_user {
             self.user_area_count += 1;
             self.user_page_count += pages;
@@ -310,7 +367,8 @@ impl VmaSet {
         mapper: &mut UserMapper<'_, T>,
         start_vpn: VirtPageNum,
     ) -> Result<(), MemoryError> {
-        if let Some(mut area) = self.vmas.remove(&start_vpn) {
+        if self.vmas.contains_key(&start_vpn) {
+            let mut area = self.take_vma(start_vpn).map_err(|_| MemoryError::AreaNotFound)?;
             let start = area.vm_start();
             let end = area.vm_end();
             self.untrack_area(&area);
@@ -344,16 +402,16 @@ impl VmaSet {
             2
         };
         self.try_reserve(additional)?;
-        let mut area = self.vmas.remove(&area_start).ok_or(EINVAL)?;
+        let mut area = self.take_vma(area_start)?;
         if start_vpn == area_start_vpn && end_vpn == area_end_vpn {
-            self.vmas.insert(area_start_vpn, area);
+            self.put_vma(area);
             self.debug_assert_invariants();
             Ok(area_start_vpn)
         } else if start_vpn == area_start_vpn {
             let second = match area.into_two(end_vpn) {
                 Ok(second) => second,
                 Err(_) => {
-                    self.vmas.insert(area_start_vpn, area);
+                    self.put_vma(area);
                     return Err(EINVAL);
                 }
             };
@@ -369,7 +427,7 @@ impl VmaSet {
             let second = match area.into_two(start_vpn) {
                 Ok(second) => second,
                 Err(_) => {
-                    self.vmas.insert(area_start_vpn, area);
+                    self.put_vma(area);
                     return Err(EINVAL);
                 }
             };
@@ -385,7 +443,7 @@ impl VmaSet {
             let (second, third) = match area.into_three(start_vpn, end_vpn) {
                 Ok(parts) => parts,
                 Err(_) => {
-                    self.vmas.insert(area_start_vpn, area);
+                    self.put_vma(area);
                     return Err(EINVAL);
                 }
             };
@@ -428,7 +486,7 @@ impl VmaSet {
                 area_end_vpn
             };
             let target_start = self.split_for_range(area_start, overlap_start, overlap_end)?;
-            let mut target = self.vmas.remove(&target_start).ok_or(EINVAL)?;
+            let mut target = self.take_vma(target_start)?;
             let released_start = target.vm_start();
             let released_end = target.vm_end();
             self.untrack_area(&target);
@@ -442,6 +500,58 @@ impl VmaSet {
             Ok(found_area)
         } else {
             Err(EINVAL)
+        }
+    }
+
+    /// PageCache rmap 侧对一个仍存活的 file VMA 执行 mkclean 或 truncate zap。
+    /// 调用者已经持有所属 VM 锁；这里不获取 PageCache 锁，也不执行 TLB ack。
+    pub(super) fn mkclean_file_page<T: PageTable>(
+        &mut self,
+        mapper: &mut UserMapper<'_, T>,
+        expected_rmap: &Arc<FileVmaRmap>,
+        page_index: usize,
+        unmap: bool,
+    ) {
+        let start = self
+            .file_rmaps
+            .iter()
+            .find_map(|(start, rmap)| Arc::ptr_eq(rmap, expected_rmap).then_some(*start));
+        let Some(start) = start else {
+            return;
+        };
+        let Some(area) = self.get_mut_by_start(start) else {
+            return;
+        };
+        if !area.flags.contains(MapFlags::MAP_SHARED) || area.map_file.is_none() {
+            return;
+        }
+        let file_byte = match page_index.checked_mul(PAGE_SIZE) {
+            Some(value) => value,
+            None => return,
+        };
+        let relative = match file_byte.checked_sub(area.map_file_offset) {
+            Some(value) => value,
+            None => return,
+        };
+        if relative & (PAGE_SIZE - 1) != 0 {
+            return;
+        }
+        let vpn = VirtPageNum(area.vm_start().0.saturating_add(relative >> PAGE_SIZE_BITS));
+        if !area.vm_contains(vpn) || !mapper.is_mapped(vpn) {
+            return;
+        }
+        if unmap {
+            if mapper.unmap_user_page_if_mapped(vpn).ok() == Some(true) {
+                area.note_file_pte_unmapped(vpn);
+                if let Some(frame) = area.inner.remove_in_memory(&vpn) {
+                    mapper.retire_frame(frame);
+                }
+            }
+            return;
+        }
+        let readonly = area.map_perm.difference(MapPermission::W);
+        if mapper.set_user_flags(vpn, readonly).is_ok() {
+            let _ = mapper.clear_dirty(vpn);
         }
     }
 
@@ -472,7 +582,7 @@ impl VmaSet {
             };
 
             if advice == MADV_DONTNEED {
-                let area = self.vmas.get_mut(&area_start).ok_or(ENOMEM)?;
+                let area = self.get_mut_by_start(area_start).ok_or(ENOMEM)?;
                 if area.map_file.is_none() && area.flags.contains(MapFlags::MAP_PRIVATE) {
                     area.discard_range(mapper, cursor, advise_end)
                         .map_err(|_| EINVAL)?;
@@ -492,7 +602,7 @@ impl VmaSet {
             }
             if advice == MADV_DONTFORK || advice == MADV_DOFORK {
                 let target_start = self.split_for_range(area_start, cursor, advise_end)?;
-                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                let area = self.get_mut_by_start(target_start).ok_or(ENOMEM)?;
                 area.dont_fork = advice == MADV_DONTFORK;
             }
             if advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK {
@@ -503,7 +613,7 @@ impl VmaSet {
                     }
                 }
                 let target_start = self.split_for_range(area_start, cursor, advise_end)?;
-                let area = self.vmas.get_mut(&target_start).ok_or(ENOMEM)?;
+                let area = self.get_mut_by_start(target_start).ok_or(ENOMEM)?;
                 area.wipe_on_fork = advice == MADV_WIPEONFORK;
             }
 
@@ -739,7 +849,7 @@ impl VmaSet {
         let is_user = area.vm_is_user();
         self.reserve_mmap_range(start_vpn, end_vpn)?;
         let expand_result = {
-            let area = self.vmas.get_mut(&key).ok_or(EINVAL)?;
+            let area = self.get_mut_by_start(key).ok_or(EINVAL)?;
             area.expand_to::<T>(VirtAddr::from(new_end))
         };
         if let Err(errno) = expand_result {
@@ -762,12 +872,11 @@ impl VmaSet {
         area_start: VirtPageNum,
         prot: MapPermission,
     ) -> Result<(), isize> {
-        let area = self.vmas.get_mut(&area_start).ok_or(EINVAL)?;
-        let actual_prot = if area.flags.contains(MapFlags::MAP_SHARED) {
-            prot
-        } else {
-            prot - MapPermission::W
-        };
+        let area = self.get_mut_by_start(area_start).ok_or(EINVAL)?;
+        // 文件 MAP_SHARED 的 W 位只能由 store fault 在 PageCache 脏页所有权已经
+        // 建立后恢复。mprotect 只更新 VMA 的期望权限，不能绕过 frame_for_write()
+        // 直接让 resident PTE 可写；否则写回完成后的用户 store 不会再次标脏。
+        let actual_prot = prot - MapPermission::W;
         let mut failed_mapped_page = false;
         area.inner.for_each_in_memory_vpn(|vpn| {
             if mapper.set_user_flags(vpn, actual_prot).is_err() {
@@ -789,7 +898,11 @@ impl VmaSet {
         let old_vmas = core::mem::take(&mut self.vmas);
         self.clear();
         let mut first_error = None;
-        for (_, mut area) in old_vmas {
+        for (_, area) in old_vmas {
+            let mut area = match Arc::try_unwrap(area) {
+                Ok(area) => area,
+                Err(_) => panic!("VmaSet VMA escaped its VM-lock lifetime"),
+            };
             if let Err(error) = area.unmap(mapper, VmaUnmapReason::RemoveArea) {
                 first_error.get_or_insert(error);
             }
@@ -818,7 +931,7 @@ impl VmaSet {
     }
 
     fn insert_split_piece(&mut self, area: Vma) {
-        self.vmas.insert(area.vm_start(), area);
+        self.put_vma(area);
     }
 
     fn untrack_area(&mut self, area: &Vma) {
@@ -955,7 +1068,7 @@ impl VmaSet {
             .vmas
             .values()
             .filter(|area| area.vm_is_user())
-            .map(area_page_count)
+            .map(|area| area_page_count(area.as_ref()))
             .fold(0usize, |acc, pages| acc.saturating_add(pages));
         debug_assert_eq!(
             self.user_area_count, user_area_count,

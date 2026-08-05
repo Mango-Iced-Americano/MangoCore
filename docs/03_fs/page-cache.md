@@ -2,9 +2,9 @@
 title: "PageCache 页面缓存"
 module: "fs/page_cache"
 category: fs
-status: draft
+status: current
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -38,6 +38,15 @@ related_docs:
 PageCache 是 MangoCore VFS 层的页面级数据缓存，位于 IndexNode trait 与块设备后端之间。它以 4KB 页为粒度缓存文件数据，通过 PageState 状态机管理脏页追踪、回写和回收。设计参考 DragonOS 的 `kernel/src/filesystem/page_cache.rs`，实现基于 Linux 回写机制的简化模型。
 
 PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait 桥接到 ext4、tmpfs、ramfs 等不同后端。
+
+当前 SMP 实现以 `op_gate` 建立操作级边界，以每页 `PageEntry.data` 保护物理页
+字节。不同页可以并行推进，但用户页访问必须在 inode 与 PageCache 锁全部释放后
+通过有界 kernel bounce 完成。
+
+文件 `MAP_SHARED` 使用独立的 `FileVmaRmap` 身份记录。PageCache 只保存它的
+`Weak`，walker 升级后持有强引用快照，释放 PageCache 注册表锁再进入目标
+`AddressSpace`；VM 锁内用 `Arc::ptr_eq` 重验 VMA 身份后才执行 mkclean 或 truncate
+unmap。强引用覆盖整个重验窗口，避免 allocator 地址复用造成 ABA 误命中。
 
 ## PageState 状态机
 
@@ -75,6 +84,7 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 ```rust
 struct PageEntry {
     page: Arc<FrameTracker>,     // 物理页面
+    data: RwLock<()>,            // 只在 with_bytes{,_mut} 闭包内保护页面字节
     state: AtomicU8,             // PageState 编码
     valid_mask: AtomicU8,        // 512B segment 有效性位图
     flags: AtomicU8,             // PG_REFERENCED, PG_REDIRTIED
@@ -93,13 +103,26 @@ pub trait PageCacheBackend: Send + Sync {
 }
 ```
 
-默认 `write_pages` / `read_pages` 回退为逐页调用。支持合并 I/O 的后端（如 ext4）可覆盖实现批量读写。`BlockPageCacheBackend` 是块设备后端的默认实现，将页索引转换为块偏移后通过 `BlockDevice` trait 驱动。
+默认 `write_pages` / `read_pages` 回退为逐页调用，支持合并 I/O 的后端（如 ext4）可覆盖实现批量读写。当前生产路径分别由 `Ext4PageCacheBackend`、`LwExt4PageCacheBackend`、`FatPageCacheBackend` 以及 tmpfs/ramfs 的内部后端承接；`BlockPageCacheBackend` 是尚未接入具体文件系统的通用块设备实现。
+
+## SMP 锁与 I/O API
+
+`PageCache::op_gate` 的读锁用于普通 read/write 与 writeback，写锁用于 truncate、
+invalidate、clean-page eviction 以及 I/O 后的 entry 发布。元数据固定按
+`entries -> inner` 获取；两者释放后才能进入单页 `PageEntry.data`，page data
+绝不能反向取得 PageCache 元数据锁。
+
+crate 内文件路径使用 `read_kernel`、`write_kernel`、`read_at_user` 和
+`write_at_user`。后两个接口按不超过 `IO_CHUNK_SIZE` 的内核缓冲分块：先在锁外
+完成 user copy，再进入 PageCache，或先复制到内核缓冲、释放 PageCache 锁后再写回
+用户空间。写回持有 data read lock 直到 backend I/O 完成；并发写者取得 data write
+lock 后再发布 Dirty，因此不会写出撕裂页面，也不会把新写入错误清成 UpToDate。
 
 ## 二阶段读写模式
 
 所有读写路径采用两阶段模式，核心约束为**不在持有锁时执行用户态拷贝**：
 
-### 读路径（read / read_user）
+### 读路径（read_kernel / read_at_user）
 
 ```
 Phase 1（持锁）: 收集
@@ -108,12 +131,14 @@ Phase 1（持锁）: 收集
     ensure_fully_valid(page_index)          // 填充无效 segment
     copies.push(CopyItem { entry, offset, len })
 
-Phase 2（无锁）: 拷贝
+Phase 2（逐页 data 锁）: 拷贝到 kernel buffer
   for each item in copies:
-    copy_from_slice(src, dst)   // 或 UserBuffer::write_at
+    entry.with_bytes(|src| copy_to_kernel_bounce(src))
 ```
 
-### 写路径（write / write_user）
+`read_at_user` 在 Phase 2 完成并释放全部 PageCache 锁后才把 bounce 写入用户空间。
+
+### 写路径（write_kernel / write_at_user）
 
 ```
 Phase 1（持锁）: 收集
@@ -123,10 +148,11 @@ Phase 1（持锁）: 收集
     // 页超出 EOF → 跳过后端读取，使用零填充
     copies.push(CopyItem { entry, offset, len, full_overwrite })
 
-Phase 2（无锁）: 拷贝
+Phase 2（逐页 data 写锁）: 拷贝并发布 Dirty
   for each item in copies:
-    copy data from user buffer to entry.as_slice_mut()
+    entry.with_bytes_mut(|dst| copy_from_kernel_bounce(dst))
     mark_valid_and_check_full()
+    mark_dirty_after_copy()
 ```
 
 单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。
@@ -208,7 +234,7 @@ maybe_reclaim_fs_caches:
 
 ### 锁约束
 
-**不可在持有 inode 锁时调用 page cache invalidate**。因为 `invalidate_range` 需要获取 `entries` 和 `inner` 锁，如果调用者已经持有 inode 的内部锁，且 PageCache 的 writeback 路径需要 inode 锁（如 ext4 后端写入需要获取 inode 信息），就可能产生死锁。规范做法：在调用任何 PageCache 方法前释放 inode 锁。
+**不可在持有 inode 锁时调用 page cache invalidate**。因为 `invalidate_range` 需要独占 `op_gate` 后获取 `entries` 和 `inner` 锁，如果调用者已经持有 inode 的内部锁，且 PageCache 的 writeback 路径需要 inode 锁（如 ext4 后端写入需要获取 inode 信息），就可能产生死锁。规范做法：在调用任何 PageCache 方法前释放 inode 锁。
 
 PageCache 自身的 `inner` 和 `entries` 使用 `spin::Mutex`，不依赖调度器，因此即使在中断上下文中也安全。但不可重入：在持有 PageCache 锁时不得再次锁同一个 PageCache 实例。
 
@@ -231,10 +257,12 @@ struct InnerPageCache {
 
 ```rust
 pub struct PageCache {
+    op_gate: RwLock<()>,
     inner: Mutex<InnerPageCache>,
     backend: Mutex<Option<Arc<dyn PageCacheBackend>>>,
     inode: Mutex<Option<Weak<dyn IndexNode>>>,
     entries: Mutex<Vec<Option<Arc<PageEntry>>>>, // 页索引 → 页条目
+    i_mmap: Mutex<BTreeMap<usize, Weak<FileVmaRmap>>>,
     unevictable: AtomicBool,       // true = 不可回收（tmpfs/shmem）
     clock_hand: AtomicUsize,       // clock sweep 光标
 }
@@ -267,5 +295,6 @@ pub struct PageCache {
 4. **partial-write 与读回一致性**
    `ensure_fully_valid` 在部分写入后补读后端数据时，如果后端数据在两次操作间发生变更（外部修改），可能读取到旧数据。当前场景下 MangoCore 是唯一写入者，此问题不存在；但未来支持多核或共享存储时需要处理。
 
-5. **PG_REDIRTIED 与多写者**
-   写回期间 `PG_REDIRTIED` 只能标记一次。如果多个写入者在写回期间并发写入，后一个写入者无法感知前一个的 redirty 标志已被消耗。目前单核抢占式调度下此情况不会发生。
+5. **同页写者的串行开销**
+   多个 CPU 写同一页时由 `PageEntry.data` 串行化；这保证字节复制与 Dirty 发布的一致性，
+   但不会为同一 4 KiB 页提供并行吞吐。不同页仍可分别取得自己的 data lock。

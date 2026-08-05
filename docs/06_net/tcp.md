@@ -1,9 +1,9 @@
 ---
 title: "TCP 协议实现"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 tags: [net, tcp, smoltcp, state-machine]
 ---
 
@@ -14,6 +14,11 @@ tags: [net, tcp, smoltcp, state-machine]
 TCP 子系统基于 smoltcp 协议栈实现，使用 6 状态 `Inner` 枚举管理 TCP 状态机。各状态变体封装自己的数据（smoltcp handle、缓存 endpoint、连接结果等），通过 `Inner` 枚举统一 match 分发操作。
 
 设计对标 DragonOS `net/socket/inet/stream/` 架构，兼顾 Linux TCP 语义兼容性。
+
+SMP 下 N1 socket lifecycle 只能向下进入一个 N2 DeviceStack；栈内完成 route/binding
+重验和 smoltcp 操作，释放栈锁后才更新 pollee 或唤醒 EventWaitQueue/epoll。接收
+数据先进入内核 buffer，全部网络锁释放后再 copyout。WaitQueue 条件闭包只检查
+readiness，不能在闭包内同步 poll。
 
 ## 源文件地图
 
@@ -320,7 +325,8 @@ pub accept_waiters: EventWaitQueue,    // 等待新连接 (accept)
 
 ## 唤醒机制
 
-`wake_tcp_waiters()` 定义在 `net/socket/mod.rs:854`，每次 `NET_INTERFACE.poll()` 后调用：
+`wake_tcp_waiters()` 定义在 `net/socket/mod.rs`，由 CPU0 poll worker 在释放
+DeviceStack 后调用：
 
 ```rust
 pub fn wake_tcp_waiters() {

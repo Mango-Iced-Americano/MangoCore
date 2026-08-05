@@ -57,16 +57,21 @@ pub fn wait_io_core_with_queue(
 /// 网络 I/O 等待循环，EAGAIN 时挂入指定等待队列。
 ///
 /// # 已废弃
-/// 请使用 `WaitQueue::wait_until_interruptible`（将 `NET_INTERFACE.poll()` 放在条件闭包内）替代。
+/// 请使用 `WaitQueue::wait_until_interruptible`；条件闭包只能检查 socket readiness，
+/// 不能调用 smoltcp poll。
 pub fn wait_io_with_queue<T: Into<isize>>(
     mut f: impl FnMut() -> Result<T, SyscallErr>,
     nonblock: bool,
     wait_queue: &Mutex<WaitQueue>,
     cond: impl FnMut() -> bool,
 ) -> isize {
+    if nonblock {
+        NET_INTERFACE.poll_now();
+    } else {
+        NET_INTERFACE.request_poll();
+    }
     wait_io_core_with_queue(
         || {
-            NET_INTERFACE.poll();
             match f() {
                 Ok(v) => v.into(),
                 Err(e) => -(e as isize),
@@ -81,14 +86,19 @@ pub fn wait_io_with_queue<T: Into<isize>>(
 /// 暂时先保留应急用，应该尽量不去调用
 ///
 /// # 已废弃
-/// 请使用 `WaitQueue::wait_until_interruptible`（将 `NET_INTERFACE.poll()` 放在条件闭包内）替代。
+/// 请使用 `WaitQueue::wait_until_interruptible`；条件闭包只能检查 socket readiness，
+/// 不能调用 smoltcp poll。
 pub fn wait_io<T: Into<isize>>(
     mut f: impl FnMut() -> Result<T, SyscallErr>,
     nonblock: bool,
 ) -> isize {
+    if nonblock {
+        NET_INTERFACE.poll_now();
+    } else {
+        NET_INTERFACE.request_poll();
+    }
     wait_io_core(
         || {
-            NET_INTERFACE.poll();
             match f() {
                 Ok(v) => v.into(),
                 Err(e) => -(e as isize),

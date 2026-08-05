@@ -19,6 +19,8 @@
 //! 2. Register it in `all_tests()` in this file
 
 pub mod runner;
+mod probe;
+mod fs_smp_fixture;
 
 #[path = "waitqueue.rs"]
 mod kt_waitqueue;
@@ -32,6 +34,10 @@ mod kt_smp;
 mod kt_mm;
 #[path = "ext4.rs"]
 mod kt_ext4;
+#[path = "fs_smp.rs"]
+mod kt_fs_smp;
+#[path = "net_smp.rs"]
+mod kt_net_smp;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -55,6 +61,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("smp", kt_smp::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
+        ("fs_smp", kt_fs_smp::tests()),
+        ("net_smp", kt_net_smp::tests()),
     ]
 }
 
@@ -90,14 +98,14 @@ pub fn run_from_bootargs_in_task(config: &crate::bootargs::BootConfig) {
     let results = runner::run_tests_return(config, &all_tests());
     if results.failed > 0 {
         crate::println!(
-            "\x1b[31m# results: {} passed, {} failed, {} total\x1b[0m",
-            results.passed, results.failed, results.total,
+            "\x1b[31m# results: {} passed, {} skipped, {} failed, {} total\x1b[0m",
+            results.passed, results.skipped, results.failed, results.total,
         );
         crate::println!("\x1b[31m[KTEST RESULT: FAIL]\x1b[0m");
     } else {
         crate::println!(
-            "\x1b[32m# results: {} passed, {} failed, {} total\x1b[0m",
-            results.passed, results.failed, results.total,
+            "\x1b[32m# results: {} passed, {} skipped, {} failed, {} total\x1b[0m",
+            results.passed, results.skipped, results.failed, results.total,
         );
         crate::println!("\x1b[32m[KTEST RESULT: PASS]\x1b[0m");
     }

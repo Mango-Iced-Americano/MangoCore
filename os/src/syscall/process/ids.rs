@@ -2,8 +2,7 @@ use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
     check_user_range, copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array,
-    AddressSpaceInner, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserPtr, UserPtrMut,
-    VirtAddr,
+    AddressSpace, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
@@ -970,22 +969,20 @@ where
     F: FnMut(&mut [u8]) -> Result<(), isize>,
 {
     let vm_ref = process.vm();
-    vm_ref.write(|vm| {
-        let mut total = 0usize;
-        for iov in iovecs {
-            if total >= cap {
-                break;
-            }
-            let len = iov.iov_len.min(cap - total);
-            append_process_vm_iov_chunks(vm, iov.iov_base, len, access, &mut f)?;
-            total += len;
+    let mut total = 0usize;
+    for iov in iovecs {
+        if total >= cap {
+            break;
         }
-        Ok(())
-    })
+        let len = iov.iov_len.min(cap - total);
+        append_process_vm_iov_chunks(&vm_ref, iov.iov_base, len, access, &mut f)?;
+        total += len;
+    }
+    Ok(())
 }
 
 fn append_process_vm_iov_chunks<F>(
-    vm: &mut AddressSpaceInner<PageTableImpl>,
+    vm: &Arc<AddressSpace<PageTableImpl>>,
     ptr: *const u8,
     len: usize,
     access: FaultAccess,
@@ -1001,8 +998,9 @@ where
     let end = check_user_range(start, len)?;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let pa = vm.fault_in_user_va(start_va, access)?;
-        let ppn = pa.floor();
+        // 文件共享缺页可能需要在 VM 锁外等待 PageCache writeback；先完成
+        // retry，再在实际复制时重新取得 VM 锁验证 PTE，避免保存失效 PA。
+        vm.fault_in_user_va_retry(start_va, access)?;
         let mut next_vpn = start_va.floor();
         next_vpn.step();
         let mut end_va: VirtAddr = next_vpn.into();
@@ -1012,7 +1010,10 @@ where
         } else {
             end_va.page_offset()
         };
-        f(&mut ppn.get_bytes_array()[start_va.page_offset()..chunk_end])?;
+        vm.write(|inner| {
+            let pa = inner.resolve_user_va(start_va, access)?;
+            f(&mut pa.floor().get_bytes_array()[start_va.page_offset()..chunk_end])
+        })?;
         start = end_va.into();
     }
     Ok(())

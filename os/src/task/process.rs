@@ -1589,7 +1589,7 @@ impl ProcessControlBlock {
     pub fn replace_vm(&self, vm: AddressSpaceInner<PageTableImpl>) {
         let token = vm.token();
         self.trap_context_cache.lock().clear();
-        self.inner.lock().vm = Arc::new(AddressSpace::new(vm));
+        self.inner.lock().vm = AddressSpace::new(vm);
         self.user_token_hint.store(token, Ordering::Relaxed);
     }
 

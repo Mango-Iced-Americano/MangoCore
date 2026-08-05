@@ -2,9 +2,9 @@
 title: "UDP 协议实现"
 module: net/socket/udp
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 code_paths:
   - "os/src/net/socket/inet/datagram/"
 entry_points:
@@ -26,6 +26,12 @@ related_docs:
 # UDP 协议实现
 
 ## 概述
+
+bind 与 auto-bind 都先在 socket lifecycle 锁内形成内核所有的 `BindIntent`，再在
+所属 `NetNamespace::ports` 执行 `reserve -> socket.bind -> commit/abort`；registry
+锁不跨 socket 或 DeviceStack。UDP connect 与首个未连接 send 在 syscall 层先完成
+真实 auto-bind。poll 从 N2 栈内提取内核 packet，释放 N2 后才写 OS rx_queue、通知
+waiter 或 copyout。
 
 UDP 子系统基于 smoltcp 的 `udp::Socket` 实现，通过 `Socket` trait 对外暴露无连接数据报服务。设计以单次非阻塞尝试为基础，通过 `rx_queue` 解耦 smoltcp 接收与用户态消费，通过 `try_deliver_local` 实现本地回环快速路径。所有 I/O 操作遵循 `try_xxx` 约定，不做轮询或内部重试。
 
@@ -80,18 +86,21 @@ struct UdpSocketInner {
 
 ## bind
 
-`UdpSocket::bind()` 处理端口绑定：
+`PortManager::bind_port()` 处理事务性端口绑定，`UdpSocket::bind()` 只消费已经解析
+出的实际端点：
 
-1. 端口为 0 时调用 `PortManager::alloc_ephemeral_port()` 分配临时端口。该函数从 `local_port_range()` 获取范围（32768-60999，匹配 Linux 默认值），跳过 `TCP_PORTS` / `UDP_PORTS` 中已占用的端口。
+1. registry 对端口 0 在 49152..65534 中选取空闲端口，并立即发布 `Reserved` owner。
 2. `INADDR_ANY` 地址映射为 smoltcp 的 `addr: None` 语义。
-3. 通过 `NET_INTERFACE.udp_routed_socket()` 调用底层 `socket.bind()`。
-4. 调用 `bound.lock().bind()` 更新绑定记录，记录 ifindex。
+3. 解锁 registry 后通过 `NET_INTERFACE.udp_routed_socket()` 完成底层 bind 和本地状态提交。
+4. 重新进入同一 netns 按 token + Weak owner commit；失败精确 abort 本次 reservation。
 
 `SO_REUSEADDR` 在 bind 时生效：双方都启用 `SO_REUSEADDR` 时跳过端口冲突检查。已 connect 到特定远端的 UDP socket 不阻止同端口其他 socket 的 bind。
 
 ## connect
 
-`UdpSocket::connect()` 设置 `inner.remote_endpoint`。未 bind 时自动分配临时端口和源 IP（通过 `lookup_source_ip` 选择最匹配的路由地址）。`INADDR_ANY` 映射为本地回环地址（127.0.0.1 或 ::1）。connect 后的 socket 可通过 `try_send()` 直接发送，无需每次指定目标地址。
+`sys_connect()` 先通过 `ensure_auto_bound(Connect)` 为未 bind socket 选择源 IP 并提交
+reservation，随后 `UdpSocket::connect()` 设置 `inner.remote_endpoint`。`INADDR_ANY`
+映射为本地回环地址（127.0.0.1 或 ::1）。connect 后可通过 `try_send()` 直接发送。
 
 UDP 的 connect 是本地状态操作，不产生网络报文。
 
@@ -121,7 +130,8 @@ buffer > 65507 --> EMSGSIZE
 
 ### socket_r_ready
 
-先调用 `NET_INTERFACE.poll()` 驱动协议栈，再检查 `rx_queue` 是否非空。
+只检查已经发布的 `rx_queue`。非阻塞 syscall 在进入 socket 前调用一次有界
+`poll_now()`；阻塞等待由 CPU0 worker 的事件通知推进，readiness 本身不内联 poll。
 
 ## 本地环路优化
 

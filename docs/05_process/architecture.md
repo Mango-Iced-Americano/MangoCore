@@ -222,7 +222,8 @@ task::add_initproc()
 ```
 run_tasks()
     do_wake_expired()
-    NET_INTERFACE.try_poll() periodically
+    run_deferred_poll_retry()
+    request CPU0 network worker periodically
     fs::reclaim::maybe_reclaim_fs_caches()
     drain local zombies
     sample task queue stats
@@ -445,7 +446,8 @@ private futex 表在 PCB 中；shared futex 表是全局 `PROCESS_SHARED_FUTEX`�
 loop {
     poll console input;
     do_wake_expired();
-    NET_INTERFACE.try_poll() periodically;
+    run_deferred_poll_retry();
+    request CPU0 network worker periodically;
     fs::reclaim::maybe_reclaim_fs_caches();
     drain local zombies;
     sample task queue stats;

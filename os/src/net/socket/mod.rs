@@ -145,11 +145,11 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
-/// Listening-only TCP sockets — used for unconditional accept scan after every poll cycle.
+/// Listening-only TCP sockets, scanned after every completed stack poll.
 pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 
 /// Number of tasks currently blocking in accept(). When zero, the
-/// unconditional accept scan in poll_once() is skipped entirely.
+/// listener scan is skipped entirely.
 pub static ACCEPT_WAITER_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
@@ -395,6 +395,30 @@ impl Endpoint {
 
 pub trait Socket: Send + Sync {
     fn bind(&self, endpoint: &Endpoint) -> SyscallRet;
+    /// 在 socket 生命周期锁内把 bind 参数复制为内核所有的 PortRegistry 意图。
+    fn snapshot_bind_intent(
+        &self,
+        _endpoint: &Endpoint,
+    ) -> Result<crate::net::socket::inet::common::port::BindIntent, SyscallErr> {
+        Err(SyscallErr::EOPNOTSUPP)
+    }
+    /// reservation 已在 N0 提交后才安装到 socket；不得在 N0 内调用此方法。
+    fn install_port_reservation(
+        &self,
+        _reservation: crate::net::socket::inet::common::port::PortReservation,
+    ) {
+    }
+    /// 在不持有 PortRegistry 时快照 auto-bind 所需的端点。
+    ///
+    /// 返回 `None` 表示 socket 已绑定或不参与 INET 自动绑定；返回的端点必须是
+    /// 内核所有值，调用者随后通过 `PortManager::bind_port()` 完成事务提交。
+    fn auto_bind_endpoint(
+        &self,
+        _peer: Option<&Endpoint>,
+        _purpose: crate::net::socket::inet::common::port::AutoBindPurpose,
+    ) -> Result<Option<Endpoint>, SyscallErr> {
+        Ok(None)
+    }
     fn listen(&self) -> SyscallRet;
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
     /// 尝试建立连接一次（不阻塞），检查一次握手状态。

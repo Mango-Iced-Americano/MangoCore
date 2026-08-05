@@ -4316,20 +4316,20 @@ Physical Memory
 
 # 7\.1 Network模块概述
 
-Network模块的核心架构基于 `NetInterfaceInner { stacks, bindings }`。每个网络设备对应一个 `DeviceStack`，包含独立的 smoltcp Interface 和 SocketSet。Socket 层通过 `RouteSocketHandle → SocketBinding → smoltcp SocketHandle` 三级间接访问底层协议栈。路由由 `RouteTable/RouteKind/route_output` 管理，端口分配通过 `PortManager` 顺序递增。
+Network 模块以短锁域 `NetDirectory` 管理设备栈和 route 目录。每个网络设备对应一个独立加锁的 `DeviceStackCell`，内部持有 smoltcp Interface、SocketSet 和本地 binding 表。Socket 通过 `RouteSocketHandle → RouteDirectoryEntry → DeviceStackCell → LocalSocketBinding` 访问底层协议栈。端口由每个网络命名空间自己的 `PortRegistry` 以 reserve/commit/abort 事务管理。
 
 核心数据结构：
 
-- `NetInterfaceInner`：全局网络状态，包含 stacks（设备栈集合）和 bindings（socket 绑定表）
-- `DeviceStack`：per-device smoltcp Interface + SocketSet
-- `RouteSocketHandle`：kernel 内部路由/socket 间接句柄，关联到具体的 SocketBinding
-- `SocketBinding`：持有 smoltcp SocketHandle 及 ifindex/proto 等路由元信息
+- `NetDirectory`：只保存 ifindex 到设备栈的强引用，以及 route ID 到设备栈的弱引用；目录锁内不执行 smoltcp
+- `DeviceStackCell`：per-device smoltcp Interface + SocketSet 串行域
+- `RouteSocketHandle`：本次启动中不复用的 kernel route/socket 间接句柄
+- `LocalSocketBinding`：与 SocketSet 同锁域，保存 smoltcp SocketHandle 和协议类型
 - `RouteTable`：`RouteEntry` 列表，支持 Local/Connected/Gateway/Unreachable 四种路由类型
-- `PortManager`：`NEXT_EPHEMERAL_PORT` 原子递增，32768-60999 范围
+- `PortRegistry`：per-netns 端口 owner 表，使用单调 token 精确释放 reservation
 
 关键设计约束：
 
-1. Socket 生命周期由进程 fd table 管理，关闭时同步清理 SocketBinding 和 PortManager 记录
+1. Socket 生命周期由进程 fd table 管理，关闭时由 route 和 `PortReservation` 各自精确清理所属记录
 2. 路由决策（route_output）先查 RouteTable，未命中则填默认路由
 3. DHCP 获取的网关动态更新默认路由
 4. 所有 socket I/O 非阻塞，通过 WaitQueue 实现阻塞语义
@@ -4337,7 +4337,7 @@ Network模块的核心架构基于 `NetInterfaceInner { stacks, bindings }`。�
 分析流程如下：
 
 ```Plain Text
-Socket Create → RouteSocketHandle → SocketBinding → DeviceStack.Interface → smoltcp Socket → Data Transfer → Close → Cleanup
+Socket Create → RouteSocketHandle → NetDirectory → DeviceStackCell → LocalSocketBinding → smoltcp Socket → Close → Cleanup
 ```
 
 ---
@@ -5237,7 +5237,7 @@ Merge
 
 # 7\.2 本章总结
 
-Network模块的核心架构为 `NetInterfaceInner { stacks, bindings }`，每个设备独立 `DeviceStack`。Socket 通过 `RouteSocketHandle → SocketBinding → smoltcp SocketHandle` 三级间接访问。路由由 `RouteTable/RouteKind/route_output` 管理，端口由 `PortManager` 顺序递增分配。
+Network 模块以 `NetDirectory` 和 per-device `DeviceStackCell` 分离目录锁与 smoltcp 锁。Socket 通过不复用的 `RouteSocketHandle` 定位设备栈，再在同一设备锁内重验 `LocalSocketBinding`；端口由 per-netns `PortRegistry` 事务化分配。
 
 最终形成如下网络架构：
 
@@ -5248,7 +5248,7 @@ Socket API (syscall)
       ↓
 RouteSocketHandle
       ↓
-SocketBinding (per-protocol)
+NetDirectory / LocalSocketBinding
       ↓
 DeviceStack.Interface (smoltcp)
       ↓
@@ -7567,6 +7567,5 @@ MangoCore
 > **从发现问题（Phenomenon），到定位问题（Root Cause），再到重构设计（Fix），最后通过Benchmark和Regression完成验证（Verification），不断推动MangoCore由“能够运行”演进为“能够长期稳定运行”的工程化操作系统。**
 > 
 > 
-
 
 

@@ -55,7 +55,7 @@ MangoCore 的发展经历了多个实现阶段。
 
 文件系统阶段引入 ext4、FAT32、tmpfs、procfs 等实现，并通过虚拟文件系统（VFS）抽象向上提供统一访问接口。PageCache 负责文件数据缓存，并服务于 mmap、共享文件映射和缓存优化相关路径。
 
-网络子系统最初采用较直接的 Socket 管理方式；多设备和路由需求增加后，项目重新组织 Socket、设备和路由之间的关系，引入 DeviceStack、RouteSocketHandle、SocketBinding 以及 PortManager 等组件，并在 TcpSocket 内部维护 `fast_route_id`、`fast_ifindex`、`fast_state` 等路由缓存提示字段，用于减少部分已连接 TCP 路径上的重复路由查询。
+网络子系统最初采用较直接的 Socket 管理方式；多设备、路由与 SMP 需求增加后，项目用 `NetDirectory`、per-device `DeviceStackCell` 和不复用的 `RouteSocketHandle` 分离目录查询与 smoltcp 串行域，并以 per-netns `PortRegistry` 管理端口 reservation。
 
 调试与诊断方面，项目增加 heap\_trace、procfs 状态导出、sysfs 调试接口以及部分诊断打印；其中 `zombie_owner` 属于 `heap_trace` feature 下的诊断输出项。
 
@@ -115,7 +115,7 @@ MangoCore 的关键设计集中在 VFS、网络管理和测试反馈三个方面
 
 首先，项目采用虚拟文件系统抽象，将 IndexNode、File、FileSystem 以及 MountFS 进行分层设计，并结合 PageCache 与文件系统各自的元数据缓存机制区分文件数据缓存和元数据管理职责。
 
-其次，在网络子系统中设计了基于RouteSocketHandle和SocketBinding的管理机制，将Socket与具体设备、smoltcp SocketHandle之间的关系集中记录，降低协议处理与设备选择之间的耦合，并通过DeviceStack组织设备、Interface和SocketSet。
+其次，网络子系统以 `RouteSocketHandle` 连接短生命周期 route 目录与设备栈内 binding，在不同时持有目录锁和设备锁的前提下完成两级重验；每个 `DeviceStackCell` 独立组织设备、Interface 与 SocketSet。
 
 最后，项目在重要架构调整后使用功能测试、性能测试或归档日志验证修改效果，降低系统演进过程中的功能退化风险。
 
@@ -177,7 +177,7 @@ MangoCore 的发展按照问题驱动方式推进。项目初期首先完成内�
 
 BusyBox、libc\-test 等测试程序接入后，系统开始支持更复杂的 Linux 用户程序。文件系统部分建立虚拟文件系统（VFS）抽象，并引入 ext4、FAT32、tmpfs、procfs 等文件系统支持。
 
-文件访问规模扩大后，项目引入 PageCache 等缓存机制，以减少重复磁盘访问。网络子系统则重新组织 Socket、路由以及设备之间的关系，引入 RouteSocketHandle、SocketBinding 等结构。
+文件访问规模扩大后，项目引入 PageCache 等缓存机制，以减少重复磁盘访问。网络子系统则以 `RouteSocketHandle`、`NetDirectory` 和 per-device `DeviceStackCell` 重新组织 Socket、路由与设备之间的关系。
 
 此外，项目增加 procfs、sysfs 以及 trace 等调试设施，并补充自动化测试和兼容性验证流程。
 
@@ -350,7 +350,7 @@ TcpSocket UdpSocket RawSocket   Unix sockets
  │      │              │
  └──────┴──────┬───────┘
                │
-        SocketBinding
+        NetDirectory / LocalSocketBinding
                │
         DeviceStack / Interface
                │
@@ -1600,7 +1600,7 @@ User Program
   │  ┌─────────────────────────────────────────┐  │
   │  │ RouteSocketHandle (usize id)           │  │
   │  ├─────────────────────────────────────────┤  │
-  │  │ SocketBinding (ifindex/handle/proto)   │  │
+  │  │ NetDirectory / LocalSocketBinding      │  │
   │  ├─────────────────────────────────────────┤  │
   │  │ DeviceStack (多设备管理)                │  │
   │  ├─────────────────────────────────────────┤  │
@@ -1731,13 +1731,18 @@ RouteSocketHandle 是 MangoCore 网络架构中的关键抽象，用于建立 So
 pub struct RouteSocketHandle(pub(crate) usize);
 ```
 
-RouteSocketHandle 是一个间接 ID（usize），由 `NetInterfaceInner.bindings: BTreeMap<RouteSocketHandle, SocketBinding>` 建立 Socket 与设备绑定的关联。
+`RouteSocketHandle` 是本次启动期间不复用的间接 ID。`NetDirectory.routes` 先把它解析为目标 `DeviceStackCell` 的弱引用；进入设备栈锁后，再由 `DeviceStackInner.bindings` 重验本地 smoltcp handle 和协议。
 
 ```rust
-pub struct SocketBinding {
-    pub ifindex: u32,
-    pub handle: SocketHandle,
-    pub proto: InetProtocol,
+struct RouteDirectoryEntry<'a> {
+    stack: Weak<DeviceStackCell<'a>>,
+    protocol: InetProtocol,
+    state: RouteState,
+}
+
+struct LocalSocketBinding {
+    handle: SocketHandle,
+    protocol: InetProtocol,
 }
 ```
 
@@ -1752,26 +1757,29 @@ Socket
 RouteSocketHandle (usize id)  ←── 逻辑连接标识
    │
    ▼
-SocketBinding
+NetDirectory 中的 RouteDirectoryEntry
    │
-   ├── ifindex (设备索引)
-   ├── handle (smoltcp SocketHandle)
-   └── proto (协议)
+   ├── Weak<DeviceStackCell>
+   ├── protocol / state
+   └── 目录锁内只取得稳定 Arc
    │
    ▼
-DeviceStack 根据 ifindex 查找设备
+DeviceStackCell 锁内重验 LocalSocketBinding
+   │
+   ├── smoltcp SocketHandle
+   └── protocol
    │
    ▼
 具体网络设备
 ```
 
-Socket 与具体 smoltcp SocketHandle、设备 ifindex 之间的关系集中记录在 routing/binding 表中；socket 生命周期仍受设备状态、binding 表和协议状态共同约束。
+两级表避免在全局目录锁下执行 smoltcp，也通过 route ID 不复用和设备锁内重验阻断旧 handle 指向复用 SocketSet slot。
 
 ---
 
-## 7\.6 SocketBinding机制
+## 7\.6 Route 与端口绑定事务
 
-SocketBinding 与 PortManager 职责分离。SocketBinding 负责将 RouteSocketHandle 路由到具体网络设备——记录某个网络 socket 在指定设备上的 ifindex、smoltcp handle 和协议类型，属于路由/设备绑定层。PortManager 独立管理端口表的分配与释放（见 7.9 节）。两者在 bind() 流程中协作：PortManager 校验端口可用性，SocketBinding 记录设备级绑定信息。
+Route binding 与 `PortRegistry` 职责分离：前者定位设备栈中的 smoltcp socket，后者按网络命名空间管理地址/端口 owner。显式 bind 与自动 bind 都使用同一条 reserve → socket bind → commit/abort 事务，失败只撤销本次 reservation。
 
 ### 7\.6\.1 绑定流程
 
@@ -1779,7 +1787,7 @@ SocketBinding 与 PortManager 职责分离。SocketBinding 负责将 RouteSocket
 bind()
        │
        ▼
-  PortManager / TCP_PORTS / UDP_PORTS
+  per-netns PortRegistry::reserve
        │
        ▼
   Port Lookup (端口查找)
@@ -1790,17 +1798,20 @@ bind()
       Yes
        │
        ▼
-  创建或更新端口绑定记录
+  创建 Reserved owner（单调 token）
        │
    ├── 协议
    ├── 本地地址/端口
    └── reuse 相关状态
        │
        ▼
-  插入 Binding Table
+  socket bind / route publish
        │
        ▼
-  Socket 保存 Binding 引用
+  PortRegistry::commit
+       │
+       ▼
+  Socket 保存唯一 PortReservation
        │
        ▼
   返回成功
@@ -1819,28 +1830,27 @@ bind()
 ### 7\.7\.1 核心结构
 
 ```rust
-pub struct DeviceStack<'a> {
-    pub nic: Arc<dyn Iface>,
-    pub device: IfaceDevice,
-    pub iface: Interface,
-    pub sockets: SocketSet<'a>,
+struct DeviceStackCell<'a> {
+    ifindex: u32,
+    state: AtomicU8,
+    inner: Mutex<DeviceStackInner<'a>>,
 }
 
-pub struct NetInterfaceInner<'a> {
-    pub stacks: Vec<DeviceStack<'a>>,
-    pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
+struct NetDirectory<'a> {
+    stacks: BTreeMap<u32, Arc<DeviceStackCell<'a>>>,
+    routes: BTreeMap<RouteSocketHandle, RouteDirectoryEntry<'a>>,
 }
 ```
 
 ### 7\.7\.2 职责划分
 
-- 每个 DeviceStack 维护对应的 smoltcp Interface 和 SocketSet；
+- 每个 `DeviceStackCell` 用一把锁维护对应的 smoltcp Interface、SocketSet 和本地 binding；
 
-- 路由负责设备选择；
+- `NetDirectory` 只负责短暂的设备/route 查询和发布；
 
-- Socket 通过 binding 信息关联具体设备；
+- 获取设备栈 `Arc` 后必须释放目录锁，禁止同时持有两个设备栈锁；
 
-- 多设备场景由 DeviceStack 和 binding 表共同维护。
+- CPU0 worker 负责阻塞路径的异步推进，非阻塞路径只能执行一次有界 try-lock 扫描。
 
 ---
 
@@ -1863,27 +1873,29 @@ pub struct TcpSocket {
 
 ## 7\.9 PortManager 端口管理
 
-源码位置：`os/src/net/socket/inet/common/port.rs`
+源码位置：`os/src/net/socket/inet/common/port/registry.rs`
 
-PortManager 负责管理 TCP/UDP 端口分配。`PortManager` 是静态方法集合，端口占用状态由全局端口表维护：
+`PortManager` 提供 bind 事务入口，实际 owner 表由每个 `NetNamespace` 的 `PortRegistry` 持有：
 
 ```rust
-pub struct PortManager;
+pub struct PortRegistry {
+    next_ephemeral: u16,
+    next_token: u64,
+    buckets: BTreeMap<PortKey, Vec<PortOwner>>,
+}
 ```
 
 PortManager 确保：
 
-- 保证端口唯一性（同一端口不会被重复绑定）；
+- 按地址族、协议、地址、端口、ifindex 与 reuse 规则判断冲突；
 
 - 统一管理端口生命周期（端口释放后可重新使用）；
 
-- 支持快速端口查询；
-
 - 支持端口复用（SO\_REUSEADDR）；
 
-- 避免 fork/dup 后的端口状态不一致。
+- 用 token + socket Weak 精确释放 owner，避免 fork/dup/失败回滚误删 reuse peer。
 
-PortManager 内部通过 `NEXT_EPHEMERAL_PORT: AtomicU16` 实现端口号顺序递增分配（而非随机分配），专门用于避免 `fork()` 后子进程与父进程产生端口冲突。临时端口范围取自 `local_port_range()`（32768-60999）。分配时同时检查 `TCP_PORTS` 和 `UDP_PORTS` 两张端口表，确保跨协议端口唯一。修复历史问题：`bind(127.0.0.1, 0)` 原来返回 EINVAL 已修正为 Linux 语义的端口自动分配。
+临时端口在 registry 锁内从 49152--65534 顺序选择；端口为 0 的显式 bind、connect/listen/send 的自动 bind 共用同一事务。reservation 的 `Drop` 是最终清理保障，正常关闭和中途失败都不会遗留无主条目。
 
 ---
 
@@ -1946,7 +1958,7 @@ PortManager 内部通过 `NEXT_EPHEMERAL_PORT: AtomicU16` 实现端口号顺序�
 
 Unix Domain Socket 由内核内部实现。
 
-RouteSocketHandle（usize id）和 SocketBinding 记录网络 socket 与设备/handle 的间接关联，DeviceStack 管理设备、Interface 和 SocketSet，PortManager 管理端口分配。
+`RouteSocketHandle`、`NetDirectory` 与设备栈内 `LocalSocketBinding` 共同记录网络 socket 和 smoltcp handle 的间接关联；`DeviceStackCell` 隔离各设备的串行域，per-netns `PortRegistry` 管理端口事务。
 
 该结构将协议栈集成、设备管理、端口分配和用户接口适配拆分到不同模块。
 
@@ -2491,8 +2503,8 @@ User Space
   WaitQueue          │                 │
   Signal             │                 │
        │         ├────┼────┤      RouteSocketHandle
-       │         │    │    │      SocketBinding
-       ▼         ▼    ▼    ▼      DeviceStack
+       │         │    │    │      NetDirectory
+       ▼         ▼    ▼    ▼      DeviceStackCell
   Memory       ext4 FAT32 tmpfs   PortManager
        │      procfs sysfs        │
   AddressSpace    │               ▼
@@ -2557,7 +2569,7 @@ User Space
 
 - SocketFile 文件接口适配；
 
-- RouteSocketHandle（usize id）与 SocketBinding；
+- RouteSocketHandle（usize id）、NetDirectory 与 LocalSocketBinding；
 
 - DeviceStack 多设备管理；
 

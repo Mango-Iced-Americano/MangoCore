@@ -2,9 +2,9 @@
 title: "RAW 套接字实现 (Raw Socket)"
 module: "net/socket/raw"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-07-13
+last_updated: 2026-08-05
 code_paths:
   - "os/src/net/socket/inet/raw/"
 entry_points:
@@ -90,7 +90,7 @@ ip_pkg.payload_mut().copy_from_slice(user_buf);
 ip_pkg.fill_checksum();
 ```
 
-`send_to()` 不迁移 handler。它先由路由或 `SO_BINDTODEVICE` 得到输出 ifindex，再通过 `handler_for_ifindex()` 选择该设备栈创建时已有的 handler。发送后执行双轮 `NET_INTERFACE.poll()`：第一轮刷新 TX，第二轮处理可能到达的回复。
+`send_to()` 不迁移 handler。它先由路由或 `SO_BINDTODEVICE` 得到输出 ifindex，再通过 `handler_for_ifindex()` 选择该设备栈创建时已有的 handler。非阻塞首试用一次 `poll_now()` 读取已发布状态；发送后只异步 `request_poll()`，不能用固定轮数假定请求与回复已经往返。
 
 该约束避免多接口 RAW socket 的重复交付：如果把主 `lo` handler 迁到已经拥有 handler 的 `eth0`，同一个 ICMP reply 会被两个 smoltcp raw socket 各入队一次，表现为外网/网关 ping 持续出现 `DUP`，而 loopback ping 正常。
 
@@ -163,7 +163,7 @@ try_send() / send_to()
   │   ├─ IPv4: smoltcp::wire::Ipv4Packet → fill_checksum
   │   └─ IPv6: smoltcp::wire::Ipv6Packet → 可选伪头校验和
   └─ unconnected: 直接 send_slice（用户包含完整 IP 头）
-      └─ raw_routed_socket → NET_INTERFACE.poll() x2
+      └─ raw_routed_socket → request_poll() 异步推进
 ```
 
 ## 接收流程
@@ -194,5 +194,6 @@ try_recv()
 1. **shutdown 未实现**: `RawSocket::shutdown()` 当前返回 `EOPNOTSUPP`。计划实现半关闭语义
 2. **IPv6 头剥离不对称**: IPv6 接收时剥离 40 字节头而 IPv4 保留，与应用层期望可能不一致。当前行为与 Linux 的 `IP_HDRINCL=0` 模式对齐
 3. **多 handler 遍历**: `try_recv()` 和 `socket_r_ready()` 遍历所有 handler 时按顺序返回第一个可用数据。多接口场景下可能存在饥饿
-4. **发送后双轮 poll**: `send_to()` 的 `NET_INTERFACE.poll() x 2` 是经验值。在一些拓扑下可能不足或多余
+4. **发送完成与网络进展分离**：`send_to()` 成功只表示数据已进入内核/协议栈缓冲，
+   实际 TX/RX 由 CPU0 worker 异步推进。
 5. **SO_BINDTODEVICE 无逆向检查**: 接收路径不检查设备绑定，可能收到来自非绑定接口的数据包

@@ -12,7 +12,7 @@ use super::filemap::{filemap_private_fault, filemap_read_fault, filemap_shared_w
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
-use super::{FaultAccess, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use super::{FaultAccess, FaultOutcome, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::utils::error::SyscallErr;
 use log::{error, warn};
 
@@ -84,7 +84,7 @@ pub(super) fn handle_page_fault<T: PageTable>(
     area: &mut Vma,
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
+) -> FaultOutcome {
     PageFaultHandler::handle(area, mapper, ctx)
 }
 
@@ -93,10 +93,15 @@ impl PageFaultHandler {
         area: &mut Vma,
         mapper: &mut UserMapper<'_, T>,
         ctx: FaultContext,
-    ) -> Result<PhysAddr, MemoryError> {
-        check_area_permission(area, ctx)?;
+    ) -> FaultOutcome {
+        if let Err(error) = check_area_permission(area, ctx) {
+            return FaultOutcome::Error(error);
+        }
 
-        let action = Self::classify(area, mapper, ctx)?;
+        let action = match Self::classify(area, mapper, ctx) {
+            Ok(action) => action,
+            Err(error) => return FaultOutcome::Error(error),
+        };
         let action_tag = match action {
             FaultAction::LazyAlloc => 0usize,
             FaultAction::FileBackedRead => 1,
@@ -115,7 +120,7 @@ impl PageFaultHandler {
             // 文件映射页首次读取/执行：直接映射文件页缓存。
             FaultAction::FileBackedRead => filemap_read_fault(area, mapper, ctx),
             // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
-            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, mapper, ctx),
+            FaultAction::FileBackedSharedWrite => return filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
             // 压缩匿名页再次访问：解压后恢复页表映射。
@@ -129,7 +134,7 @@ impl PageFaultHandler {
                 finish_swap_in_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // MAP_SHARED 写保护 fault：恢复共享写权限。
-            FaultAction::SharedWrite => restore_shared_write(area, mapper, ctx),
+            FaultAction::SharedWrite => return restore_shared_write(area, mapper, ctx),
             // Stale lazy PTE：页表已有项但元数据仍未分配，先清理再修复。
             FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, mapper, ctx),
             // 私有已映射页写入：触发 COW。
@@ -144,7 +149,10 @@ impl PageFaultHandler {
         };
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_pf_start);
         crate::task::perf::record_pagefault_action(action_tag, elapsed);
-        result
+        match result {
+            Ok(pa) => FaultOutcome::Completed(pa),
+            Err(error) => FaultOutcome::Error(error),
+        }
     }
 
     fn classify<T: PageTable>(
@@ -242,24 +250,34 @@ fn restore_shared_write<T: PageTable>(
     area: &mut Vma,
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
+) -> FaultOutcome {
     // 文件共享页恢复 W 之前先进入 page cache 写路径，确保 dirty 状态不会丢失。
     if area.vm_kind() == VmAreaKind::FileBacked {
         if let (Some(inode), Ok(file_offset)) = (area.vm_file(), area.vm_file_offset(ctx.vpn)) {
             if let Some(pc) = inode.ensure_page_cache() {
                 let page_index = file_offset >> crate::config::PAGE_SIZE_BITS;
-                if let Err(e) = pc.frame_for_write(page_index) {
-                    return Err(match e {
-                        SyscallErr::ENOMEM => MemoryError::OutOfMemory,
-                        _ => MemoryError::BackingStoreFailure,
-                    });
+                match pc.try_frame_for_write(page_index) {
+                    Ok(_) => {}
+                    Err(crate::fs::PageCacheFault::Retry(wait)) => {
+                        return FaultOutcome::Retry(wait)
+                    }
+                    Err(crate::fs::PageCacheFault::Error(error)) => {
+                        return FaultOutcome::Error(match error {
+                            SyscallErr::ENOMEM => MemoryError::OutOfMemory,
+                            _ => MemoryError::BackingStoreFailure,
+                        })
+                    }
                 }
             }
         }
     }
-    mapper.set_user_flags(ctx.vpn, area.vm_perm())?;
-    let ppn = mapper.translate(ctx.vpn).ok_or(MemoryError::NotMapped)?;
-    Ok(ctx.offset_phys(ppn))
+    if let Err(error) = mapper.set_user_flags(ctx.vpn, area.vm_perm()) {
+        return FaultOutcome::Error(error);
+    }
+    match mapper.translate(ctx.vpn) {
+        Some(ppn) => FaultOutcome::Completed(ctx.offset_phys(ppn)),
+        None => FaultOutcome::Error(MemoryError::NotMapped),
+    }
 }
 
 fn repair_stale_lazy_pte<T: PageTable>(

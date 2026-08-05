@@ -3,7 +3,7 @@ title: "网络 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-07-13
+last_update: 2026-08-05
 tags: [syscall, net, socket]
 ---
 
@@ -151,9 +151,8 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
                 Err(e) => -(e as isize),
             }
         } else {
-            // Pre-poll OUTSIDE the WaitQueue closure — harness-patterns rule:
-            // never put poll inside WaitQueue condition closure.
-            NET_INTERFACE.try_poll();
+            // 只在 WaitQueue 闭包外异步请求 worker；闭包绝不 poll。
+            NET_INTERFACE.request_poll();
 
             ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
             let result = loop {
@@ -182,7 +181,9 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 }
 ```
 
-这个实现体现了网络 syscall 的等待边界：非阻塞 accept 只尝试一次；阻塞 accept 在进入 `WaitQueue` 前调用 `NET_INTERFACE.try_poll()`，等待闭包内部只执行 `socket.accept()`。
+这个实现体现了网络 syscall 的等待边界：非阻塞 accept 在所有 socket/WaitQueue 锁外
+执行一次 `poll_now()` 后只尝试一次；阻塞 accept 在进入 `WaitQueue` 前异步
+`request_poll()`，等待闭包内部只执行 `socket.accept()`。
 
 `accept4()` 复用 `sys_accept()`，成功后再修改新 fd 的 CLOEXEC 和 NONBLOCK 标志：
 
@@ -315,8 +316,8 @@ UDP 支持 `IP_RECVERR` 的启用状态查询和设置，以兼容 glibc resolve
 
 | 模式 | 行为 |
 |------|------|
-| 非阻塞路径 | 在 `try_xxx` 前执行 `NET_INTERFACE.try_poll()`，避免 smoltcp 数据未搬运导致 livelock |
-| 阻塞路径 | 每次重试前 poll，失败为 `EAGAIN` 时挂到 socket wait queue 或让出 CPU |
+| 非阻塞路径 | 在 fd/socket 锁外执行一次 `NET_INTERFACE.poll_now()`，随后单次 `try_xxx` |
+| 阻塞路径 | 异步 `request_poll()` 后等待 socket 事件；条件闭包只检查已发布状态 |
 
 socket readiness 由 `SocketFile::poll()` 和 socket 类型的 `socket_r_ready/socket_w_ready` 等方法提供，epoll/poll/select 都依赖这一路径。
 
@@ -338,7 +339,10 @@ socket readiness 由 `SocketFile::poll()` 和 socket 类型的 `socket_r_ready/s
 
 网络 syscall 在 02 目录中只作为分发表入口和 errno 边界索引；真实协议状态在 `docs/06_net` 展开。调试时仍要先经过通用 syscall 层：确认编号进入 `syscall/mod.rs` 的 socket 分支，确认 fd table 返回的是 socket File 对象，再进入 `net/syscall/*` 和具体 socket 类型。
 
-和普通文件不同，socket 的可读写状态依赖协议栈 poll。非阻塞路径在 `try_xxx` 前需要推动网络接口，阻塞路径则通过 socket wait queue 反复尝试；如果 `send/recv/connect/accept` 看似没有进展，除了 syscall 参数，还要检查 `NET_INTERFACE.try_poll()` 和设备收发路径。
+和普通文件不同，socket 的可读写状态依赖协议栈 poll。非阻塞路径在 `try_xxx` 前
+执行一次有界 `poll_now()`，阻塞路径异步请求 CPU0 worker 后通过 socket wait queue
+重试；若没有进展，除 syscall 参数外还要检查 pending/deferred wake、CPU0 worker
+和目标 DeviceStack 收发路径。
 
 ## 12. 测试映射
 

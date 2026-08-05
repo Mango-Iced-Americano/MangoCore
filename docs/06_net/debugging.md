@@ -103,8 +103,8 @@ DHCP 成功时输出分配的 IP 地址。超时后 eth0 无 IP 地址 — 这�
 ### Poll 统计
 
 ```rust
-// config.rs poll_once()
-// 每次 poll 后检查 progressed 标志:
+// config.rs try_poll_stack()
+// 每个设备栈 poll 后检查 progressed 标志:
 if progressed {
     log::trace!("[net::poll] poll progressed: socket events updated");
 }
@@ -138,7 +138,8 @@ log::info!("[net] TCP={} UDP={} RAW={} pending_remove={}", tn, un, rn, sp);
 
 ### 启用方法
 
-trace_event 在 `os/src/net/config.rs` 的 `poll_once()` 中默认注释。取消注释第 497 行和 500 行来启用：
+trace_event 的历史事件点可在 `os/src/net/config.rs` 的单栈 poll 路径按需恢复；
+不要依赖旧行号：
 
 ```rust
 // 取消注释以启用 trace:
@@ -334,22 +335,18 @@ log::trace!("[net] received {} bytes", buf.len());
 
 ### 6.2 Null NET_INTERFACE
 
-**现象**：`poll()` 或 socket 操作时报错 `unwrap on None` — `NET_INTERFACE.inner` 为 `None`。
+**现象**：网络请求或 socket 操作在初始化前无法找到目标栈——`NET_INTERFACE.directory` 为 `None`。
 
 **根因**：`NetInterface::init()` 尚未被调用，但网络 syscall 已触发。
 
 **复现条件**：用户程序在 `drivers::init()` 和 `net::config::init()` 之间发起 socket 操作。
 
-**修复路径**：`NetInterface::poll()` 和 `try_poll()` 已有 `is_none()` 短路检查。所有 socket 操作入口也应做保护。
+**修复路径**：目录查询和 `request_poll()` 在未初始化时应安全短路；所有 socket
+操作入口也应做保护。
 
 ```rust
 // config.rs:391
-pub fn poll(&self) {
-    if self.inner.lock().is_none() {
-        return; // Guard: NET_INTERFACE not initialized
-    }
-    self.poll_once();
-}
+let Some(stack) = self.stack_arc(ifindex) else { return; };
 ```
 
 **相关文件**：`os/src/net/config.rs`
@@ -358,16 +355,18 @@ pub fn poll(&self) {
 
 **现象**：死锁 — 线程在 `spin::Mutex` 上自旋。
 
-**根因**：`NET_INTERFACE.inner` 使用 `spin::Mutex`（非重入）。poll 路径中再次调用 poll（如 `try_poll` → `poll_once` → 闭包 → `try_poll`）导致死锁。
+**根因**：每个 `DeviceStackCell::inner` 是不可重入锁。持有一个栈锁时反向进入
+同栈 routed API，或在通知路径反向进入 DeviceStack，会导致死锁。
 
 **典型场景**：
-1. syscall 入口获取 `inner` 锁
-2. syscall 触发 `try_poll()`（尝试非阻塞获取）
-3. `try_poll` 使用 `try_lock()` — 如果锁已被持有，跳过本次 poll
-4. 但如果 syscall 路径中直接调用 `poll()`（不是 `try_poll`），则会阻塞等待锁，导致死锁
+1. routed API 在 N2 取得目标 DeviceStack 锁；
+2. 栈内只操作 smoltcp 和形成内核所有的结果；
+3. 释放 N2 后才更新 OS socket、EventPoll 或 WaitQueue；
+4. 若仍持 N2 时调用会阻塞取得同栈的 API，就会自锁。
 
 **预防措施**：
-- syscall 路径中永远使用 `try_poll()` 而非 `poll()`
+- 非阻塞 syscall 只在所有 fd/socket/N2 锁外调用一次 `poll_now()`；
+- 阻塞路径只异步 `request_poll()`，不得在 WaitQueue 条件闭包中 poll。
 - 不要在 `NET_INTERFACE.tcp_routed_socket(rh, |sock| { ... })` 闭包内调用任何网络操作
 - 不要在 NET_INTERFACE inner_handler 闭包内持有锁后又等待其他锁
 
@@ -548,7 +547,8 @@ cd os && make la64-gdb
 
 | 函数 | 说明 | 源文件 |
 |------|------|--------|
-| `poll_once` | 单次 poll 循环 | `config.rs` |
+| `try_poll_stack` | 单设备有界 poll | `config.rs` |
+| `net_poll_worker` | CPU0 全栈 worker | `config.rs` |
 | `wake_tcp_waiters` | TCP 唤醒分发 | `socket/mod.rs` |
 | `dispatch_udp_packets` | UDP 数据分发 | `socket/inet/datagram/udp.rs` |
 | `try_deliver_local` | UDP 本地交付 | `socket/inet/datagram/udp.rs` |
@@ -579,7 +579,7 @@ commands
 end
 
 # 跟踪 poll 循环次数
-break poll_once
+break try_poll_stack
 commands
   set $poll_count = $poll_count + 1
   printf "poll #%d\n", $poll_count
@@ -599,7 +599,7 @@ end
 ```gdb
 # 查看 NET_INTERFACE 内部状态
 print NET_INTERFACE
-print NET_INTERFACE.inner.lock()
+print NET_INTERFACE.directory.lock()
 
 # 查看 TCP socket 列表
 print TCP_SOCKETS.lock()
@@ -669,19 +669,21 @@ llvm_asm!("invtlb 0x0, $zero, $zero" :::: "volatile");
 
 ### 10.2 锁顺序：NET_INTERFACE 与 task 锁
 
-**现象**：死锁 — `task.inner.lock()` 和 `NET_INTERFACE.inner.lock()` 交叉持有。
+**现象**：死锁——`task.inner.lock()` 与 DeviceStack/socket 业务锁交叉持有。
 
-**根因**：信号检查路径在持有 `task.inner` 锁时调用 `NET_INTERFACE.poll()`，而 poll 路径中又反向访问 task 信息。
+**根因**：信号检查路径在持有 `task.inner` 时进入网络业务锁，而网络唤醒又反向
+访问任务状态。
 
-**规则**：永远不要在持有 `task.inner` 锁时调用 `NET_INTERFACE.poll()`。
+**规则**：持有 `task.inner` 时不得调用 `poll_now()` 或进入 routed socket；异步
+`request_poll()` 也应在释放业务锁后调用，保持统一锁序。
 - 锁 → clone Arc → 释放锁 → 执行操作
 - 信号检查在释放 `task.inner` 后通过 `has_actionable_signal()` 完成
 
 ```rust
-// 错误：持有 task 锁时调用 poll
+// 错误：持有 task 锁时进入同步网络扫描
 let task = current_task();
 let task_inner = task.inner.lock();
-NET_INTERFACE.poll(); // 死锁风险
+NET_INTERFACE.poll_now(); // 死锁风险
 
 // 正确：先释放 task 锁
 let task = current_task();
@@ -691,16 +693,16 @@ let sig = {
     task_inner.signal.clone()
 };
 drop(task_inner);
-NET_INTERFACE.poll(); // 安全
+NET_INTERFACE.poll_now(); // 所有业务锁释放后才安全
 ```
 
-### 10.3 非阻塞路径：必须先 try_poll
+### 10.3 非阻塞路径：锁外执行一次 poll_now
 
 **现象**：非阻塞 socket 操作 (`MSG_DONTWAIT`) 返回 `EAGAIN`，即使数据已到达。
 
-**根因**：`try_xxx` 方法未在检查 socket 就绪前调用 `NET_INTERFACE.try_poll()`，导致 poll 不会驱动数据从 smoltcp 缓冲区移动到 OS 层缓冲区。
+**根因**：非阻塞 syscall 在检查 socket 就绪前没有给已到达的数据一次有界搬运机会。
 
-**规则**：非阻塞路径在 `try_send`/`try_recv` 之前必须调用 `try_poll()`：
+**规则**：非阻塞路径在取得 fd/socket 锁前调用一次 `poll_now()`：
 
 ```rust
 // syscall/sendto.rs — 正确模式
@@ -710,14 +712,14 @@ fn sys_sendto(...) {
         // 阻塞路径
         wait_io(..., || socket.try_send(buf, flags))
     } else {
-        // 非阻塞路径：必须先 poll
-        NET_INTERFACE.try_poll();
+        // 非阻塞路径：在所有业务锁外做一次有界扫描
+        NET_INTERFACE.poll_now();
         socket.try_send(buf, flags)
     }
 }
 ```
 
-每次 `try_xxx` 前调用 `try_poll()` 防止因 poll 未执行导致的 livelock。
+阻塞路径只异步 `request_poll()` 并等待事件；禁止把同步 poll 放进 WaitQueue 条件闭包。
 
 ### 10.4 getpeername: 地址验证优先
 

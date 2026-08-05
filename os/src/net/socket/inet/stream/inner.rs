@@ -205,21 +205,11 @@ impl Init {
         match self {
             Init::Unbound(socket, ver) => {
                 let socket = *socket;
-                let local_ep = socket.local_endpoint().unwrap_or_else(|| {
-                    let port =
-                        crate::net::socket::inet::common::PortManager::alloc_ephemeral_port();
-                    IpEndpoint::new(
-                        match ver {
-                            IpVersion::Ipv4 => {
-                                IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED)
-                            }
-                            IpVersion::Ipv6 => {
-                                IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED)
-                            }
-                        },
-                        port,
-                    )
-                });
+                // 未绑定 socket 不得在内部挑选裸端口；auto-bind 必须由 syscall 层
+                // 经 PortRegistry reserve -> bind -> commit 完成。
+                let Some(local_ep) = socket.local_endpoint() else {
+                    return Err((Init::Unbound(Box::new(socket), ver), SyscallErr::EINVAL));
+                };
                 let handle = NET_INTERFACE
                     .add_routed_socket(InetProtocol::Tcp, socket)
                     .ok_or_else(|| {
@@ -480,10 +470,7 @@ impl Listening {
         // Look up the ifindex of the accepted handle BEFORE taking the mutable
         // borrow, so the replacement listen socket goes on the same interface stack.
         let accepted_handle = self.handles[connected_idx];
-        let binding_ifindex = NET_INTERFACE
-            .inner_handler(|inner_ref| inner_ref.bindings.get(&accepted_handle).map(|b| b.ifindex))
-            .flatten()
-            .unwrap_or(1);
+        let binding_ifindex = NET_INTERFACE.routed_ifindex(accepted_handle).unwrap_or(1);
 
         let connected = &mut self.handles[connected_idx];
         let remote_endpoint = with_tcp_mut(*connected, |socket| {

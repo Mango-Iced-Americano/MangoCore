@@ -1020,21 +1020,25 @@ impl Ext4FileSystem {
         let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
 
         // let r = self.dir_find_entry(parent as u32, path, &mut search_result)?;
-        let r = self.dir_find_entry(parent, path, &mut search_result);
+        self.dir_find_entry(parent, path, &mut search_result)
+            .map_err(|err| err.error() as isize)?;
+        let child_ino = search_result.dentry.inode;
 
-        let mut parent_inode_ref = self.get_inode_ref(parent);
-        let mut child_inode_ref = self.get_inode_ref(search_result.dentry.inode);
+        self.with_inode_txns(&[parent, child_ino], || {
+            let mut parent_inode_ref = self.get_inode_ref(parent);
+            let mut child_inode_ref = self.get_inode_ref(child_ino);
 
-        if self.dir_has_entry(child_inode_ref.inode_num) {
-            println!("[kernel] rm dir with children not supported");
-            return Err(Errno::ENOTSUP as isize);
-        }
+            if self.dir_has_entry(child_inode_ref.inode_num) {
+                println!("[kernel] rm dir with children not supported");
+                return Err(Errno::ENOTSUP as isize);
+            }
 
-        self.truncate_inode(&mut child_inode_ref, 0)?;
-
-        self.unlink(&mut parent_inode_ref, &mut child_inode_ref, path)?;
-
-        self.write_back_inode(&mut parent_inode_ref);
+            self.truncate_inode(&mut child_inode_ref, 0)?;
+            self.unlink(&mut parent_inode_ref, &mut child_inode_ref, path)?;
+            self.commit_inode_snapshot(&mut parent_inode_ref);
+            self.commit_inode_snapshot(&mut child_inode_ref);
+            Ok(EOK)
+        })?;
 
         // TODO(ext4-dir-remove): Update inode metadata after directory entry removal.
         // Currently missing: ext4_inode_set_del_time, ext4_inode_set_links_cnt,

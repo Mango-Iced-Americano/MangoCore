@@ -280,11 +280,9 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
                 iface.set_flags(combined);
                 iface.nic_id() as u32
             };
-            // Drop device_list lock before accessing NET_INTERFACE (lock ordering)
-            crate::net::config::NET_INTERFACE.inner_handler(|inner| {
-                let _ = inner.stack_mut(ifindex);
-                // smoltcp 0.10 has no native up/down state; flags already synced to Iface
-            });
+            // smoltcp 0.10 没有 native up/down；设备元数据已提交，不能为确认存在而
+            // 持有目录锁再进入 DeviceStack。
+            let _ = ifindex;
             Ok(0)
         }
         SIOCSIFADDR => {
@@ -311,14 +309,7 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
             };
             // Sync IP addresses to smoltcp Interface
             let new_cidr = IpCidr::new(IpAddress::Ipv4(new_addr), prefix);
-            crate::net::config::NET_INTERFACE.inner_handler(|inner| {
-                if let Some(stack) = inner.stack_mut(ifindex) {
-                    stack.iface.update_ip_addrs(|addrs| {
-                        addrs.clear();
-                        let _ = addrs.push(new_cidr);
-                    });
-                }
-            });
+            crate::net::config::NET_INTERFACE.replace_ip_addrs_on_stack(ifindex, new_cidr);
             Ok(0)
         }
         SIOCSIFMTU => {
@@ -337,11 +328,7 @@ pub fn siocgif_dispatch(cmd: u32, arg: usize) -> Result<usize, SyscallErr> {
             };
             // Sync MTU to smoltcp Interface capabilities
             let mtu = new_mtu as usize;
-            crate::net::config::NET_INTERFACE.inner_handler(|inner| {
-                if let Some(stack) = inner.stack_mut(ifindex) {
-                    stack.iface.set_mtu(mtu);
-                }
-            });
+            crate::net::config::NET_INTERFACE.set_stack_mtu(ifindex, mtu);
             Ok(0)
         }
         _ => Err(SyscallErr::EOPNOTSUPP),

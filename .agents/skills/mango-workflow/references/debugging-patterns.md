@@ -1145,3 +1145,28 @@
   记录 Linux 的 epoll/fork 限制，继承的 epoll registration 不会自动改绑 child sighand。
 - **相关文件**: `os/src/fs/vfs/file.rs`, `os/src/task/signal/action.rs`,
   `os/src/task/process.rs`, `os/src/syscall/process/signal.rs`
+
+## 跨锁域 Weak 注册表必须用强身份快照阻断 ABA
+
+- **危险模式**：注册表用裸地址作 key、保存 `Weak<T>`，walker 升级后立即丢掉强引用，
+  释放注册表锁再进入另一个 owner 锁重验。旧对象若在窗口内析构，allocator 可能把同一地址
+  分给新对象，仅比较地址或标量字段就会把旧操作误施加到新对象。
+- **固定协议**：注册表锁内升级 `Weak`，把 `Arc<T>` 本身放进不可变快照；释放注册表锁后
+  进入目标 owner，并以 `Arc::ptr_eq` 对权威表中的当前身份重验。强引用必须覆盖整个跨锁
+  窗口，不能只复制地址。完成重验后再执行 mkclean、unmap 或状态提交。
+- **适用范围**：file-VMA rmap、route directory、异步 owner 表和任何“弱索引→解锁→另一锁
+  下提交”的调用链。数值 generation 可以辅助判断变化，但不能替代对象身份。
+- **相关文件**：`os/src/fs/page_cache.rs`、`os/src/mm/vma.rs`、
+  `os/src/mm/vma_set.rs`
+
+## 静态单例中的堆对象用 Once 延迟构造，并让事件状态覆盖初始化窗口
+
+- **问题**：`WaitQueue` 等对象内部需要堆分配，不能直接放进普通 `const fn` 静态初始化；
+  为此开启全局 const-heap 或在 IRQ 首次触发时构造，都会扩大不必要的初始化与中断风险。
+- **做法**：静态控制块保存 `spin::Once<Mutex<WaitQueue>>`，只允许任务上下文首次构造。
+  初始化前到达的生产者先把权威 `pending` 置位；若 Once 尚未完成则不唤醒。worker 构造后
+  先在 WaitQueue 条件协议中重查 pending，因此早到事件不会丢失。
+- **门禁**：IRQ 路径只能写原子 pending/deferred 标志，不能调用 Once、分配或取得 WaitQueue；
+  动态测试应通过真实业务结果证明 worker 被唤醒，不要为测试在生产热路径保留 submitted/
+  completed 计数或专用 hook。
+- **相关文件**：`os/src/net/config.rs`、`os/src/kernel_tests/net_smp.rs`

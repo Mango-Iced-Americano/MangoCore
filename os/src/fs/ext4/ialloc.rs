@@ -134,7 +134,7 @@ impl Ext4FileSystem {
         inode_ref
             .inode
             .set_dtime((crate::timer::current_time_safe() as u32).max(1));
-        self.write_back_inode(&mut inode_ref);
+        self.commit_inode_snapshot(&mut inode_ref);
 
         ext4_bmap_bit_clr(&mut bitmap, index_in_group);
         bg.set_block_group_ialloc_bitmap_csum(&self.superblock, &bitmap);

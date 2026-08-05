@@ -3,7 +3,7 @@ title: "网络系统调用层"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 tags: [net, syscall, socket, posix]
 ---
 
@@ -17,7 +17,8 @@ tags: [net, syscall, socket, posix]
 
 - **扁平分发**：每个 syscall 有独立函数，通过 `syscall/mod.rs` 中的 `match` 分支注册。
 - **返回值约定**：成功返回 `isize >= 0`，失败返回负 errno（如 `-11` = EAGAIN）。
-- **非阻塞优先**：数据收发路径优先调用 `try_xxx` 方法，仅在阻塞模式下等待。
+- **非阻塞优先**：非阻塞路径先做一次 `poll_now()` 有界扫描再调用 `try_xxx`；
+  阻塞路径只异步 `request_poll()`，随后等待事件通知。
 - **内核中转**：用户态缓冲区通过 `copy_from_user_array` 拷贝到内核中转，避免跨页问题。
 
 ---
@@ -108,8 +109,8 @@ pub fn sys_accept4(sockfd: u32, addr: usize, addrlen: usize, flags: u32) -> isiz
 2. 从文件描述符表中查询 `is_nonblock` 标志。
 3. **阻塞模型**（首选 `WaitQueue`）：
    - 如果 socket 实现了 `accept_wait_queue()`，使用 `WaitQueue::wait_until_interruptible` 等待连接到来。
-   - 否则回退到 `wait_io()`（带 `NET_INTERFACE.poll()` 的自旋循环）。
-4. **非阻塞模型**：直接调用 `socket.accept()`，无可用连接时返回 `-EAGAIN`。
+   - 否则回退到兼容 `wait_io()`；它同样只异步请求 worker，不在循环内同步 poll。
+4. **非阻塞模型**：先执行一次有界 `poll_now()`，再调用 `socket.accept()`；无可用连接返回 `-EAGAIN`。
 5. `sys_accept4` 的 `flags` 支持 `SOCK_CLOEXEC`（bit 19）和 `SOCK_NONBLOCK`（0x800），在接受后将对应标志设置到新文件描述符上。
 
 ### connect 调用（syscall 203）
@@ -234,7 +235,7 @@ sys_recvfrom 入口
   ├─ PSOCK::Datagram | Raw → socket.try_recvmsg() 或 try_peek_recvmsg()
   │   └─ 有源地址 → fill_sockaddr(src_addr, addrlen)
   ├─ 阻塞路径: WaitQueue::wait_until_interruptible(recv_wait_queue, ...)
-  ├─ 非阻塞路径: NET_INTERFACE.try_poll() → recv()
+  ├─ 非阻塞路径: NET_INTERFACE.poll_now() → recv()
   └─ copy_to_user_array(token, kernel_buf, buf, result)
 ```
 
@@ -402,10 +403,10 @@ pub fn wait_io<T: Into<isize>>(
 ) -> isize
 ```
 
-自旋循环模式：
-- 每次迭代调用 `NET_INTERFACE.poll()` 推进网络栈状态。
+兼容等待模式：
+- 非阻塞入口先执行一次 `poll_now()`；阻塞入口只异步 `request_poll()`。
 - 非阻塞模式遇到 `EAGAIN` 立即返回。
-- 阻塞模式调用 `suspend_current_and_run_next()` 主动让出 CPU，下次调度时再次尝试。
+- 阻塞模式依赖 WaitQueue/调度唤醒后再次尝试，不在条件闭包内同步 poll。
 - 唤醒后检查信号并处理超时。
 
 **注意**：该函数已标记为废弃，新代码应优先使用 `WaitQueue::wait_until_interruptible`。
@@ -417,7 +418,8 @@ pub fn wait_io<T: Into<isize>>(
 pub fn wait_io_core(f: impl FnMut() -> isize, nonblock: bool) -> isize
 ```
 
-与 `wait_io` 的区别在于：**不调用** `NET_INTERFACE.poll()`。适用于不需要网络轮询的文件 I/O 场景（管道、tty 等文件描述符）。
+与网络兼容 `wait_io` 的区别在于：不发布网络 worker 请求。适用于管道、tty 等
+不依赖协议栈推进的文件描述符。
 
 ---
 
@@ -426,8 +428,9 @@ pub fn wait_io_core(f: impl FnMut() -> isize, nonblock: bool) -> isize
 非阻塞路径的核心规则：
 
 1. **MSG_DONTWAIT 覆盖 fd 标志**：`is_nonblock = fd_table.is_nonblock() || msg_dontwait`。
-2. **try_poll 防止 livelock**：非阻塞路径在调用 `try_xxx` 前必须调用 `NET_INTERFACE.try_poll()`。这防止了无数据时反复 syscall 空转，确保 smoltcp 能在数据到达后及时进入 TCP 状态机。
-3. **`try_xxx` 是纯尝试操作**（设计约定）：`try_recv`、`try_send`、`try_sendmsg`、`try_recvmsg` 都是单次非阻塞操作，内部从不执行 sleep 或 yield。成功返回 `Ok(isize)`，失败返回 `Err(SyscallErr)`。注意：RAW 和 UDP 路径当前在 `send_to()` 内部调用 `NET_INTERFACE.poll()`，与 TCP 路径的行为不同。
+2. **`poll_now` 有界推进**：非阻塞路径在取得 fd/socket 私有锁前调用一次
+   `NET_INTERFACE.poll_now()`；每个 DeviceStack 只 try-lock 一次，忙栈不等待。
+3. **`try_xxx` 是纯尝试操作**（设计约定）：`try_recv`、`try_send`、`try_sendmsg`、`try_recvmsg` 都是单次非阻塞操作，内部从不 sleep/yield，也不等待 CPU0 worker。成功返回 `Ok(isize)`，失败返回 `Err(SyscallErr)`。
 4. **EAGAIN 处理**：阻塞路径通过 `WaitQueue` 或 `wait_io` 在 EAGAIN 时等待，非阻塞路径直接返回 `-EAGAIN`。
 
 ---
@@ -559,14 +562,14 @@ VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；B59 又删除�
 6. socket = get_socket!(sockfd)             // 解析 fd → Arc<dyn Socket>
 7. is_nonblock = fd_nonblock || msg_dontwait
 8. if socket_type == Datagram:
-      if port == 0: auto_bind(0.0.0.0:0)     // 自动绑定
-      dest = parse_dest_addr(dest_addr)      // 解析目标地址
+      dest = parse_dest_addr(dest_addr)      // 先解析目标地址
+      if local unbound: ensure_auto_bound(Send, dest) // 事务性自动绑定
       if dest is None && remote_endpoint is None:
         return -EDESTADDRREQ
 9. if is_nonblock:
-      NET_INTERFACE.try_poll()               // 防 livelock
+      NET_INTERFACE.poll_now()                // 一次有界扫描
       ret = socket.try_sendmsg(&kernel_buf, dest, flags)
-      NET_INTERFACE.try_poll()
+      NET_INTERFACE.request_poll()            // 异步推进 TX/RX
       return ret
     else:
       ret = WaitQueue::wait_until_interruptible(send_wait_queue, || {
@@ -574,7 +577,7 @@ VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；B59 又删除�
           .map(|n| n as isize)
           .or_else(|e| if e == EAGAIN { None } else { Some(-e as isize) })
       })
-      NET_INTERFACE.try_poll()
+      NET_INTERFACE.request_poll()
       return ret
 ```
 
@@ -597,7 +600,7 @@ VM 锁内完成。B58 已删除旧 `trans_ref!`/`trans_refmut!`；B59 又删除�
           else: try_recvmsg(&mut kernel_buf)
           if has src_addr: fill_sockaddr(src_addr, addrlen)
 8. if is_nonblock:
-      NET_INTERFACE.try_poll()
+      NET_INTERFACE.poll_now()
       result = recv_fn()
     else:
       result = WaitQueue::wait_until_interruptible(recv_wait_queue, || {

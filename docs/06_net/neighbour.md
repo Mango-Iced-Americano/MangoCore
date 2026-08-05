@@ -78,7 +78,9 @@ pub struct NeighbourEntry {
 pub static CURRENT_POLL_IFINDEX: Mutex<u32>;
 ```
 
-每次 `poll_once()` 开始轮询一个设备栈之前，内核会将这个设备的 ifindex 写入 `CURRENT_POLL_IFINDEX`。接收路径上的 consume 方法从中读出 ifindex，作为调用 `try_capture_arp_reply()` 时的参数。
+每次 `try_poll_stack()` 开始轮询一个设备栈之前，内核会将该设备 ifindex 写入
+`CURRENT_POLL_IFINDEX`。接收路径的 consume 方法读取它，并传给
+`try_capture_arp_reply()`。
 
 ## 公开 API
 

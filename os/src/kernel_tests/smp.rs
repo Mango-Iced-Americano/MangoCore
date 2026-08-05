@@ -713,7 +713,7 @@ fn build_ktest_sibling(
     let kstack = crate::hal::kstack_alloc();
     let task_cx =
         crate::task::TaskContext::goto_address(entry as usize, kstack.get_top());
-    let task = crate::task::TaskControlBlock::new_ktest_independent(
+    let task = crate::task::TaskControlBlock::new_kernel_only(
         tid, process, kstack, task_cx, entry,
     );
     task.set_initial_cpus_allowed(1usize << cpu);
@@ -1672,9 +1672,9 @@ fn read_shared_mm_asid_on_ap() {
 
 /// 同一 AddressSpace 在不同 CPU 上必须取得同一个 ASID；ASID 不再属于 TCB。
 fn address_space_owns_asid() -> Result<(), &'static str> {
-    let vm = Arc::new(crate::mm::AddressSpace::new(
+    let vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
+    );
     let local = vm.activate_on(crate::smp::BOOT_CPU_ID);
     #[cfg(target_arch = "loongarch64")]
     if local.asid == 0 {
@@ -1734,9 +1734,9 @@ fn asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
     } else {
         0
     };
-    let first_vm = Arc::new(crate::mm::AddressSpace::new(
+    let first_vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
+    );
     if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
         return Err("first rollover test MM received ASID 0");
     }
@@ -3351,12 +3351,10 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
         } else {
             let target = crate::mm::VirtAddr::from(target_addr);
             let before = vm.read(|space| space.translate(target.floor()));
-            let cow = vm.write(|space| {
-                space.do_page_fault(target, crate::mm::FaultAccess::Store)?;
-                space
-                    .translate(target.floor())
-                    .ok_or(crate::mm::MemoryError::NotMapped)
-            });
+            let cow = vm
+                .fault_in_user_va_retry(target, crate::mm::FaultAccess::Store)
+                .map(|_| vm.read(|space| space.translate(target.floor())))
+                .and_then(|ppn| ppn.ok_or(crate::syscall::errno::EFAULT));
             match (before, cow) {
                 (Some(before), Ok(after)) if before == old_frame.ppn && after != before => {
                     new_ppn = Some(after);
@@ -3643,9 +3641,9 @@ fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str>
     PTE_UPDATE_DONE.store(0, Ordering::Release);
     PTE_UPDATE_ERRORS.store(0, Ordering::Release);
 
-    let vm = Arc::new(crate::mm::AddressSpace::new(
+    let vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
+    );
     let mut frames = Vec::new();
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         let frame = crate::mm::frame_alloc().ok_or("concurrent PTE frame allocation failed")?;
@@ -3784,7 +3782,7 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
         crate::mm::VirtAddr::from(TEST_BASE + TEST_PAGES * crate::config::PAGE_SIZE),
         crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
     );
-    let vm = Arc::new(crate::mm::AddressSpace::new(space));
+    let vm = crate::mm::AddressSpace::new(space);
     vm.activate_on(crate::smp::BOOT_CPU_ID);
     *USER_TLB_RETIRE_VM.lock() = Some(vm.clone());
     let task = crate::task::spawn_ktest_task_on(1, observe_user_tlb_retirement_window);

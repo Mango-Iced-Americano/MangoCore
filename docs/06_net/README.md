@@ -2,9 +2,9 @@
 title: "网络子系统 (Network Subsystem)"
 module: "net"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-05
 code_paths:
   - "os/src/net/"
 entry_points:
@@ -37,6 +37,11 @@ related_docs:
 MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈。它通过统一的 Socket trait，支持 TCP、UDP、RAW、Unix、Netlink 和 Packet（AF_PACKET）等多种套接字类型。协议栈运行在 virtio-net 设备之上，借助 MangoCore 的等待队列基础设施提供阻塞 I/O 语义。
 
 该子系统通过标准系统调用接口（socket、bind、connect、sendto、recvfrom 等）为用户进程提供服务，并与 epoll、signalfd 以及 /proc/net 集成，支持事件驱动 I/O 和网络状态监控。
+
+当前 SMP 边界包括 per-netns `PortRegistry`、短持 `NetDirectory`、per-device
+`DeviceStackCell` 与 CPU0 poll worker。端口目录、route 目录和设备栈不嵌套；
+socket/epoll 通知与用户 copy 都在相应业务锁释放后执行。同一 smoltcp SocketSet
+的数据面仍串行，v1 不宣称多队列或 per-socket 并行。
 
 ## 架构
 
@@ -218,7 +223,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | [device-stack-and-poll.md](device-stack-and-poll.md) | NetInterface、DeviceStack、polling、socket handle 管理 |
 | [device-adapter.md](device-adapter.md) | IfaceDevice、SmoltcpDeviceAdapter、NullNetDevice |
 | [net-core-iface.md](net-core-iface.md) | Iface trait、IfaceCommon、设备注册中心、ioctl |
-| [routing.md](routing.md) | RouteSocketHandle、SocketBinding、FIB、route_output |
+| [routing.md](routing.md) | RouteSocketHandle、route 目录、本地 binding、FIB、route_output |
 | [neighbour.md](neighbour.md) | NEIGHBOUR_TABLE、ARP 捕获 |
 | [dhcp.md](dhcp.md) | DHCP 初始化流程 |
 | [tcp.md](tcp.md) | TCP 状态机，connect/accept/数据流，epoll 事件 |

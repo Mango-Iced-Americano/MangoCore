@@ -373,7 +373,8 @@ CPU0 的 `run_tasks()` 每轮执行：
 schedule_tick += 1
   ├── console poll
   ├── do_wake_expired()
-  ├── NET_INTERFACE.try_poll()        每 64 tick
+  ├── NET_INTERFACE.run_deferred_poll_retry() 每 tick
+  ├── NET_INTERFACE.request_poll()    每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
   ├── drain 本 CPU local_zombies
   ├── 每 64 tick 记录 runqueue/interruptible 长度和本地队列统计
@@ -381,7 +382,7 @@ schedule_tick += 1
   ├── fetch_task()
   ├── queue sample / perf
   ├── switch to task
-  └── idle path: NET_INTERFACE.poll() 或 spin_loop()
+  └── idle path: NET_INTERFACE.request_poll() 或 spin_loop()
 ```
 
 调度循环承担了若干后台维护职责，不能把它理解成单纯的 “while fetch ready task”。
@@ -445,11 +446,12 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 | 操作 | 频率 |
 |------|------|
-| `NET_INTERFACE.try_poll()` | 每 64 tick |
-| idle 时 `NET_INTERFACE.poll()` | 每 64 idle tick |
+| `NET_INTERFACE.run_deferred_poll_retry()` | 每 tick，消费忙栈 retry 位 |
+| `NET_INTERFACE.request_poll()` | 每 64 tick 与每 64 idle tick |
 | `fs::reclaim::maybe_reclaim_fs_caches()` | 每轮 |
 
-网络 syscall 自己也会 poll；调度循环中的 poll 是后台兜底，避免没有 socket syscall 时网络状态完全不推进。
+网络 syscall 只做一次有界 `poll_now()` 或异步请求；真正的全栈推进由 CPU0 worker
+负责。调度循环中的 request 是后台兜底，避免没有 socket syscall 时网络完全不推进。
 
 ## 9. Per-CPU zombie 回收
 
@@ -505,8 +507,9 @@ syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因�
 2. 以 IRQ-off 状态切回本 CPU idle scheduler；
 3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
 
-CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、network poll、FS reclaim
-等共享路径尚未完成 IRQ 并发审计。AP 已采用独立的“关中断—重查工作—架构 wait”
+CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、FS reclaim 等共享路径
+尚未完成 IRQ 并发审计；network 在这里仅发布原子 request，smoltcp 由独立 worker
+在任务上下文推进。AP 已采用独立的“关中断—重查工作—架构 wait”
 协议，但 B19 kernel-only 任务运行期间也保持 IRQ-off；STOP/RESCHEDULE 最长延迟到
 该短函数返回或主动 yield，不能据此开放无界通用内核线程。
 
@@ -627,4 +630,4 @@ panic 时仍能看到各核调度历史。两套计数用途不同，均只用 r
 | getpid/gettid 返回旧值 | 本 CPU current 槽与 PID/TID 快照是否同步发布、清理 |
 | getuid/getpgid/token 返回旧值 | TCB/PCB 权威原子 hint 是否在 setter 中更新 |
 | 非零 nice 任务饿死 | owner RunQueue 的 `nonzero_nice_count` 与原子 hint 是否更新 |
-| 网络等待无 syscall 时卡住 | 调度循环后台 `try_poll/poll` 是否执行 |
+| 网络等待无 syscall 时卡住 | CPU0 worker、pending/deferred wake 与后台 request 是否执行 |

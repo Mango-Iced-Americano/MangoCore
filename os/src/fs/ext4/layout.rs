@@ -80,8 +80,20 @@ pub struct Ext4OSInode {
     pub(super) ext4fs: Arc<Ext4FileSystem>,
     /// inode锁
     pub(super) inode_lock: Arc<RwLock<InodeLock>>,
+    /// 按真实 inode 号 canonicalize 的目录命名空间 gate。
+    ///
+    /// 同一 inode 的多个 VFS wrapper 必须共享该 gate；目录查找取 read，
+    /// 创建、删除和重命名取 write。registry 只管理 Weak 生命周期，绝不在
+    /// 持有本 gate 时重新取得。
+    pub(super) dir_gate: Arc<RwLock<()>>,
     /// 新 PageCache（懒初始化，仅用于普通文件数据）
     pub(super) new_page_cache: Mutex<Option<Arc<NewPageCache>>>,
+    /// 普通文件 extent、EOF、metadata 与 truncate 的 canonical 事务边界。
+    ///
+    /// 同一 inode 的多个 VFS wrapper 共享此 Arc。固定锁序为
+    /// `inode_txn -> PageCache::op_gate`；用户缓冲区必须先 bounce，因此这里
+    /// 持锁期间不会进入 faultable uaccess 或等待 IPI/TLB ack。
+    pub(super) inode_txn: Arc<Mutex<()>>,
 
     // ── Phase 2: children cache (opportunistic dentry cache) ──
     //
@@ -117,6 +129,9 @@ impl core::fmt::Debug for Ext4OSInode {
 
 impl Drop for Ext4OSInode {
     fn drop(&mut self) {
+        // 销毁路径也可能截断并回写完整 inode；先取得 canonical transaction，
+        // 再进入 PageCache，避免与另一个 wrapper 的 metadata commit 交错。
+        let _txn = self.inode_txn.lock();
         if let Some(ref pc) = *self.new_page_cache.lock() {
             let _ = pc.writeback_all();
         }

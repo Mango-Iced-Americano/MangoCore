@@ -15,11 +15,11 @@ use core::sync::atomic::Ordering;
 /// `TCP_SOCKETS` 表。若 `addr != 0`，将 peer 地址写入用户空间。
 ///
 /// **阻塞模式**：在 `WaitQueue::wait_until_interruptible` 中循环，每次迭代
-/// 调用 `socket.accept()`。进入等待前先用 `NET_INTERFACE.try_poll()` 推进一次
-/// 当前网络状态；后续进展由生产侧 poll 发布，并通过可靠 WaitQueue 通知唤醒。
+/// 调用 `socket.accept()`。进入等待前只向 CPU0 worker 发布一次请求；后续进展
+/// 通过可靠 WaitQueue 通知唤醒。
 /// 计数器 `ACCEPT_WAITER_COUNT` 防止无阻塞任务时的昂贵监听器扫描。
 ///
-/// **非阻塞模式**：单次 `socket.accept()` 尝试。
+/// **非阻塞模式**：先做一次不等待的有界 poll，再单次尝试 `socket.accept()`。
 ///
 /// # Locking
 ///
@@ -47,14 +47,14 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
         if is_nonblock {
+            NET_INTERFACE.poll_now();
             match socket.accept(sockfd, addr, addrlen) {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
             }
         } else {
-            // Pre-poll OUTSIDE the WaitQueue closure — harness-patterns rule:
-            // never put poll inside WaitQueue condition closure.
-            NET_INTERFACE.try_poll();
+            // 只在条件闭包外发布请求；闭包本身只能消费 accept 状态。
+            NET_INTERFACE.request_poll();
 
             ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
             let result = loop {

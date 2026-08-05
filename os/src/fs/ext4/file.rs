@@ -217,7 +217,7 @@ impl Ext4FileSystem {
 
         // at this point should insert to existing block
         self.dir_add_entry(parent, child, name)?;
-        self.write_back_inode_without_csum(parent);
+        self.commit_inode_snapshot_without_csum(parent);
 
         // If this is the first link. add '.' and '..' entries
         if child.inode.is_dir() {
@@ -259,7 +259,7 @@ impl Ext4FileSystem {
         name: &str,
     ) -> Result<usize, isize> {
         self.dir_add_entry(parent, child, name)?;
-        // skip write_back_inode_without_csum(parent)
+        // skip parent snapshot commit; caller commits both snapshots together
 
         if child.inode.is_dir() {
             let new_child_ref = Ext4InodeRef {
@@ -299,19 +299,22 @@ impl Ext4FileSystem {
         uid: u16,
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
-        let mut parent_inode_ref = self.get_inode_ref(parent);
         let init_child_ref = self.create_inode(inode_mode, uid, gid)?;
-        let mut child_mut = init_child_ref.clone();
-        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
-        self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_mut);
-        Ok(child_mut)
+        let child_ino = init_child_ref.inode_num;
+        self.with_inode_txns(&[parent, child_ino], || {
+            let mut parent_inode_ref = self.get_inode_ref(parent);
+            let mut child_mut = init_child_ref;
+            self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
+            self.commit_inode_snapshot(&mut parent_inode_ref);
+            self.commit_inode_snapshot(&mut child_mut);
+            Ok(child_mut)
+        })
     }
 
     /// 创建 fast symlink（target ≤ 60 字节，存入 i_block 而非分配 data block）。
     ///
     /// Phase 3 优化：避免 create() 的先写空 inode 再读回再写 target 的冗余路径。
-    /// 一次初始化 child inode，一次 write_back_inode，一次 write parent。
+    /// 一次初始化 child inode，在同一 transaction 内各提交一次 child/parent。
     pub fn create_fast_symlink(
         &self,
         parent: u32,
@@ -354,20 +357,21 @@ impl Ext4FileSystem {
             inode,
         };
 
-        // 3. Add directory entry and link (no parent flush — done in step 4)
-        let mut parent_ref = self.get_inode_ref(parent);
-        let mut child_mut = child_ref.clone();
-        self.link_no_parent_flush(&mut parent_ref, &mut child_mut, name)?;
-        super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
+        // 3. 在 parent/child inode 号全序下链接并提交两个完整快照。
+        self.with_inode_txns(&[parent, ino], || {
+            let mut parent_ref = self.get_inode_ref(parent);
+            let mut child_mut = child_ref;
+            self.link_no_parent_flush(&mut parent_ref, &mut child_mut, name)?;
+            super::counters::inc_counter!(super::counters::SYMLINK_DIR_BLOCK_WRITE_COUNT);
 
-        // 4. Flush parent and child — use child_mut which has updated links_count
-        self.write_back_inode(&mut parent_ref);
-        super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
+            // 4. Flush parent and child — use child_mut which has updated links_count.
+            self.commit_inode_snapshot(&mut parent_ref);
+            super::counters::inc_counter!(super::counters::SYMLINK_PARENT_INODE_WRITE_COUNT);
 
-        self.write_back_inode(&mut child_mut);
-        super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
-
-        Ok(child_mut)
+            self.commit_inode_snapshot(&mut child_mut);
+            super::counters::inc_counter!(super::counters::SYMLINK_INODE_WRITE_COUNT);
+            Ok(child_mut)
+        })
     }
 
     /// 创建inode
@@ -458,13 +462,16 @@ impl Ext4FileSystem {
         uid: u16,
         gid: u16,
     ) -> Result<Ext4InodeRef, isize> {
-        let mut parent_inode_ref = self.get_inode_ref(parent);
-        let mut init_child_ref = self.create_inode(inode_mode, uid, gid)?;
-        let mut child_mut = init_child_ref.clone();
-        self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
-        self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_mut);
-        Ok(child_mut)
+        let init_child_ref = self.create_inode(inode_mode, uid, gid)?;
+        let child_ino = init_child_ref.inode_num;
+        self.with_inode_txns(&[parent, child_ino], || {
+            let mut parent_inode_ref = self.get_inode_ref(parent);
+            let mut child_mut = init_child_ref;
+            self.link_no_parent_flush(&mut parent_inode_ref, &mut child_mut, name)?;
+            self.commit_inode_snapshot(&mut parent_inode_ref);
+            self.commit_inode_snapshot(&mut child_mut);
+            Ok(child_mut)
+        })
     }
 
     /// 从指定文件的某个偏移位置开始读取数据
@@ -596,6 +603,11 @@ impl Ext4FileSystem {
 
         crate::task::perf::record_ext4_direct_write_at();
 
+        // 直接 native ext4 写也必须与 VFS wrapper 共享同一 transaction；调用者
+        // 已提供内核缓冲区，不会在锁内进入 faultable uaccess。
+        let inode_txn = self.inode_txn(inode);
+        let _txn = inode_txn.lock();
+
         // get the inode reference
         let mut inode_ref = self.get_inode_ref(inode);
 
@@ -722,7 +734,7 @@ impl Ext4FileSystem {
             log::trace!("set file size {:x}", offset + write_buf_len);
             inode_ref.inode.set_size((offset + write_buf_len) as u64);
 
-            self.write_back_inode(&mut inode_ref);
+            self.commit_inode_snapshot(&mut inode_ref);
         }
 
         Ok(written)
@@ -742,23 +754,24 @@ impl Ext4FileSystem {
         let mut nameoff = 0;
         let child_inode = self.generic_open(path, &mut parent_inode_num, false, 0, &mut nameoff)?;
 
-        let mut child_inode_ref = self.get_inode_ref(child_inode);
-        let child_link_cnt = child_inode_ref.inode.links_count();
-        if child_link_cnt == 1 {
-            self.truncate_inode(&mut child_inode_ref, 0)?;
-        }
-
         // get child name
         let mut is_goal = false;
         let p = &path[nameoff as usize..];
         let len = path_check(p, &mut is_goal);
 
-        // load parent
-        let mut parent_inode_ref = self.get_inode_ref(parent_inode_num);
+        self.with_inode_txns(&[parent_inode_num, child_inode], || {
+            let mut child_inode_ref = self.get_inode_ref(child_inode);
+            let child_link_cnt = child_inode_ref.inode.links_count();
+            if child_link_cnt == 1 {
+                self.truncate_inode(&mut child_inode_ref, 0)?;
+            }
 
-        let r = self.unlink(&mut parent_inode_ref, &mut child_inode_ref, &p[..len])?;
-
-        Ok(EOK)
+            let mut parent_inode_ref = self.get_inode_ref(parent_inode_num);
+            self.unlink(&mut parent_inode_ref, &mut child_inode_ref, &p[..len])?;
+            self.commit_inode_snapshot(&mut parent_inode_ref);
+            self.commit_inode_snapshot(&mut child_inode_ref);
+            Ok(EOK)
+        })
     }
 
     /// File truncate
@@ -780,20 +793,41 @@ impl Ext4FileSystem {
         );
         let old_size = inode_ref.inode.size();
 
-        // 文件扩展或不变：只更新 size 后返回（block 分配由 write 路径按需触发）
-        if old_size < new_size {
-            inode_ref.inode.set_size(new_size);
-            self.write_back_inode(inode_ref);
-            return Ok(EOK);
-        }
-
         if old_size == new_size {
             return Ok(EOK);
         }
 
+        self.truncate_inode_persistent(inode_ref, new_size)?;
+        inode_ref.inode.set_size(new_size);
+        self.commit_inode_snapshot(inode_ref);
+
+        log::info!(
+            "[debug_truncate] after: ino: {}, mode: {:#o}, size: {}",
+            inode_ref.inode_num,
+            inode_ref.inode.mode,
+            inode_ref.inode.size()
+        );
+        Ok(EOK)
+    }
+
+    /// 完成截断的持久化部分，但不发布新的 EOF。
+    ///
+    /// 调用者负责在与 PageCache 的同一事务中提交 size，避免 cache 已剪枝而
+    /// inode EOF 仍可见的窗口。扩展不预分配块，仍由写路径按需分配。
+    pub fn truncate_inode_persistent(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        new_size: u64,
+    ) -> Result<(), isize> {
+        let old_size = inode_ref.inode.size();
+
+        if old_size <= new_size {
+            return Ok(());
+        }
+
         // 如果是 Fast Symlink，它没有分配任何数据块，
         // 它的数据全存在 inode.block 数组里，因此不需要释放任何物理块。
-        // 直接清零 inode.block 并更新 size 即可。
+        // 直接清零 inode.block；调用者随后提交 size。
         let is_symlink = inode_ref.inode.get_file_type() == DiskInodeType::Link;
         let uses_extents =
             (inode_ref.inode.flags() & crate::fs::ext4::EXT4_INODE_FLAG_EXTENTS as u32) != 0;
@@ -819,9 +853,7 @@ impl Ext4FileSystem {
                     );
                 }
             }
-            inode_ref.inode.set_size(new_size);
-            self.write_back_inode(inode_ref);
-            return Ok(EOK);
+            return Ok(());
         }
 
         let block_size = self.block_size as u64;
@@ -833,16 +865,7 @@ impl Ext4FileSystem {
             self.extent_remove_space(inode_ref, new_blocks_cnt, EXT_MAX_BLOCKS)?;
         }
 
-        inode_ref.inode.set_size(new_size);
-        self.write_back_inode(inode_ref);
-
-        log::info!(
-            "[debug_truncate] after: ino: {}, mode: {:#o}, size: {}",
-            inode_ref.inode_num,
-            inode_ref.inode.mode,
-            inode_ref.inode.size()
-        );
-        Ok(EOK)
+        Ok(())
     }
 }
 

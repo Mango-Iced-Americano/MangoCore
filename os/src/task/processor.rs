@@ -410,9 +410,12 @@ pub fn run_tasks() -> ! {
             &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
             stage_t0,
         );
+        // DeviceStack try_lock 失败只登记一次 retry；由下一次 CPU0 调度循环
+        // 重新提交 generation，避免 worker 紧循环饿死持锁者。
+        NET_INTERFACE.run_deferred_poll_retry();
         if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
             let stage_t0 = sched_profile_start(sched_profile);
-            NET_INTERFACE.try_poll();
+            NET_INTERFACE.request_poll();
             sched_record_stage(
                 sched_profile,
                 &SCHED_STAGE_NET_POLL_CALLS,
@@ -525,7 +528,7 @@ pub fn run_tasks() -> ! {
             // 没有就绪的任务 → CPU idle
             let stage_t0 = sched_profile_start(sched_profile);
             if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
-                NET_INTERFACE.poll();
+                NET_INTERFACE.request_poll();
             } else {
                 spin_loop();
             }

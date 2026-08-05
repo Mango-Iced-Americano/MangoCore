@@ -1451,7 +1451,7 @@ impl WaitQueue {
     ///
     /// 等价于 DragonOS 的 `wait_until`（Uninterruptible）。
     /// 适用于内核内部确定性等待（无需信号检查的场景）。
-    /// 文件和网络 IO 通用——`NET_INTERFACE.poll()` 等操作由调用者在 `cond` 闭包中处理。
+    /// 文件和网络 IO 通用；网络条件闭包只查询 readiness，不能直接 poll。
     ///
     /// # Locking
     ///
@@ -2295,10 +2295,14 @@ pub fn run_deferred_timer_work() -> bool {
         }
     }
 
-    // 每个 CPU 独立推进自己的调度 tick；只有 CPU0 顺带执行全局网络 poll。
+    // 每个 CPU 独立推进自己的调度 tick；CPU0 只发布网络 generation，真实 poll
+    // 由固定在 CPU0 的 worker 在任务上下文执行。
     let need_resched = crate::smp::advance_local_sched_tick(now_ns, SCHED_TICK_NS);
     if need_resched && is_boot_cpu {
         crate::net::config::NET_INTERFACE.try_poll_irq();
+        // hard IRQ 只设置 deferred_wake；到这个 task/idle 安全点才允许获取
+        // WaitQueue 并唤醒 worker。
+        crate::net::config::NET_INTERFACE.run_deferred_net_wake();
     }
 
     rearm_local_timer();

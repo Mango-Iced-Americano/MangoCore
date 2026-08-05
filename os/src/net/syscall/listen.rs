@@ -1,3 +1,6 @@
+use crate::net::socket::inet::common::port::{AutoBindPurpose, PortManager};
+use crate::task::current_task;
+
 /// 将 socket 标记为被动模式，准备接受连接。
 ///
 /// # Semantics
@@ -15,6 +18,15 @@
 /// （Linux 3.x+ `somaxconn`）未实现。
 pub fn sys_listen(sockfd: u32, _backlog: u32) -> isize {
     let socket = crate::get_socket!(sockfd);
+    let task = current_task().unwrap();
+    if let Err(error) = PortManager::ensure_auto_bound(
+        &task,
+        &socket,
+        None,
+        AutoBindPurpose::Listen,
+    ) {
+        return -(error as isize);
+    }
     //socket.listen().unwrap() as isize
     match socket.listen() {
         Ok(s) => s as isize,
