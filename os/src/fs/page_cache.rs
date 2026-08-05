@@ -1219,6 +1219,7 @@ impl PageCache {
     /// Fill contiguous missing page runs using backend.read_pages().
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
+        const MAX_BATCH_PAGES: usize = 256;
         let backend = self.backend().ok_or(SyscallErr::EIO)?;
         let backend_npages = backend.npages();
 
@@ -1234,7 +1235,10 @@ impl PageCache {
                 ));
             }
 
-            // 2. Call read_pages() for contiguous subruns within backend range
+            // 2. Call read_pages() in bounded sub-batches (<= MAX_BATCH_PAGES pages,
+            //    1 MiB staging) within backend range, mirroring Linux readahead
+            //    batching. A caller-sized staging buffer is unbounded: a single
+            //    26 MiB read previously forced one 26 MiB heap allocation.
             let mut i = 0;
             while i < new_entries.len() {
                 let start = new_entries[i].0;
@@ -1252,6 +1256,7 @@ impl PageCache {
                 while i < new_entries.len()
                     && new_entries[i].0 == run_start + bufs.len()
                     && new_entries[i].0 < backend_npages
+                    && bufs.len() < MAX_BATCH_PAGES
                 {
                     // SAFETY: we own the only mutable ref to this frame (not yet published to entries)
                     unsafe {
@@ -1260,11 +1265,12 @@ impl PageCache {
                     i += 1;
                 }
                 let n = backend.read_pages(run_start, &mut bufs)?;
-                // Pages fully within the read result are fully valid
+                // Pages fully within the read result are fully valid.
+                // bufs covers new_entries[first_idx .. first_idx + bufs.len()]
+                let first_idx = i - bufs.len();
                 let full_pages = (n / PAGE_SIZE).min(bufs.len());
                 for j in 0..full_pages {
-                    let idx = new_entries.len() - bufs.len() + j;
-                    new_entries[idx]
+                    new_entries[first_idx + j]
                         .1
                         .valid_mask
                         .store(VALID_ALL, Ordering::Release);

@@ -75,6 +75,13 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         if pages.is_empty() {
             return Ok(0);
         }
+        // Defensive bound: the staging Vec below is `pages.len() * PAGE_SIZE`.
+        // Callers must batch (fill_miss_runs caps at 256 pages); an oversized
+        // batch would be an unbounded kernel-heap allocation.
+        const MAX_BATCH_PAGES: usize = 256;
+        if pages.len() > MAX_BATCH_PAGES {
+            return Err(SyscallErr::EFBIG);
+        }
 
         let start_offset = Self::page_offset(start_index)?;
         let total_bytes = pages
