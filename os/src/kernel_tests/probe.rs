@@ -14,11 +14,24 @@ const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_OPENAT: usize = 56;
+const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_READ: usize = 63;
+const SYSCALL_WRITE: usize = 64;
+/// 项目 syscall_id.rs 自定义编号：epoll 系列并非标准 Linux 的 291/292/293。
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const CLOCK_MONOTONIC: usize = 1;
 const EADDRINUSE: isize = -98;
 const UDP_BIND_TEST_PORT_LE: usize = 0xb1ee;
 const UDP_BIND_HOLD_SECS: usize = 1;
 const O_CREAT_EXCL_WRONLY: usize = 0o301;
+const O_RDONLY: usize = 0;
+const AT_FDCWD: isize = -100;
+const EPOLL_CTL_ADD: usize = 1;
+/// EPOLLIN | EPOLLET。探针只注册 edge 通知，第二次非阻塞 pwait 必须返回 0。
+const EPOLLIN_ET: usize = 0x1 | 0x8000_0000;
 
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
@@ -163,7 +176,7 @@ __ktest_tmpfs_create_probe_end:
     .popsection
 "#,
     create_flags = const O_CREAT_EXCL_WRONLY, openat_syscall = const SYSCALL_OPENAT,
-    close_syscall = const 57usize, exit_syscall = const SYSCALL_EXIT,
+    close_syscall = const SYSCALL_CLOSE, exit_syscall = const SYSCALL_EXIT,
 );
 
 #[cfg(target_arch = "loongarch64")]
@@ -199,8 +212,381 @@ __ktest_tmpfs_create_probe_end:
     .popsection
 "#,
     create_flags = const O_CREAT_EXCL_WRONLY, openat_syscall = const SYSCALL_OPENAT,
-    close_syscall = const 57usize, exit_syscall = const SYSCALL_EXIT,
+    close_syscall = const SYSCALL_CLOSE, exit_syscall = const SYSCALL_EXIT,
 );
+
+// ── tmpfs lookup probe ─────────────────────────────────────────
+// 循环 openat(AT_FDCWD=-100, path, O_RDONLY) 直到 ENOENT：
+// 命中文件→close 后继续（并发下反复解析同一路径），ENOENT→exit(1)，
+// 其他错误→exit(2)。用于验证 unlink 生效后 stale lookup 立即失败（目录 generation）。
+// 该探针无循环上限；并发测试中 unlink 探针保证文件最终消失，runner 以有界
+// deadline + SIGKILL 兜底，不会永久占用 CPU。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_tmpfs_lookup_probe, "a"
+    .balign 4
+    .global __ktest_tmpfs_lookup_probe_start
+    .global __ktest_tmpfs_lookup_probe_end
+__ktest_tmpfs_lookup_probe_start:
+    addi t0, a0, 0
+loop:
+    li a0, -100
+    addi a1, t0, 0
+    li a2, 0
+    li a7, {openat_syscall}
+    ecall
+    blt a0, zero, 1f
+    addi a1, a0, 0
+    li a7, {close_syscall}
+    ecall
+    j loop
+1:  li t1, -2
+    beq a0, t1, 3f
+    li a0, 2
+    j 2f
+3:  li a0, 1
+2:  li a7, {exit_syscall}
+    ecall
+4:  j 4b
+__ktest_tmpfs_lookup_probe_end:
+    .popsection
+"#,
+    openat_syscall = const SYSCALL_OPENAT, close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_tmpfs_lookup_probe, "a"
+    .balign 4
+    .global __ktest_tmpfs_lookup_probe_start
+    .global __ktest_tmpfs_lookup_probe_end
+__ktest_tmpfs_lookup_probe_start:
+    move $t0, $a0
+loop:
+    addi.d $a0, $zero, -100
+    move $a1, $t0
+    move $a2, $zero
+    addi.d $a7, $zero, {openat_syscall}
+    syscall 0
+    blt $a0, $zero, 1f
+    move $a1, $a0
+    addi.d $a7, $zero, {close_syscall}
+    syscall 0
+    b loop
+1:  addi.d $t1, $zero, -2
+    beq $a0, $t1, 3f
+    addi.d $a0, $zero, 2
+    b 2f
+3:  addi.d $a0, $zero, 1
+2:  addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+4:  b 4b
+__ktest_tmpfs_lookup_probe_end:
+    .popsection
+"#,
+    openat_syscall = const SYSCALL_OPENAT, close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
+// ── tmpfs unlink probe ─────────────────────────────────────────
+// unlinkat(AT_FDCWD=-100, path, 0)：成功→exit(0)，ENOENT→exit(1)，其他→exit(2)。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_tmpfs_unlink_probe, "a"
+    .balign 4
+    .global __ktest_tmpfs_unlink_probe_start
+    .global __ktest_tmpfs_unlink_probe_end
+__ktest_tmpfs_unlink_probe_start:
+    addi t0, a0, 0
+    li a0, -100
+    addi a1, t0, 0
+    li a2, 0
+    li a7, {unlinkat_syscall}
+    ecall
+    bnez a0, 1f
+    li a0, 0
+    j 2f
+1:  li t0, -2
+    beq a0, t0, 3f
+    li a0, 2
+    j 2f
+3:  li a0, 1
+2:  li a7, {exit_syscall}
+    ecall
+4:  j 4b
+__ktest_tmpfs_unlink_probe_end:
+    .popsection
+"#,
+    unlinkat_syscall = const SYSCALL_UNLINKAT, exit_syscall = const SYSCALL_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_tmpfs_unlink_probe, "a"
+    .balign 4
+    .global __ktest_tmpfs_unlink_probe_start
+    .global __ktest_tmpfs_unlink_probe_end
+__ktest_tmpfs_unlink_probe_start:
+    move $t0, $a0
+    addi.d $a0, $zero, -100
+    move $a1, $t0
+    move $a2, $zero
+    addi.d $a7, $zero, {unlinkat_syscall}
+    syscall 0
+    bnez $a0, 1f
+    move $a0, $zero
+    b 2f
+1:  addi.d $t0, $zero, -2
+    beq $a0, $t0, 3f
+    addi.d $a0, $zero, 2
+    b 2f
+3:  addi.d $a0, $zero, 1
+2:  addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+4:  b 4b
+__ktest_tmpfs_unlink_probe_end:
+    .popsection
+"#,
+    unlinkat_syscall = const SYSCALL_UNLINKAT, exit_syscall = const SYSCALL_EXIT,
+);
+
+// ── eventfd write probe ────────────────────────────────────────
+// write(fd, &u64=1, 8)：eventfd 计数 +1；返回 8 字节→exit(0)，否则→exit(1)。
+// 供 EPOLLET edge 测试的 writer 使用；fd 与 8 字节值由 build_user_probe 预装。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_eventfd_write_probe, "a"
+    .balign 4
+    .global __ktest_eventfd_write_probe_start
+    .global __ktest_eventfd_write_probe_end
+__ktest_eventfd_write_probe_start:
+    addi t1, a1, 0
+    li a2, 8
+    li a7, {write_syscall}
+    ecall
+    li t0, 8
+    bne a0, t0, 1f
+    li a0, 0
+    j 2f
+1:  li a0, 1
+2:  li a7, {exit_syscall}
+    ecall
+3:  j 3b
+__ktest_eventfd_write_probe_end:
+    .popsection
+"#,
+    write_syscall = const SYSCALL_WRITE, exit_syscall = const SYSCALL_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_eventfd_write_probe, "a"
+    .balign 4
+    .global __ktest_eventfd_write_probe_start
+    .global __ktest_eventfd_write_probe_end
+__ktest_eventfd_write_probe_start:
+    move $t1, $a1
+    addi.d $a2, $zero, 8
+    addi.d $a7, $zero, {write_syscall}
+    syscall 0
+    addi.d $t0, $zero, 8
+    bne $a0, $t0, 1f
+    move $a0, $zero
+    b 2f
+1:  addi.d $a0, $zero, 1
+2:  addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+3:  b 3b
+__ktest_eventfd_write_probe_end:
+    .popsection
+"#,
+    write_syscall = const SYSCALL_WRITE, exit_syscall = const SYSCALL_EXIT,
+);
+
+// ── EPOLLET edge reader probe ──────────────────────────────────
+// a0 = eventfd fd。流程：
+//   epoll_create1(0) → epoll_ctl(ADD, fd, EPOLLIN|EPOLLET) →
+//   epoll_pwait(epfd, &events, 1, -1, NULL) 断言 1 事件 →
+//   再次 epoll_pwait(epfd, &events, 1, 0, NULL) 断言 0 事件（edge 不重复触发）→
+//   read(fd, &u64, 8) drain → exit(0)。
+// 失败退出码区分阶段（便于 ktest 定位）：2=epoll_create1、3=epoll_ctl、
+// 4=首次 pwait 非 1、5=二次 pwait 非 0、6=read 非 8。
+// 第二次 pwait 必须返回 0 是 EPOLLET 的核心断言：counter 尚未 drain 也不得重复交付。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_epollet_probe, "a"
+    .balign 4
+    .global __ktest_epollet_probe_start
+    .global __ktest_epollet_probe_end
+__ktest_epollet_probe_start:
+    addi sp, sp, -80
+    sd a0, 0(sp)
+    li a0, 0
+    li a7, {epoll_create1_syscall}
+    ecall
+    blt a0, zero, 1f
+    sd a0, 8(sp)
+    li t0, {epollin_et}
+    sw t0, 16(sp)
+    sd zero, 24(sp)
+    ld a0, 8(sp)
+    li a1, 1
+    ld a2, 0(sp)
+    addi a3, sp, 16
+    li a7, {epoll_ctl_syscall}
+    ecall
+    bnez a0, 2f
+    ld a0, 8(sp)
+    addi a1, sp, 32
+    li a2, 1
+    li a3, -1
+    li a4, 0
+    li a7, {epoll_pwait_syscall}
+    ecall
+    li t0, 1
+    bne a0, t0, 3f
+    ld a0, 8(sp)
+    addi a1, sp, 32
+    li a2, 1
+    li a3, 0
+    li a4, 0
+    li a7, {epoll_pwait_syscall}
+    ecall
+    bnez a0, 4f
+    ld a0, 0(sp)
+    addi a1, sp, 40
+    li a2, 8
+    li a7, {read_syscall}
+    ecall
+    li t0, 8
+    bne a0, t0, 5f
+    li a0, 0
+    j 6f
+1:  li a0, 2
+    j 6f
+2:  li a0, 3
+    j 6f
+3:  li a0, 4
+    j 6f
+4:  li a0, 5
+    j 6f
+5:  li a0, 6
+6:  addi sp, sp, 80
+    li a7, {exit_syscall}
+    ecall
+7:  j 7b
+__ktest_epollet_probe_end:
+    .popsection
+"#,
+    epoll_create1_syscall = const SYSCALL_EPOLL_CREATE1,
+    epoll_ctl_syscall = const SYSCALL_EPOLL_CTL,
+    epoll_pwait_syscall = const SYSCALL_EPOLL_PWAIT,
+    read_syscall = const SYSCALL_READ,
+    exit_syscall = const SYSCALL_EXIT,
+    epollin_et = const EPOLLIN_ET,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_epollet_probe, "a"
+    .balign 4
+    .global __ktest_epollet_probe_start
+    .global __ktest_epollet_probe_end
+__ktest_epollet_probe_start:
+    addi.d $sp, $sp, -80
+    st.d $a0, $sp, 0
+    move $a0, $zero
+    addi.d $a7, $zero, {epoll_create1_syscall}
+    syscall 0
+    blt $a0, $zero, 1f
+    st.d $a0, $sp, 8
+    li.w $t0, {epollin_et}
+    st.w $t0, $sp, 16
+    st.d $zero, $sp, 24
+    ld.d $a0, $sp, 8
+    addi.d $a1, $zero, 1
+    ld.d $a2, $sp, 0
+    addi.d $a3, $sp, 16
+    addi.d $a7, $zero, {epoll_ctl_syscall}
+    syscall 0
+    bnez $a0, 2f
+    ld.d $a0, $sp, 8
+    addi.d $a1, $sp, 32
+    addi.d $a2, $zero, 1
+    addi.d $a3, $zero, -1
+    move $a4, $zero
+    addi.d $a7, $zero, {epoll_pwait_syscall}
+    syscall 0
+    addi.d $t0, $zero, 1
+    bne $a0, $t0, 3f
+    ld.d $a0, $sp, 8
+    addi.d $a1, $sp, 32
+    addi.d $a2, $zero, 1
+    move $a3, $zero
+    move $a4, $zero
+    addi.d $a7, $zero, {epoll_pwait_syscall}
+    syscall 0
+    bnez $a0, 4f
+    ld.d $a0, $sp, 0
+    addi.d $a1, $sp, 40
+    addi.d $a2, $zero, 8
+    addi.d $a7, $zero, {read_syscall}
+    syscall 0
+    addi.d $t0, $zero, 8
+    bne $a0, $t0, 5f
+    move $a0, $zero
+    b 6f
+1:  addi.d $a0, $zero, 2
+    b 6f
+2:  addi.d $a0, $zero, 3
+    b 6f
+3:  addi.d $a0, $zero, 4
+    b 6f
+4:  addi.d $a0, $zero, 5
+    b 6f
+5:  addi.d $a0, $zero, 6
+6:  addi.d $sp, $sp, 80
+    addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+7:  b 7b
+__ktest_epollet_probe_end:
+    .popsection
+"#,
+    epoll_create1_syscall = const SYSCALL_EPOLL_CREATE1,
+    epoll_ctl_syscall = const SYSCALL_EPOLL_CTL,
+    epoll_pwait_syscall = const SYSCALL_EPOLL_PWAIT,
+    read_syscall = const SYSCALL_READ,
+    exit_syscall = const SYSCALL_EXIT,
+    epollin_et = const EPOLLIN_ET,
+);
+
+extern "C" {
+    static __ktest_write_probe_start: u8;
+    static __ktest_write_probe_end: u8;
+    static __ktest_zero_probe_start: u8;
+    static __ktest_zero_probe_end: u8;
+    static __ktest_tmpfs_create_probe_start: u8;
+    static __ktest_tmpfs_create_probe_end: u8;
+    static __ktest_tmpfs_rename_probe_start: u8;
+    static __ktest_tmpfs_rename_probe_end: u8;
+    static __ktest_tmpfs_lookup_probe_start: u8;
+    static __ktest_tmpfs_lookup_probe_end: u8;
+    static __ktest_tmpfs_unlink_probe_start: u8;
+    static __ktest_tmpfs_unlink_probe_end: u8;
+    static __ktest_eventfd_write_probe_start: u8;
+    static __ktest_eventfd_write_probe_end: u8;
+    static __ktest_epollet_probe_start: u8;
+    static __ktest_epollet_probe_end: u8;
+}
 
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
@@ -245,17 +631,6 @@ __ktest_zero_probe_end:
 "#,
     exit_syscall = const SYSCALL_EXIT,
 );
-
-extern "C" {
-    static __ktest_write_probe_start: u8;
-    static __ktest_write_probe_end: u8;
-    static __ktest_zero_probe_start: u8;
-    static __ktest_zero_probe_end: u8;
-    static __ktest_tmpfs_create_probe_start: u8;
-    static __ktest_tmpfs_create_probe_end: u8;
-    static __ktest_tmpfs_rename_probe_start: u8;
-    static __ktest_tmpfs_rename_probe_end: u8;
-}
 
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
@@ -419,6 +794,10 @@ pub(crate) enum ProbeResult {
     UdpBind,
     TmpfsCreate,
     TmpfsRename,
+    TmpfsLookup,
+    TmpfsUnlink,
+    EventFdWrite,
+    EpollEdge,
 }
 
 fn user_probe_program(result: ProbeResult) -> &'static [u8] {
@@ -442,6 +821,22 @@ fn user_probe_program(result: ProbeResult) -> &'static [u8] {
         ProbeResult::TmpfsRename => (
             core::ptr::addr_of!(__ktest_tmpfs_rename_probe_start),
             core::ptr::addr_of!(__ktest_tmpfs_rename_probe_end),
+        ),
+        ProbeResult::TmpfsLookup => (
+            core::ptr::addr_of!(__ktest_tmpfs_lookup_probe_start),
+            core::ptr::addr_of!(__ktest_tmpfs_lookup_probe_end),
+        ),
+        ProbeResult::TmpfsUnlink => (
+            core::ptr::addr_of!(__ktest_tmpfs_unlink_probe_start),
+            core::ptr::addr_of!(__ktest_tmpfs_unlink_probe_end),
+        ),
+        ProbeResult::EventFdWrite => (
+            core::ptr::addr_of!(__ktest_eventfd_write_probe_start),
+            core::ptr::addr_of!(__ktest_eventfd_write_probe_end),
+        ),
+        ProbeResult::EpollEdge => (
+            core::ptr::addr_of!(__ktest_epollet_probe_start),
+            core::ptr::addr_of!(__ktest_epollet_probe_end),
         ),
     };
     // SAFETY: [Category 10/11 — bounds/provenance] 同一 `global_asm!` section 定义的
@@ -542,6 +937,49 @@ pub(crate) fn build_udp_bind_probe() -> Result<Arc<TaskControlBlock>, &'static s
     let entry = map_user_page(&task, user_probe_program(ProbeResult::UdpBind), true)?;
     let mut inner = task.acquire_inner_lock();
     inner.trap_context_mut().gp.pc = entry;
+    drop(inner);
+    Ok(task)
+}
+
+/// 创建共享同一 eventfd 的 EPOLLET reader 探针；`a0` 为该进程内安装的 eventfd fd。
+pub(crate) fn build_epoll_edge_reader(eventfd: Arc<File>) -> Result<Arc<TaskControlBlock>, &'static str> {
+    build_probe_with_fd(ProbeResult::EpollEdge, eventfd, None)
+}
+
+/// 创建共享同一 eventfd 的 writer 探针；`a0` 为该进程内安装的 eventfd fd，
+/// `a1` 指向 8 字节 `u64 = 1` 的用户页。
+pub(crate) fn build_eventfd_writer(eventfd: Arc<File>) -> Result<Arc<TaskControlBlock>, &'static str> {
+    build_probe_with_fd(ProbeResult::EventFdWrite, eventfd, Some(&1u64.to_le_bytes()))
+}
+
+/// 以普通用户 TCB 构造探针，并把一个已存在的 `File` 安装到其 fd 表（`a0`）。
+fn build_probe_with_fd(
+    result: ProbeResult,
+    file: Arc<File>,
+    data: Option<&[u8]>,
+) -> Result<Arc<TaskControlBlock>, &'static str> {
+    let inode = crate::fs::vfs_lookup_absolute("/init")
+        .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
+        .map_err(|_| "ktest initramfs has no user ELF scaffold")?;
+    let elf = File::new(inode, FileFlags::O_RDONLY).map_err(|_| "failed to open user ELF scaffold")?;
+    let task = TaskControlBlock::new(elf);
+    task.process.close_files_on_exit();
+    let fd = task
+        .process
+        .files()
+        .lock()
+        .alloc_fd(file, false)
+        .map_err(|_| "failed to install eventfd fd into probe")?;
+    let entry = map_user_page(&task, user_probe_program(result), true)?;
+    let buffer = match data {
+        Some(bytes) => map_user_page(&task, bytes, false)?,
+        None => 0,
+    };
+    let mut inner = task.acquire_inner_lock();
+    let gp = &mut inner.trap_context_mut().gp;
+    gp.pc = entry;
+    gp.a0 = fd;
+    gp.a1 = buffer;
     drop(inner);
     Ok(task)
 }

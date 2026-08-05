@@ -266,6 +266,10 @@ B 依赖 A 的 API 名（契约已定，可并行）；tmpfs/ramfs 调用方归 
 `test_mount`/`test_umount` 均为 `5/5`。close-out 零盘 ktest
 亦已在两架构 `CORE_NUM=4` 复验：`mm` 5P/0S，`fs_smp` 6P/2S，`net_smp` 7P/3S，
 `ext4` 7P/0S；原始日志为 `fs-net-smp-audit-closeout-{rv64,la64}-ktest-*.log`。
+SKIP 占位清零批次（2026-08-05）后，零盘 ktest 在两架构 `CORE_NUM=4`
+更新为：`fs_smp` 7P/0S、`net_smp` 9P/0S、`ext4` 8P/0S、`mm` 5P/0S
+（`truncate_tail_zero_after_extend` 移入 ext4 组；`tcp_dual_sender_exact_bytes`
+按用户决定删除）。
 
 ### 范围与分支状态
 

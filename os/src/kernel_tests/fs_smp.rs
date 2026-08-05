@@ -14,8 +14,13 @@ use crate::{
         PageState,
     },
     kernel_tests::{
-        fs_smp_fixture::{new_cache, read_inode, run_dual_user_writes, FsSmpCacheInode, MountedTmpfsFixture},
-        probe::{attach_probe_to_runner, build_path_probe, build_user_probe, deadline_after, probe_quiesced, reap_probe, stop_probe, ProbeResult},
+        fs_smp_fixture::{
+            new_cache, read_inode, run_dual_user_writes, FsSmpCacheInode, MountedTmpfsFixture,
+        },
+        probe::{
+            attach_probe_to_runner, build_path_probe, build_user_probe, deadline_after,
+            probe_quiesced, reap_probe, stop_probe, ProbeResult,
+        },
         runner::KernelTest,
     },
 };
@@ -38,8 +43,7 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::with_timeout("fs_smp::pagecache_writeback_redirty", pagecache_writeback_redirty, TEST_TIMEOUT_MS),
         KernelTest::with_timeout("fs_smp::tmpfs_create_same_name_exactly_once", tmpfs_create_same_name_exactly_once, TEST_TIMEOUT_MS),
         KernelTest::with_timeout("fs_smp::tmpfs_cross_rename_opposite_order", tmpfs_cross_rename_opposite_order, TEST_TIMEOUT_MS),
-        KernelTest::skip("fs_smp::tmpfs_lookup_unlink_generation", "requires concurrent lookup/unlink fixture"),
-        KernelTest::skip("fs_smp::truncate_tail_zero_after_extend", "sequential data-integrity check; no concurrent fixture"),
+        KernelTest::with_timeout("fs_smp::tmpfs_lookup_unlink_generation", tmpfs_lookup_unlink_generation, TEST_TIMEOUT_MS),
         KernelTest::with_timeout("fs_smp::different_page_parallel_progress", different_page_parallel_progress, TEST_TIMEOUT_MS),
     ]
 }
@@ -113,6 +117,51 @@ fn tmpfs_cross_rename_opposite_order() -> Result<(), &'static str> {
     let b_exists = directory.find("ktest_rename_b").is_ok();
     if a_exists == b_exists {
         return Err("tmpfs opposite rename left an inconsistent final tree");
+    }
+    Ok(())
+}
+
+/// CPU1 循环 lookup、CPU2 并发 unlink 同一目录项：unlink 恰好一次成功，
+/// 删除后 stale lookup 必须立即 ENOENT（目录 generation），最终树中该名字消失。
+fn tmpfs_lookup_unlink_generation() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() < 3 {
+        return Err("SKIP: requires CPU1 and CPU2 user probes");
+    }
+    let _fixture = MountedTmpfsFixture::mount()?;
+    let directory = crate::fs::vfs_lookup_absolute("/dev/shm").map_err(|_| "tmpfs mount is not visible")?;
+    directory
+        .create("ktest_gen", FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "failed to create tmpfs generation target")?;
+    let path = b"/dev/shm/ktest_gen\0";
+    // lookup 探针循环 openat 直到 ENOENT；unlink 探针执行一次 unlinkat。
+    let looker = build_path_probe(ProbeResult::TmpfsLookup, path)?;
+    let unlinker = build_path_probe(ProbeResult::TmpfsUnlink, path)?;
+    looker.set_initial_cpus_allowed(1 << 1);
+    unlinker.set_initial_cpus_allowed(1 << 2);
+    let looker_parent = attach_probe_to_runner(&looker)?;
+    let unlinker_parent = attach_probe_to_runner(&unlinker)?;
+    // 两个 TCB 均在 runner 观察到任一完成前发布；不以 sleep 伪造窗口。
+    crate::task::publish_task_on(looker.clone(), 1);
+    crate::task::publish_task_on(unlinker.clone(), 2);
+    let looker_done = probe_quiesced(&looker, &looker.process, 1, deadline_after(3));
+    let unlinker_done = probe_quiesced(&unlinker, &unlinker.process, 2, deadline_after(3));
+    let looker_clean = looker_done || stop_probe(&looker, &looker.process, 1);
+    let unlinker_clean = unlinker_done || stop_probe(&unlinker, &unlinker.process, 2);
+    let looker_reaped = reap_probe(&looker_parent, &looker);
+    let unlinker_reaped = reap_probe(&unlinker_parent, &unlinker);
+    if !looker_clean || !unlinker_clean || !looker_reaped || !unlinker_reaped {
+        return Err("lookup/unlink probes did not quiesce and reap");
+    }
+    // unlink 必须恰好成功一次（exit 0）；lookup 必须在 unlink 生效后 ENOENT（exit 1）。
+    if wait_status_exit_code(unlinker.process.exit_code()) != 0 {
+        return Err("concurrent tmpfs unlink did not succeed exactly once");
+    }
+    if wait_status_exit_code(looker.process.exit_code()) != 1 {
+        return Err("stale tmpfs lookup did not observe ENOENT after unlink");
+    }
+    // 最终树中该名字必须消失：generation 使任何残留目录项失效。
+    if directory.find("ktest_gen").is_ok() {
+        return Err("tmpfs unlink left a stale generation entry");
     }
     Ok(())
 }

@@ -11,11 +11,15 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpVersion};
 
 use crate::{
     kernel_tests::{
-        probe::{attach_probe_to_runner, build_udp_bind_probe, deadline_after, probe_quiesced, reap_probe, stop_probe},
+        probe::{
+            attach_probe_to_runner, build_epoll_edge_reader, build_eventfd_writer,
+            build_udp_bind_probe, deadline_after, probe_quiesced, reap_probe, stop_probe,
+        },
         runner::KernelTest,
     },
     net::{
         config::{NetPollTestHookPoint, NET_INTERFACE},
+        routing::InetProtocol,
         socket::{
             inet::{
                 common::port::PortManager,
@@ -47,20 +51,10 @@ pub fn tests() -> Vec<KernelTest> {
         ),
         KernelTest::new("net_smp::tcp_udp_same_numeric_port", tcp_udp_same_numeric_port),
         KernelTest::new("net_smp::namespace_port_isolation", namespace_port_isolation),
-        KernelTest::skip(
-            "net_smp::route_handle_reuse_rejected",
-            "requires WP5 route revalidation machinery",
-        ),
+        KernelTest::new("net_smp::route_handle_reuse_rejected", route_handle_reuse_rejected),
         KernelTest::new("net_smp::per_stack_poll_progress", per_stack_poll_progress),
         KernelTest::new("net_smp::poll_worker_no_lost_wake", poll_worker_no_lost_wake),
-        KernelTest::skip(
-            "net_smp::tcp_dual_sender_exact_bytes",
-            "requires user-probe fixture (dual sender)",
-        ),
-        KernelTest::skip(
-            "net_smp::epollet_concurrent_edge",
-            "requires WP6 epoll edge machinery",
-        ),
+        KernelTest::new("net_smp::epollet_concurrent_edge", epollet_concurrent_edge),
     ]
 }
 
@@ -315,4 +309,147 @@ fn per_stack_poll_progress() -> Result<(), &'static str> {
     crate::net::net_core::remove_device(left as usize);
     crate::net::net_core::remove_device(right as usize);
     result
+}
+
+/// WP5 路由重验：route handle 单调不复用，移除后旧 handle 不得 alias 新 socket。
+///
+/// FAIL-before：旧 route 修改新 socket；PASS-after：stack 内 route ID 重验失败。
+fn route_handle_reuse_rejected() -> Result<(), &'static str> {
+    let (left, right) = crate::drivers::net::veth::veth_pair_new("rhrveth0", "rhrveth1");
+    let cleanup = |left: u32, right: u32| {
+        NET_INTERFACE.remove_veth_stack(left);
+        NET_INTERFACE.remove_veth_stack(right);
+        crate::net::net_core::remove_device(left as usize);
+        crate::net::net_core::remove_device(right as usize);
+    };
+
+    // 在 left 栈上注册一个真实 smoltcp UDP socket，得到单调 route handle。
+    let first = {
+        let rx = smoltcp::socket::udp::PacketBuffer::new(
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+            vec![0u8; 2048],
+        );
+        let tx = smoltcp::socket::udp::PacketBuffer::new(
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+            vec![0u8; 2048],
+        );
+        let socket = smoltcp::socket::udp::Socket::new(rx, tx);
+        match NET_INTERFACE.add_routed_socket_on(InetProtocol::Udp, socket, left) {
+            Some(handle) => handle,
+            None => {
+                cleanup(left, right);
+                return Err("failed to add first routed socket");
+            }
+        }
+    };
+    if NET_INTERFACE.routed_ifindex(first) != Some(left) {
+        cleanup(left, right);
+        return Err("first route handle did not resolve to left stack");
+    }
+
+    // 移除该 route；此后旧 handle 必须立即失效。
+    NET_INTERFACE.remove_routed(first);
+    if NET_INTERFACE.routed_ifindex(first).is_some() {
+        cleanup(left, right);
+        return Err("removed route handle still resolved");
+    }
+    if NET_INTERFACE
+        .udp_routed_socket(first, |_| ())
+        .is_some()
+    {
+        cleanup(left, right);
+        return Err("removed route handle still reached a socket");
+    }
+
+    // 在 right 栈注册新 socket：新 handle 必须不同，且旧 handle 不得 alias 它。
+    let second = {
+        let rx = smoltcp::socket::udp::PacketBuffer::new(
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+            vec![0u8; 2048],
+        );
+        let tx = smoltcp::socket::udp::PacketBuffer::new(
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4],
+            vec![0u8; 2048],
+        );
+        let socket = smoltcp::socket::udp::Socket::new(rx, tx);
+        match NET_INTERFACE.add_routed_socket_on(InetProtocol::Udp, socket, right) {
+            Some(handle) => handle,
+            None => {
+                cleanup(left, right);
+                return Err("failed to add second routed socket");
+            }
+        }
+    };
+    if second == first {
+        cleanup(left, right);
+        return Err("route handle was reused");
+    }
+    if NET_INTERFACE.routed_ifindex(first).is_some()
+        || NET_INTERFACE.routed_ifindex(second) != Some(right)
+    {
+        cleanup(left, right);
+        return Err("stale route handle aliased the new socket");
+    }
+    NET_INTERFACE.remove_routed(second);
+    cleanup(left, right);
+    Ok(())
+}
+
+/// EPOLLET edge 语义 + eventfd 跨 CPU 通知：writer 写一次，reader 只收到一次
+/// edge；数据未 drain 时第二次非阻塞 pwait 必须返回 0（edge 不 level）。
+fn epollet_concurrent_edge() -> Result<(), &'static str> {
+    if crate::smp::configured_cpu_count() < 3 {
+        return Err("SKIP: requires CPU1 and CPU2 user probes");
+    }
+    // runner 创建 eventfd，并把同一 File 安装进两个用户探针的 fd 表。
+    let runner_task = crate::task::current_task().ok_or("epollet test has no current task")?;
+    let eventfd = crate::fs::eventfd::sys_eventfd2(0, 0);
+    if eventfd < 0 {
+        drop(runner_task);
+        return Err("failed to create eventfd for epollet probe");
+    }
+    let eventfd_file = {
+        // 先克隆 FdTable Arc，再在锁内取 File；guard 不跨表达式存活。
+        let files = runner_task.process.files();
+        let mut guard = files.lock();
+        match guard.get_file(eventfd as usize) {
+            Ok(file) => file,
+            Err(_) => {
+                drop(guard);
+                drop(runner_task);
+                return Err("failed to retrieve eventfd file");
+            }
+        }
+    };
+    drop(runner_task);
+
+    let reader = build_epoll_edge_reader(eventfd_file.clone())?;
+    let writer = build_eventfd_writer(eventfd_file)?;
+    reader.set_initial_cpus_allowed(1usize << 1);
+    writer.set_initial_cpus_allowed(1usize << 2);
+    let reader_parent = attach_probe_to_runner(&reader)?;
+    let writer_parent = attach_probe_to_runner(&writer)?;
+    // reader 先入队并阻塞在 epoll_pwait；writer 随后写入触发一次 edge。
+    crate::task::publish_task_on(reader.clone(), 1);
+    crate::task::publish_task_on(writer.clone(), 2);
+    let reader_done = probe_quiesced(&reader, &reader.process, 1, deadline_after(3));
+    let writer_done = probe_quiesced(&writer, &writer.process, 2, deadline_after(3));
+    let reader_clean = reader_done || stop_probe(&reader, &reader.process, 1);
+    let writer_clean = writer_done || stop_probe(&writer, &writer.process, 2);
+    let reader_reaped = reap_probe(&reader_parent, &reader);
+    let writer_reaped = reap_probe(&writer_parent, &writer);
+    if !reader_clean || !writer_clean || !reader_reaped || !writer_reaped {
+        return Err("epollet probes did not quiesce and reap");
+    }
+    let reader_status = reader.process.exit_code();
+    let writer_status = writer.process.exit_code();
+    if reader_status != 0 || writer_status != 0 {
+        crate::println!(
+            "# net_smp epollet probe status: reader={}, writer={}",
+            reader_status,
+            writer_status
+        );
+        return Err("epollet probe syscalls failed");
+    }
+    Ok(())
 }
