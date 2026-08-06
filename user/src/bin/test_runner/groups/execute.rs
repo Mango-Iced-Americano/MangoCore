@@ -26,6 +26,7 @@ pub fn run_selected_groups(environ: &[*const u8], cfg: &RuntimeConfig) {
             if cfg.ltp_libc != LtpLibc::Musl { run_ltp_suite_runner(environ, "/glibc/ltp", "glibc", cfg.timeouts[index], cfg.conf_source.as_deref()); }
         }
         else if group == "cpython" { run_group_in_dir(environ, "/tools/tests/cpython\0", group, script, cfg.timeouts[index], cfg.diag); }
+        else if group == "buildstorm" || group == "cagent" { run_group_in_dir(environ, "/glibc\0", group, script, cfg.timeouts[index], cfg.diag); }
         else { run_group_in_dir(environ, "/musl\0", group, script, cfg.timeouts[index], cfg.diag); run_group_in_dir(environ, "/glibc\0", group, script, cfg.timeouts[index], cfg.diag); }
         sleep(1000); }
     println!("[initproc] run_selected_groups done");
