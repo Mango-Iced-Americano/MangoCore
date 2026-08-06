@@ -11,6 +11,7 @@ use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
 use crate::timer::current_time_duration;
 use crate::trace_event;
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -61,6 +62,30 @@ static NET_PERF_LOCK_BUSY: AtomicUsize = AtomicUsize::new(0);
 static NET_PERF_POLL_TICKS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "net_perf_diag")]
 static NET_PERF_POLL_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+/// P0-3 诊断计数器：CPU0 网络 worker 的 IRQ-on 物理扫描窗口进入/退出次数。
+///
+/// 只在 `net_poll_worker` 内递增：进入窗口前记 ENTER，`with_local_interrupts_enabled`
+/// 的 guard 恢复 IRQ-off（窗口真正关闭）后才记 EXIT。ktest 用 `ENTER == EXIT`
+/// 证明每个窗口都完整关闭，没有任何发送路径逃出中断窗口。
+pub static NET_POLL_WINDOW_ENTER: AtomicUsize = AtomicUsize::new(0);
+pub static NET_POLL_WINDOW_EXIT: AtomicUsize = AtomicUsize::new(0);
+
+/// P0-3 诊断计数器：VirtIO 物理发送进入/完成次数、累计字节与发送 CPU 掩码。
+///
+/// `VIRTIO_TX_ENTER == VIRTIO_TX_COMPLETE` 表示每次进入 `net.send` 的发送都在
+/// 窗口内同步完成；`VIRTIO_TX_CPU_MASK` OR 记录实际执行发送的 CPU，测试断言其
+/// 只含 bit0。计数器是热路径上的 Relaxed 原子，不分配内存。
+pub static VIRTIO_TX_ENTER: AtomicUsize = AtomicUsize::new(0);
+pub static VIRTIO_TX_COMPLETE: AtomicUsize = AtomicUsize::new(0);
+pub static VIRTIO_TX_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
+pub static VIRTIO_TX_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// AF_PACKET raw-egress 队列的容量上限。
+///
+/// 有界队列防止 syscall 上下文的发送者无限堆积；队列满时 `transmit_on_stack`
+/// 返回 ENOBUFS，由用户态选择重试或放弃。worker 在 IRQ-on 窗口内 drain。
+const RAW_EGRESS_QUEUE_LIMIT: usize = 32;
 
 #[cfg(feature = "net_perf_diag")]
 fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed_ticks: usize) {
@@ -203,6 +228,11 @@ struct NetPollControl {
     deferred_wake: AtomicBool,
     /// DeviceStack try_lock 失败只置位；CPU0 下一 scheduler tick 才重新提交。
     retry_armed: AtomicBool,
+    /// CPU0 worker 是否正处在 IRQ-on 物理扫描窗口内（Release/Acquire）。
+    ///
+    /// 窗口前置位、guard 恢复 IRQ-off 后清除。`VirtIONetWrapper::transmit` 用
+    /// 它断言物理发送只发生在该窗口，避免 IRQ-off 同步发送等不到 completion。
+    poll_active: AtomicBool,
     /// 静态控制块延迟分配，lazy wait 在登记后再次检查 pending 关闭丢唤醒窗口。
     worker_wait: Mutex<Option<crate::task::WaitQueue>>,
     /// 同上；completion 的权威条件仍是 completed ticket。
@@ -217,6 +247,7 @@ impl NetPollControl {
             pending: AtomicBool::new(false),
             deferred_wake: AtomicBool::new(false),
             retry_armed: AtomicBool::new(false),
+            poll_active: AtomicBool::new(false),
             worker_wait: Mutex::new(None),
             completion_wait: Mutex::new(None),
         }
@@ -295,6 +326,12 @@ struct DeviceStackInner<'a> {
     bindings: BTreeMap<RouteSocketHandle, LocalSocketBinding>,
     dhcp_handle: Option<SocketHandle>,
     pending_dhcp_event: Option<DhcpLeaseEvent>,
+    /// AF_PACKET raw-egress 帧队列（与 `device`/`iface` 同 N2 锁域）。
+    ///
+    /// 发送者在 syscall 上下文（IRQ-off）只能 push 本队列，不能直接做物理发送；
+    /// CPU0 worker 在 IRQ-on 窗口内 drain 并经设备令牌完成真正的发送。push 与
+    /// drain 在同一个 `DeviceStackInner` 锁内互斥，不会出现队列并发改写。
+    raw_egress: VecDeque<Vec<u8>>,
 }
 
 #[derive(Clone, Copy)]
@@ -454,6 +491,7 @@ impl<'a> NetDirectory<'a> {
                         bindings: BTreeMap::new(),
                         dhcp_handle: None,
                         pending_dhcp_event: None,
+                        raw_egress: VecDeque::new(),
                     }),
                 }),
             );
@@ -533,7 +571,11 @@ impl<'a> NetDirectory<'a> {
 
             #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
             if has_real_nic {
-                // DHCP probe
+                // DHCP 探测延迟到调度器运行后，由固定 CPU0 的 worker 在 IRQ-on
+                // 物理扫描窗口内推进。早期 boot 直接 `eth_iface.poll` 会在 IRQ-off
+                // 上下文同步走 VirtIO 发送，等不到 completion 中断；DHCP 事件随后由
+                // worker 的 `capture_dhcp_event`/`commit_dhcp_event` 提交（见
+                // `try_poll_stack`）。
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
                     discover_timeout: Duration::from_secs(2),
@@ -542,41 +584,8 @@ impl<'a> NetDirectory<'a> {
                     min_renew_timeout: Duration::from_secs(60),
                     ..dhcpv4::RetryConfig::default()
                 });
-                let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline =
-                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
-
-                loop {
-                    let timestamp =
-                        Instant::from_millis(current_time_duration().as_millis() as i64);
-                    *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
-                    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-
-                    let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-                    match event {
-                        Some(dhcpv4::Event::Configured(cfg)) => {
-                            net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
-                            net_core::set_default_gateway(cfg.router);
-                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
-                            net_core::set_dns_servers(&dns_servers);
-                            log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
-                                cfg.address,
-                                cfg.router,
-                                dns_servers
-                            );
-                            break;
-                        }
-                        Some(dhcpv4::Event::Deconfigured) => {}
-                        None => {}
-                    }
-
-                    if timestamp >= deadline {
-                        log::info!("[net::config] DHCP timeout, continuing without IP");
-                        break;
-                    }
-                }
-                eth_sockets.remove(dhcp_handle);
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+                println!("[net] eth0 DHCP client started (deferred to CPU0 poll worker)");
             }
 
             // Source IP from net_core (DHCP result)
@@ -614,6 +623,7 @@ impl<'a> NetDirectory<'a> {
                         bindings: BTreeMap::new(),
                         dhcp_handle: runtime_dhcp_handle,
                         pending_dhcp_event: None,
+                        raw_egress: VecDeque::new(),
                     }),
                 }),
             );
@@ -700,6 +710,14 @@ impl<'a> NetInterface<'a> {
             self.poll.submitted.load(Ordering::Acquire),
             self.poll.completed.load(Ordering::Acquire),
         )
+    }
+
+    /// 查询 CPU0 网络 worker 是否正处在 IRQ-on 物理扫描窗口内。
+    ///
+    /// worker 在窗口前置位、guard 恢复 IRQ-off 后清除（均 Release store）。
+    /// `VirtIONetWrapper::transmit` 用它断言物理发送只发生在该窗口。
+    pub fn physical_poll_active(&self) -> bool {
+        self.poll.poll_active.load(Ordering::Acquire)
     }
 
     /// 在任务或 idle 安全点把 IRQ 的发布转换为 worker 唤醒。
@@ -797,6 +815,7 @@ impl<'a> NetInterface<'a> {
                 bindings: BTreeMap::new(),
                 dhcp_handle: None,
                 pending_dhcp_event: None,
+                raw_egress: VecDeque::new(),
             }),
         });
         if let Some(directory) = self.directory.lock().as_mut() {
@@ -861,17 +880,33 @@ impl<'a> NetInterface<'a> {
         stack.inner.lock().iface.set_mtu(mtu);
     }
 
-    pub fn transmit_on_stack(&self, ifindex: u32, bytes: &[u8]) -> Result<isize, crate::utils::error::SyscallErr> {
+    /// AF_PACKET 发送入口：把帧排入目标 DeviceStack 的有界 raw-egress 队列，
+    /// 再由 CPU0 worker 在 IRQ-on 物理扫描窗口内经设备令牌完成发送。
+    ///
+    /// 发送者运行在 syscall 上下文（IRQ-off），不能直接做 VirtIO 同步发送
+    /// （等不到 completion 中断）；因此只 push 队列并 `request_poll()`，不在
+    /// 此处触碰 `device.transmit`。队列与 worker drain 在同一 N2 锁域互斥。
+    pub fn transmit_on_stack(
+        &self,
+        ifindex: u32,
+        bytes: &[u8],
+    ) -> Result<isize, crate::utils::error::SyscallErr> {
         let stack = self
             .stack_arc(ifindex)
             .ok_or(crate::utils::error::SyscallErr::ENETDOWN)?;
-        let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+        if stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
+            return Err(crate::utils::error::SyscallErr::ENETDOWN);
+        }
         let mut inner = stack.inner.lock();
-        let token = inner
-            .device
-            .transmit(timestamp)
-            .ok_or(crate::utils::error::SyscallErr::ENETDOWN)?;
-        token.consume(bytes.len(), |buffer| buffer.copy_from_slice(bytes));
+        if inner.raw_egress.len() >= RAW_EGRESS_QUEUE_LIMIT {
+            // 有界队列已满：返回 ENOBUFS 让用户态决定重试或放弃，不在此处
+            // 阻塞等待 worker 腾出空间。
+            return Err(crate::utils::error::SyscallErr::ENOBUFS);
+        }
+        inner.raw_egress.push_back(bytes.to_vec());
+        // 释放 N2 后才请求 worker 推进，避免锁序反向嵌套。
+        drop(inner);
+        self.request_poll();
         Ok(bytes.len() as isize)
     }
 
@@ -1049,12 +1084,41 @@ impl<'a> NetInterface<'a> {
         }
     }
 
+    /// 在 CPU0 worker 的 IRQ-on 窗口内 drain 一个 DeviceStack 的 AF_PACKET
+    /// raw-egress 队列，经 smoltcp 设备令牌完成物理/环回发送。
+    ///
+    /// 队列的 push（syscall 上下文）与 drain（worker 窗口）在同一个
+    /// `DeviceStackInner`（N2）锁域内互斥；发送顺序保持 FIFO。设备暂时无
+    /// token（如 veth peer 满）时帧回到队首由下一轮重试，不在此处自旋。
+    fn drain_raw_egress(&self, stack: &Arc<DeviceStackCell<'a>>) {
+        let mut inner = stack.inner.lock();
+        if inner.raw_egress.is_empty() {
+            return;
+        }
+        let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
+        while let Some(frame) = inner.raw_egress.pop_front() {
+            match inner.device.transmit(timestamp) {
+                Some(token) => {
+                    let len = frame.len();
+                    token.consume(len, |buffer| buffer.copy_from_slice(&frame));
+                }
+                None => {
+                    inner.raw_egress.push_front(frame);
+                    break;
+                }
+            }
+        }
+    }
+
     /// 一轮 worker poll：每个 stack 只试拿一次锁；每次通知均由 `try_poll_stack()`
     /// 在释放 DeviceStack 后完成，严格保持 N2 -> N3 不反向嵌套。
     fn poll_each_stack_bounded(&self) {
         self.drain_pending_socket_removals();
         for stack in self.snapshot_stack_arcs() {
             if stack.state.load(Ordering::Acquire) == STACK_ACTIVE {
+                // AF_PACKET raw-egress 帧必须先于 iface.poll 发送：它们可能承载
+                // 用户显式注入的流量，不能排在协议栈自己生成的帧之后。
+                self.drain_raw_egress(&stack);
                 let _ = self.try_poll_stack(stack.ifindex);
             }
         }
@@ -1065,6 +1129,12 @@ impl<'a> NetInterface<'a> {
     /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；每次醒来最多
     /// 消费两张 pending ticket。第一轮清门后到来的请求由第二轮处理；第二轮之后
     /// 仍有新请求则保留 pending，交还 scheduler 后重新走等待协议，不在此处自旋。
+    ///
+    /// 每轮真实扫描包在 `with_local_interrupts_enabled` 的 IRQ-on 窗口内执行：
+    /// smoltcp 的同步 VirtIO 发送只有在这种窗口才能等到 used-ring completion。
+    /// hard IRQ 在窗口内只发布原子状态（`kick_from_irq`），不重入 DeviceStack/
+    /// VirtIO/event 锁；窗口关闭后才发布 completion、唤醒等待者，最后调用
+    /// `run_task_safe_point` 兑现窗口内累积的 timer/IPI deferred 状态。
     pub fn net_poll_worker(&self) {
         loop {
             match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.worker_wait, || {
@@ -1089,12 +1159,32 @@ impl<'a> NetInterface<'a> {
                     break;
                 }
                 let target = self.poll.submitted.load(Ordering::Acquire);
-                self.poll_each_stack_bounded();
+                // 进入 IRQ-on 物理扫描窗口前发布 poll_active（Release），使
+                // VirtIO transmit 断言与诊断计数器可以观察到 CPU0 worker 窗口。
+                // 清门/快照仍在 IRQ-off 下完成，窗口只包住真实扫描。
+                self.poll.poll_active.store(true, Ordering::Release);
+                NET_POLL_WINDOW_ENTER.fetch_add(1, Ordering::Relaxed);
+                // 窗口内允许 virtio completion 中断到达，同步发送才能等到
+                // used-ring 完成。hard IRQ 仍只发布原子状态（kick_from_irq），
+                // 绝不重入 DeviceStack/VirtIO/event 锁——窗口内持锁（N2、
+                // VirtIO mutex）时中断到达不会反向加锁。timer/IPI 在窗口内也只
+                // 发布 deferred 状态，由窗口后的 run_task_safe_point 兑现。
+                crate::hal::with_local_interrupts_enabled(|| {
+                    self.poll_each_stack_bounded()
+                });
+                // guard 已恢复 IRQ-off（窗口真正关闭）：此时才允许清除
+                // poll_active 并发布 completion / 唤醒等待者。
+                NET_POLL_WINDOW_EXIT.fetch_add(1, Ordering::Relaxed);
+                self.poll.poll_active.store(false, Ordering::Release);
                 self.poll.completed.store(target, Ordering::Release);
                 // N2 已全部释放，才允许进入 completion WaitQueue 的唤醒路径。
                 if let Some(wait_queue) = self.poll.completion_wait.lock().as_mut() {
                     wait_queue.wake_all();
                 }
+                // 窗口内 timer/IPI 只发布 deferred 状态；在全部 DeviceStack/VirtIO/
+                // event 锁释放后调用安全点兑现（可能 context switch，本 worker
+                // 作为 current 出让，返回后继续下一轮）。
+                crate::task::run_task_safe_point();
             }
         }
     }

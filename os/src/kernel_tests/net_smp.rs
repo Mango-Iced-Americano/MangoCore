@@ -54,6 +54,7 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new("net_smp::route_handle_reuse_rejected", route_handle_reuse_rejected),
         KernelTest::new("net_smp::per_stack_poll_progress", per_stack_poll_progress),
         KernelTest::new("net_smp::poll_worker_no_lost_wake", poll_worker_no_lost_wake),
+        KernelTest::new("net_smp::virtio_tx_window_counters", virtio_tx_window_counters),
         KernelTest::new("net_smp::epollet_concurrent_edge", epollet_concurrent_edge),
     ]
 }
@@ -220,6 +221,63 @@ fn poll_worker_no_lost_wake() -> Result<(), &'static str> {
     } else {
         Err("net poll worker did not complete the published generation")
     }
+}
+
+/// P0-3 诊断：CPU0 worker 每个物理扫描都进入并完整关闭 IRQ-on 窗口，且 VirtIO
+/// TX 全部在窗口内同步完成、只发生在 CPU0。
+///
+/// 复用 `poll_worker_no_lost_wake` 的发布/等待模式跑一轮真实 worker 扫描，然后
+/// 检查窗口计数器与 TX 计数器。ktest 环境无真实 VirtIO 网卡（loopback only）时
+/// TX 计数器保持零，本测试优雅 SKIP；真实网卡路径由 normal QEMU 门禁覆盖。
+fn virtio_tx_window_counters() -> Result<(), &'static str> {
+    use crate::net::config::{
+        NET_POLL_WINDOW_ENTER, NET_POLL_WINDOW_EXIT, VIRTIO_TX_COMPLETE, VIRTIO_TX_CPU_MASK,
+        VIRTIO_TX_ENTER,
+    };
+    let (requested_before, completed_before) = NET_INTERFACE.poll_generation_snapshot();
+    let window_enter_before = NET_POLL_WINDOW_ENTER.load(Ordering::Relaxed);
+    let _ = NET_INTERFACE.try_poll_irq();
+    NET_INTERFACE.run_deferred_net_wake();
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    let completed = crate::hal::with_local_interrupts_enabled(|| loop {
+        let (requested, completed) = NET_INTERFACE.poll_generation_snapshot();
+        if requested > requested_before && completed >= requested && completed > completed_before {
+            break true;
+        }
+        if crate::hal::get_time() >= deadline {
+            break false;
+        }
+        crate::task::run_task_safe_point();
+        core::hint::spin_loop();
+    });
+    if !completed {
+        return Err("net poll worker did not complete the published generation");
+    }
+
+    // worker 与 runner 都在 CPU0，读取时无窗口在飞；ENTER 必须严格增长且
+    // 每个窗口都完整关闭（ENTER == EXIT），否则有发送路径逃出 IRQ-on 窗口。
+    let window_enter = NET_POLL_WINDOW_ENTER.load(Ordering::Relaxed);
+    let window_exit = NET_POLL_WINDOW_EXIT.load(Ordering::Relaxed);
+    if window_enter <= window_enter_before || window_enter != window_exit {
+        return Err("IRQ-on poll window did not enter and fully close per round");
+    }
+
+    // VirtIO TX 不变量：进入一次必须同步完成一次，且只发生在 CPU0。
+    let tx_enter = VIRTIO_TX_ENTER.load(Ordering::Relaxed);
+    let tx_complete = VIRTIO_TX_COMPLETE.load(Ordering::Relaxed);
+    let tx_mask = VIRTIO_TX_CPU_MASK.load(Ordering::Relaxed);
+    if tx_enter != tx_complete {
+        return Err("VirtIO TX entered without completing inside the window");
+    }
+    if tx_mask & !(1usize << crate::smp::BOOT_CPU_ID) != 0 {
+        return Err("VirtIO TX ran on a non-CPU0 hart");
+    }
+    if tx_enter == 0 {
+        // 无真实 VirtIO 网卡（loopback only）：窗口不变量已验证，TX 断言退化。
+        return Err("SKIP: no VirtIO TX exercised in this loopback-only environment");
+    }
+    Ok(())
 }
 
 /// WP4 的 owner 精度测试直接观察现有 UDP bucket：关闭一个 reuse owner 不能删除 peer。

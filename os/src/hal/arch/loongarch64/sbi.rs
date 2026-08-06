@@ -47,6 +47,15 @@ pub fn local_irq_save() -> bool {
     was_enabled
 }
 
+/// 返回当前核中断是否使能（CRMD.IE）。
+///
+/// 网络发送路径用它区分"调度器/任务上下文（中断开启，可等待 VirtIO
+/// completion 中断）"与"syscall/trap 上下文（中断关闭，等不到 completion，
+/// 必须延迟发送）"。
+pub fn irq_enabled() -> bool {
+    CrMd::read().is_interrupt_enabled()
+}
+
 /// 恢复中断使能状态到调用 local_irq_save 之前的值。
 pub fn local_irq_restore(was_enabled: bool) {
     if was_enabled {

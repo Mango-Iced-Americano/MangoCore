@@ -26,8 +26,8 @@ pub mod trap;
 pub type KernelPageTableImpl = laflex::LAFlexPageTable;
 pub type PageTableImpl = laflex::LAFlexPageTable;
 pub use sbi::{
-    console_flush, console_getchar, console_putchar, console_write_bytes, local_irq_restore,
-    local_irq_save, machine_shutdown, panic_console_write,
+    console_flush, console_getchar, console_putchar, console_write_bytes, irq_enabled,
+    local_irq_restore, local_irq_save, machine_shutdown, panic_console_write,
 };
 pub use switch::__switch;
 pub use tlb::{set_asid, tlb_global_invalidate, tlb_invalidate};

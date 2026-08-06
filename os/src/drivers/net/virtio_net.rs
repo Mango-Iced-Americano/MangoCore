@@ -7,6 +7,7 @@ use crate::drivers::block::virtio_blk_pci::{enumerate_virtio_pci, VirtioHal};
 
 #[cfg(feature = "block_virt")]
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 use virtio_drivers::device::net::{TxBuffer, VirtIONet};
 #[cfg(feature = "block_virt")]
@@ -78,9 +79,29 @@ impl NetDevice for VirtIONetWrapper {
     }
 
     fn transmit(&self, buf: &[u8]) {
+        // 生产级断言：物理发送只允许发生在 CPU0 worker 的 IRQ-on 物理扫描窗口内。
+        //
+        // VirtIO `net.send` 是同步发送，在 used-ring 耗尽时会自旋等待完成中断；
+        // 若在 IRQ-off 上下文（syscall/trap/boot probe）调用，completion 永远到
+        // 达不了，整个内核死锁。CPU0 worker 通过 `with_local_interrupts_enabled`
+        // 开窗，`physical_poll_active` 标记窗口状态；三条条件同时成立才允许发送。
+        assert!(
+            crate::hal::irq_enabled()
+                && crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID
+                && crate::net::config::NET_INTERFACE.physical_poll_active(),
+            "VirtIO transmit outside CPU0 IRQ-on physical poll window \
+             (irq_enabled={} cpu={})",
+            crate::hal::irq_enabled(),
+            crate::smp::cpu_id(),
+        );
+        crate::net::config::VIRTIO_TX_ENTER.fetch_add(1, Ordering::Relaxed);
         let mut net = self.0.lock();
         let tx_buf = TxBuffer::from(buf);
         net.send(tx_buf).expect("Virtio Net Send Failed");
+        crate::net::config::VIRTIO_TX_COMPLETE.fetch_add(1, Ordering::Relaxed);
+        crate::net::config::VIRTIO_TX_CPU_MASK
+            .fetch_or(1usize << crate::smp::cpu_id(), Ordering::Relaxed);
+        crate::net::config::VIRTIO_TX_BYTES.fetch_add(buf.len() as u64, Ordering::Relaxed);
     }
 
     fn mac_address(&self) -> [u8; 6] {
