@@ -82,6 +82,13 @@ validate-run:
 run: validate-run print-logo toolchain-preflight
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" run
 
+# BuildStorm boots the official x0 userspace in its own chroot.  It is a
+# normal kernel build with an explicit init profile, so the formal PROFILE
+# contract remains limited to normal/regression.
+buildstorm: toolchain-preflight
+	$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64))
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=normal" "CORE_NUM=$(or $(CORE_NUM),8)" "QEMU_MEMORY=$(or $(QEMU_MEMORY),8G)" buildstorm
+
 test: toolchain-preflight
 	$(call validate-formal-inputs)
 	$(if $(filter regression,$(PROFILE)),,$(error PROFILE must be regression))

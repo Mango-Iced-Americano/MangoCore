@@ -9,5 +9,5 @@ pub fn cmdline_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    proc_read_str(offset, len, buf, "BOOT_IMAGE=kernel\n")
+    proc_read_str(offset, len, buf, crate::bootargs::get_cmdline())
 }

@@ -3,16 +3,21 @@
 
 extern crate alloc;
 use alloc::format;
+use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
-use user_lib::syscall::{sys_mkdirat, sys_mount};
+use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_mount, sys_sched_setaffinity};
 use user_lib::{
-    exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
+    chdir, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
     waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
 };
 
 const PID1: isize = 1;
 const RUNNER: &str = "/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
+const BUILDSTORM_INIT: &str = "/sbin/init\0";
+const BUILDSTORM_FALLBACK_INIT: &str = "/init\0";
+const BUILDSTORM_SCRIPT: &str = "/glibc/buildstorm_testcode.sh\0";
+const BUILDSTORM_SHELL: &str = "/bin/sh\0";
 const SIGACTION_RESTART: usize = 0x10000000;
 const MS_BIND: usize = 4096;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
@@ -94,14 +99,94 @@ fn mount_disk(source: &'static str, target: &'static str) -> bool {
     try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
 }
 
-fn try_bind_mount(source: &str, target: &str) {
+fn try_bind_mount(source: &str, target: &str) -> bool {
     let src = alloc::format!("{}\0", source);
     let tgt = alloc::format!("{}\0", target);
     let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
     if ret == 0 {
         println!("[init] bind mount {} -> {}", source, target);
+        true
     } else {
-        println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
+        println!(
+            "[init] bind mount {} -> {}: skipped (errno={})",
+            source, target, -ret
+        );
+        false
+    }
+}
+
+fn root_path(root: &str, suffix: &str) -> alloc::string::String {
+    format!("{}{}\0", root.trim_end_matches('\0'), suffix)
+}
+
+/// Prepare the BuildStorm chroot with only the host pseudo-filesystems.
+/// The official x0 tree must remain intact; `/tools` is deliberately absent.
+fn bind_buildstorm_pseudo_filesystems(root: &str) -> bool {
+    for suffix in ["/proc", "/sys", "/dev", "/tmp"] {
+        let target = root_path(root, suffix);
+        let _ = sys_mkdirat(-100, &target, 0o755);
+    }
+    let mut mounted = true;
+    for (source, suffix) in [
+        ("/proc", "/proc"),
+        ("/sys", "/sys"),
+        ("/dev", "/dev"),
+        ("/tmp", "/tmp"),
+    ] {
+        let target = root_path(root, suffix);
+        mounted &= try_bind_mount(source, &target);
+    }
+    mounted
+}
+
+fn enter_buildstorm_root() -> bool {
+    if !bind_buildstorm_pseudo_filesystems("/sdcard") {
+        println!("[init] BuildStorm pseudo-filesystem setup failed");
+        return false;
+    }
+    if chdir("/\0") < 0 {
+        println!("[init] BuildStorm pre-chroot chdir failed");
+        return false;
+    }
+    let ret = sys_chroot("/sdcard\0".as_ptr());
+    if ret < 0 || chdir("/\0") < 0 {
+        println!("[init] BuildStorm chroot failed: {}", ret);
+        return false;
+    }
+    println!("[init] BuildStorm profile entered /sdcard chroot");
+    true
+}
+
+fn enable_buildstorm_cpus() {
+    let mask = usize::MAX;
+    let ret = sys_sched_setaffinity(0, size_of::<usize>(), &mask as *const usize as *const u8);
+    if ret < 0 {
+        println!("[init] BuildStorm sched_setaffinity(all) failed: {}", ret);
+    } else {
+        println!("[init] BuildStorm sched_setaffinity(all) enabled");
+    }
+}
+
+fn exec_buildstorm_init() -> ! {
+    let env = runner_environment("buildstorm");
+    // Official x0 images may ship a generic /sbin/init shell. Prefer the
+    // compatibility ladder when present, then retain init/shell fallbacks.
+    for path in [
+        BUILDSTORM_SCRIPT,
+        BUILDSTORM_INIT,
+        BUILDSTORM_FALLBACK_INIT,
+        BUILDSTORM_SHELL,
+    ] {
+        println!("[init] BuildStorm exec {}", path.trim_end_matches('\0'));
+        let ret = exec(path, &[path.as_ptr(), core::ptr::null()], &env);
+        println!(
+            "[init] BuildStorm exec {} failed: {}",
+            path.trim_end_matches('\0'),
+            ret
+        );
+    }
+    loop {
+        sleep(1000);
     }
 }
 
@@ -120,10 +205,7 @@ fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
     }
     // sdcard: bind-mount musl/glibc runtime directories.
     if disk_ok {
-        for (src, dst) in [
-            ("/sdcard/musl", "/musl"),
-            ("/sdcard/glibc", "/glibc"),
-        ] {
+        for (src, dst) in [("/sdcard/musl", "/musl"), ("/sdcard/glibc", "/glibc")] {
             try_bind_mount(src, dst);
         }
     }
@@ -145,6 +227,12 @@ fn boot_profile() -> &'static str {
         "regression"
     } else if size > 0
         && cmdline[..size as usize]
+            .windows(b"profile=buildstorm".len())
+            .any(|v| v == b"profile=buildstorm")
+    {
+        "buildstorm"
+    } else if size > 0
+        && cmdline[..size as usize]
             .windows(b"profile=rescue".len())
             .any(|v| v == b"profile=rescue")
     {
@@ -158,6 +246,7 @@ fn runner_environment(profile: &str) -> [*const u8; 8] {
     let profile_var = match profile {
         "regression" => "MANGO_BOOT_PROFILE=regression\0",
         "rescue" => "MANGO_BOOT_PROFILE=rescue\0",
+        "buildstorm" => "MANGO_BOOT_PROFILE=buildstorm\0",
         _ => "MANGO_BOOT_PROFILE=normal\0",
     };
     [
@@ -206,10 +295,22 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     prepare_pseudo_fs_framework();
     mount_pseudo_filesystems();
     let profile = boot_profile();
+    if profile == "buildstorm" {
+        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
+        // BuildStorm owns the complete x0 userspace.  Give it a fresh tmpfs
+        // and expose only the pseudo-filesystems needed by its toolchain.
+        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+        if !disk_ok || !enter_buildstorm_root() {
+            println!("[init] BuildStorm root unavailable; entering rescue");
+            rescue_forever();
+        }
+        enable_buildstorm_cpus();
+        exec_buildstorm_init();
+    }
     if profile != "regression" {
         let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
-        let tools_ok = mount_disk("/dev/vdb1\0", "/tools\0")
-            || mount_disk("/dev/vdb\0", "/tools\0");
+        let tools_ok =
+            mount_disk("/dev/vdb1\0", "/tools\0") || mount_disk("/dev/vdb\0", "/tools\0");
         // /tmp: prefer ext4-backed /tmp if a block device is available
         if disk_ok {
             const AT_FDCWD: isize = -100;
@@ -222,7 +323,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
                 0,
             );
             if result < 0 {
-                println!("[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs", result);
+                println!(
+                    "[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs",
+                    result
+                );
                 let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
             } else {
                 println!("[init] /tmp is bind-mounted from ext4 /sdcard/tmp");

@@ -8,7 +8,7 @@ RUSTUP_HOME ?= $(HOME)/.rustup
 CARGO_HOME ?= $(HOME)/.cargo
 export RUSTUP_HOME CARGO_HOME
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint buildstorm ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -148,6 +148,10 @@ validate-run:
 
 run: validate-run toolchain-preflight
 	$(MAKE) ARCH=$(ARCH) -f make/$(ARCH).mk run INITRAMFS_PROFILE=$(PROFILE)
+
+buildstorm: toolchain-preflight
+	$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64))
+	$(MAKE) ARCH=$(ARCH) PROFILE=normal -f make/$(ARCH).mk buildstorm MODE=$(MODE) CORE_NUM=$(CORE_NUM) QEMU_MEMORY=$(QEMU_MEMORY)
 
 test: prepare-cargo-config
 	$(call validate-formal-inputs)

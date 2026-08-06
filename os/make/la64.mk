@@ -13,6 +13,12 @@ QEMU_COMPETITION_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m $(QEMU_MEMORY) $(QEMU_S
 QEMU_COMPETITION_AFTER_DRIVES = -no-reboot $(NET_DEV) -rtc base=utc
 QEMU_COMPETITION_GDB_BEFORE_DRIVES = -kernel $(KERNEL_LA) -m $(QEMU_MEMORY) -smp 1
 QEMU_COMPETITION_GDB_AFTER_DRIVES = -no-reboot -rtc base=utc -S -s
+QEMU_BUILDSTORM_BEFORE_DRIVES = -kernel $(BUILDSTORM_KERNEL_LA) -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
+QEMU_BUILDSTORM_AFTER_DRIVES = $(QEMU_COMPETITION_AFTER_DRIVES)
+BUILDSTORM_PRODUCT_ROOT ?= $(PRODUCT_ROOT)/buildstorm
+BUILDSTORM_KERNEL_OUTPUT_ROOT ?= $(BUILDSTORM_PRODUCT_ROOT)/kernel
+BUILDSTORM_USER_OUTPUT_ROOT ?= $(BUILDSTORM_PRODUCT_ROOT)/user
+BUILDSTORM_KERNEL_LA ?= $(BUILDSTORM_KERNEL_OUTPUT_ROOT)/kernel-la
 QEMU_DEVELOPMENT_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
 QEMU_DEVELOPMENT_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
 QEMU_REGRESSION_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
@@ -159,6 +165,14 @@ derived-comp: toolchain-preflight
 
 comp-gdb: toolchain-preflight
 	@$(call qemu_competition_gdb_command)
+
+buildstorm: toolchain-preflight
+	@$(MAKE) -B -f $(firstword $(MAKEFILE_LIST)) build \
+		PRODUCT_ROOT="$(BUILDSTORM_PRODUCT_ROOT)" \
+		KERNEL_OUTPUT_ROOT="$(BUILDSTORM_KERNEL_OUTPUT_ROOT)" \
+		USER_OUTPUT_ROOT="$(BUILDSTORM_USER_OUTPUT_ROOT)" \
+		KERNEL_CMDLINE="$(BUILDSTORM_CMDLINE)"
+	@$(call qemu_profile_command,buildstorm)
 
 .PHONY: all build kernel fs-img user clean run runsimple comp comp-gdb env toolchain-preflight check ktest-build-only check-development-x0 derived-comp la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 

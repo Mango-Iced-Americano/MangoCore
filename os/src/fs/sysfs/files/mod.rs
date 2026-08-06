@@ -22,6 +22,34 @@ pub fn register_all(root: &Arc<SysInode>) -> Result<(), SyscallErr> {
     root.add_dir("block", InodeMode::from_bits_truncate(0o555))?;
     warn!("[sysfs] register_all: /sys/block created");
 
+    // CPU topology consumed by nproc/getconf and BuildStorm's compatibility
+    // harness.  Keep the logical namespace identical to /proc/cpuinfo and
+    // publish a Linux-compatible inclusive range (for example, 0-7).
+    let devices_dir = root.add_dir_inner("devices", InodeMode::from_bits_truncate(0o555))?;
+    let system_dir = devices_dir.add_dir_inner("system", InodeMode::from_bits_truncate(0o555))?;
+    let cpu_dir = system_dir.add_dir_inner("cpu", InodeMode::from_bits_truncate(0o555))?;
+    let cpu_count = crate::smp::configured_cpu_count();
+    let online = if cpu_count == 0 {
+        String::from("\n")
+    } else {
+        format!("0-{}\n", cpu_count - 1)
+    };
+    cpu_dir.add_file_owned(
+        "online",
+        InodeMode::from_bits_truncate(0o444),
+        online.clone(),
+    )?;
+    cpu_dir.add_file_owned(
+        "present",
+        InodeMode::from_bits_truncate(0o444),
+        online.clone(),
+    )?;
+    cpu_dir.add_file_owned("possible", InodeMode::from_bits_truncate(0o444), online)?;
+    warn!(
+        "[sysfs] register_all: /sys/devices/system/cpu topology ({})",
+        cpu_count
+    );
+
     #[cfg(feature = "perf_diag")]
     {
         let kernel_dir = root.add_dir_inner("kernel", InodeMode::from_bits_truncate(0o555))?;
