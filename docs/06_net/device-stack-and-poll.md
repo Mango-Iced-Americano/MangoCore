@@ -4,7 +4,7 @@ module: "config.rs"
 category: net
 status: current
 owner: "MangoCore Team"
-last_updated: "2026-08-05"
+last_updated: "2026-08-06"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/socket/inet/stream/mod.rs"
@@ -120,7 +120,11 @@ pub fn init() {
 2. `net_core::init()` 注册 lo（ifindex=1）和 eth0（ifindex=2）到网络命名空间的设备列表。
 3. `NET_INTERFACE.init()` 调用 `NetDirectory::new()`，构造两个固定 DeviceStack：
    - lo 栈：`IfaceDevice::Lo(Loopback)`，IP 地址 127.0.0.1/8 + ::1/128。
-   - eth0 栈：`IfaceDevice::Eth(SmoltcpDeviceAdapter)`，若存在物理 NIC 则执行 DHCP 探针（5 秒超时），否则使用 `NullNetDevice`。
+   - eth0 栈：`IfaceDevice::Eth(SmoltcpDeviceAdapter)`；若存在物理 NIC 则注册常驻
+     DHCP socket，否则使用 `NullNetDevice`。
+
+`NetInterface::init()` 在目录发布后立即 `request_poll()`。此时 worker 尚未创建也没关系：
+`pending=true` 会被 worker 首次 `wait_event` 的条件复查消费，boot 路径不直接 poll 设备。
 
 veth 设备栈通过 `add_veth_stack()` 动态注册，在 `NetInterface::init()` 完成后由 veth 对创建路径调用。
 
@@ -152,6 +156,9 @@ DeviceStack Arc，逐栈只 `try_lock()` 一次。第一轮扫描期间的新请
 
 某个栈繁忙时只设置 `retry_armed`，CPU0 下一 scheduler tick 才再次请求。worker
 释放 DeviceStack 后才提交 DHCP 事件并通知 TCP/UDP/RAW/accept/epoll 等等待者。
+由于 kernel worker 从 IRQ-off 的调度边界进入，每轮真实扫描使用
+`with_local_interrupts_enabled()` 临时开中断，避免同步 VirtIO TX 轮询 used ring
+期间长时间屏蔽 timer/IPI；窗口关闭且网络锁释放后才调用任务安全点处理调度请求。
 
 ### `poll_now()` 与 `try_poll_stack()`
 
@@ -164,9 +171,11 @@ DeviceStack Arc，逐栈只 `try_lock()` 一次。第一轮扫描期间的新请
 ```text
 drain 延迟删除 route
   -> 快照全部 DeviceStack Arc，释放 NetDirectory
+  -> 打开本 CPU 受控 IRQ 窗口
   -> 每栈 try_lock：veth packet tap -> smoltcp poll -> 提取内核所有的 packet/DHCP 事件
   -> 释放 DeviceStack
   -> 提交 DHCP/route/device 状态并唤醒 socket、EventPoll 与 WaitQueue
+  -> 关闭 IRQ 窗口 -> 任务安全点
 ```
 
 ### 默认关闭的性能诊断
@@ -322,7 +331,7 @@ pub fn route_check(dest: IpAddress) -> Result<(), SyscallErr>
 - [architecture.md](architecture.md) — 网络子系统整体架构
 - [device-adapter.md](device-adapter.md) — `IfaceDevice` 枚举与 `SmoltcpDeviceAdapter`
 - [routing.md](routing.md) — `RouteSocketHandle` / route 目录与本地 binding / 路由查找
-- [dhcp.md](dhcp.md) — 启动阶段 DHCP 探针流程
+- [dhcp.md](dhcp.md) — 常驻 DHCP 状态机与租约提交流程
 - [neighbour.md](neighbour.md) — ARP/NDP 邻居表与 `CURRENT_POLL_IFINDEX`
 - [net-core-iface.md](net-core-iface.md) — `Iface` trait 与 `NetDeviceEntry`
 - `os/src/net/config.rs` — 代码源文件

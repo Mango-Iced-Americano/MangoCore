@@ -3,7 +3,7 @@ title: "网络子系统调试指南"
 category: debugging
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-15
+last_updated: 2026-08-06
 tags: [net, debugging, qemu, gdb, troubleshooting]
 code_paths:
   - "os/src/net/config.rs"
@@ -30,7 +30,7 @@ cd os && make rv64-run LOG=trace
 | 等级 | 用途 | 示例输出 |
 |------|------|----------|
 | `error` | 不可恢复的错误 | `[virtio_net] transmit failed` |
-| `warn` | 可恢复的异常 | `[netlink] recv_queue full`、DHCP 超时 |
+| `warn` | 可恢复的异常 | `[netlink] recv_queue full`、DHCP 租约丢失 |
 | `info` | 关键生命周期事件 | `[net::config] initialized 2 stacks`、`[net_core] registered eth0` |
 | `debug` | 数据流跟踪 | socket 状态转换、缓冲操作 |
 | `trace` | 逐函数级调试 | poll 循环细节、smoltcp 内部状态 |
@@ -86,19 +86,16 @@ trace_event!(0xB031, handle.0 as u64, remote.port as u64, 0, 0, 0, 0);
 log::info!("[TcpSocket::connect] handle={} remote={}", handle, remote);
 ```
 
-### DHCP 探测进度
+### DHCP 租约进度
 
-```rust
-// config.rs — DHCP 探测
-log::info!("[net::config] starting DHCP probe on eth0");
-// ...
-log::info!("[net::config] DHCP offer received: {}",
-    dhcp_config.address);
-// ...
-log::info!("[net::config] DHCP timeout, continuing without IP");
+```text
+[net] eth0 DHCP client started (deferred to CPU0 poll worker)
+[net] DHCP configured eth0=... gateway=... dns=...
+[net] DHCP lease lost on eth0; discovery restarted
 ```
 
-DHCP 成功时输出分配的 IP 地址。超时后 eth0 无 IP 地址 — 这是已知限制，后续没有自动重试。
+首条日志只表示 socket 已注册；必须继续看到 `DHCP configured`。未获得
+租约时常驻状态会自动重试，不再存在启动期 5 秒超时后删除 socket 的路径。
 
 ### Poll 统计
 
@@ -790,7 +787,7 @@ if let Some(n) = try_deliver_local(remote, &data)? {
 | `os/src/net/adapter.rs` | SmoltcpDeviceAdapter，设备抽象层 |
 | `os/src/net/mod.rs` | Socket::alloc，TCP_SOCKETS/RAW_SOCKETS 全局列表 |
 | `os/src/net/routing.rs` | 路由表，FIB，RouteSocketHandle 管理 |
-| `os/src/net/net_core.rs` | 设备注册，DHCP 探测，netns |
+| `os/src/net/net_core.rs` | 设备注册，DHCP 租约状态，netns |
 
 ### Syscall 层
 
@@ -874,6 +871,6 @@ if let Some(n) = try_deliver_local(remote, &data)? {
 | send() 返回 0 但无响应 | packets.pcap 有出站帧吗？ | ARP 解析失败 |
 | recv() 永远 EAGAIN | poll progressed? | 非阻塞路径缺 try_poll |
 | bind 端口失败 | SO_REUSEADDR 设置了吗？ | TIME_WAIT 残留 |
-| DHCP 超时 | QEMU 提供 virtio-net 吗？ | NET_DEVICE 为 None |
+| DHCP 长时间未配置 | 有 `client started` 但无 `configured` 吗？ | 无网卡、worker 未 poll 或 DHCP 服务不可达 |
 | 内核 Panic | 用户地址验证了吗？ | 缺 translated_byte_buffer |
 | 死锁 | 锁顺序检查 | task 锁 → NET_INTERFACE 锁 |

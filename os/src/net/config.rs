@@ -141,7 +141,8 @@ fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed
 }
 
 /// 初始化网络子系统。必须先调用 `net_core::init()` 注册 lo/eth0 设备，
-/// 再调用本函数创建对应的 `smoltcp::Interface` 并启动 DHCP 探测。
+/// 再调用本函数创建对应的 `smoltcp::Interface`、注册常驻 DHCP socket
+/// 并发布首轮后台 poll 请求。
 ///
 /// 如果 `NET_DEVICE` 中无网卡，仅启用 loopback。
 pub fn init() {
@@ -480,7 +481,9 @@ impl<'a> NetDirectory<'a> {
 
             #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
             if has_real_nic {
-                // DHCP probe
+                // QEMU 也使用与 gmac_dhcp 相同的常驻 DHCP 上层语义。启动阶段
+                // 仍处于 IRQ-off 上下文，不在这里 poll VirtIO 并轮询 TX used ring；
+                // 只注册 socket，交给调度器启动后的 CPU0 worker。
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
                     discover_timeout: Duration::from_secs(2),
@@ -489,41 +492,8 @@ impl<'a> NetDirectory<'a> {
                     min_renew_timeout: Duration::from_secs(60),
                     ..dhcpv4::RetryConfig::default()
                 });
-                let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline =
-                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
-
-                loop {
-                    let timestamp =
-                        Instant::from_millis(current_time_duration().as_millis() as i64);
-                    *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
-                    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-
-                    let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-                    match event {
-                        Some(dhcpv4::Event::Configured(cfg)) => {
-                            net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
-                            net_core::set_default_gateway(cfg.router);
-                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
-                            net_core::set_dns_servers(&dns_servers);
-                            log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
-                                cfg.address,
-                                cfg.router,
-                                dns_servers
-                            );
-                            break;
-                        }
-                        Some(dhcpv4::Event::Deconfigured) => {}
-                        None => {}
-                    }
-
-                    if timestamp >= deadline {
-                        log::info!("[net::config] DHCP timeout, continuing without IP");
-                        break;
-                    }
-                }
-                eth_sockets.remove(dhcp_handle);
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+                println!("[net] eth0 DHCP client started (deferred to CPU0 poll worker)");
             }
 
             // Source IP from net_core (DHCP result)
@@ -577,6 +547,9 @@ impl<'a> NetDirectory<'a> {
 impl<'a> NetInterface<'a> {
     pub fn init(&self) {
         self._init();
+        // worker 尚未创建时 request_poll() 只保留 pending=true；worker 首次进入
+        // wait_event 的条件复查就会消费它，从而立即发送首个 DHCP Discover。
+        self.request_poll();
     }
 
     pub fn add_socket<T>(&self, ifindex: u32, socket: T) -> Option<SocketHandle>
@@ -1014,7 +987,14 @@ impl<'a> NetInterface<'a> {
                 if !self.poll.pending.swap(false, Ordering::AcqRel) {
                     break;
                 }
-                self.poll_each_stack_bounded();
+                // kernel worker 从调度器的 IRQ-off 边界进入。smoltcp 可能同步
+                // 提交 VirtIO TX 并轮询 used ring，不应在整个等待期间屏蔽 timer/IPI。
+                // hard IRQ 仍只发布原子 pending/deferred 状态，不会重入
+                // DeviceStack、VirtIO 或 WaitQueue 锁域。
+                crate::hal::with_local_interrupts_enabled(|| self.poll_each_stack_bounded());
+                // 受控窗口已关闭，且本轮所有网络锁均已释放；在此统一兑现窗口内
+                // 累积的 timer/IPI 调度请求，禁止在网络临界区中途切换任务。
+                crate::task::run_task_safe_point();
             }
         }
     }

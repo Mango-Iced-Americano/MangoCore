@@ -4,7 +4,7 @@ module: "net"
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-05
+last_updated: 2026-08-06
 code_paths:
   - "os/src/net/mod.rs"
   - "os/src/net/config.rs"
@@ -292,7 +292,7 @@ pub fn init_net_device() {
 pub fn init() {
     let has_nic = NET_DEVICE.lock().is_some();
     net_core::init();         // 注册 lo 和 eth0 到 netns 设备列表
-    NET_INTERFACE.init();     // 创建 DeviceStack，DHCP 探测
+    NET_INTERFACE.init();     // 创建 DeviceStack、注册 DHCP socket、发布首轮 poll
 }
 ```
 
@@ -311,30 +311,18 @@ pub fn init() {
    - 使用 `SmoltcpDeviceAdapter::new(NET_DEVICE.take())`。
    - smoltcp 配置为 `HardwareAddress::Ethernet(mac)`。
 
-3. **DHCP 探测**（eth0 有硬件时）：
+3. **注册常驻 DHCP socket**（eth0 有硬件时）：
 
 ```rust
-// DHCP 探测伪代码
+// boot 阶段只注册，不直接 poll VirtIO
 let mut dhcp_socket = dhcpv4::Socket::new();
 dhcp_socket.set_retry_config(/* 2s discover, 1s request, 3 retries */);
-let dhcp_handle = eth_sockets.add(dhcp_socket);
-
-loop {
-    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-    match dhcp_socket.poll() {
-        Some(Event::Configured(cfg)) => {
-            set_eth0_ipv4(cfg.address);
-            set_default_gateway(cfg.router);
-            break;
-        }
-        _ => {}
-    }
-    if timeout(5s) { break; }
-}
-eth_sockets.remove(dhcp_handle);
+runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+NET_INTERFACE.request_poll(); // worker 首次条件复查消费 pending
 ```
 
-4. **注入 DHCP 结果**：将从 netns 收集到的 IP 地址和默认网关写入 eth0 的 smoltcp `Interface`。
+4. **运行时提交租约**：CPU0 worker 在 IRQ-on 窗口内推进 socket；释放 DeviceStack
+   后把地址、默认路由和 DNS 同步到 `net_core` 与当前 netns。
 
 ### 5.2 TCP 发送
 
@@ -458,9 +446,11 @@ worker 每次醒来最多消费两轮 pending，并按以下顺序推进：
 清理待删除 route
   -> NetDirectory 内快照 DeviceStack Arc
   -> 释放目录锁
+  -> 打开本 CPU 受控 IRQ 窗口
   -> 每个栈只 try_lock 一次：veth tap -> smoltcp poll -> 提取 packet/DHCP 结果
   -> 释放栈锁
   -> 提交 DHCP/route/device 状态并通知 socket、EventPoll、WaitQueue
+  -> 关闭 IRQ 窗口 -> 任务安全点
 ```
 
 关键边界：
@@ -472,6 +462,9 @@ worker 每次醒来最多消费两轮 pending，并按以下顺序推进：
 4. **忙栈延迟重试**：`try_lock` 失败只置 `retry_armed`，由 CPU0 下一 tick 重提请求，
    worker 不在内核栈上忙等。
 5. **Veth 帧预分发**：在 smoltcp 消费前把原始帧递交给 AF_PACKET。
+6. **同步 TX 期间可响应中断**：kernel worker 可能在 VirtIO TX 中轮询
+   used ring，真实扫描因此只在受控 IRQ-on 窗口执行；hard IRQ 仍只发布
+   原子状态，窗口关闭并释放全部网络锁后才允许安全点调度。
 
 ---
 
@@ -551,7 +544,7 @@ try_capture_arp_reply(&self.buf, ifindex);
 | UDP 收发 | libcbench UDP 延迟测试 | `os_test.conf mask=0x080` (libcbench) |
 | 环回 | basic ping 127.0.0.1 | `os_test.conf mask=0x001` |
 | 并发连接 | unixbench 网络相关测试 | `os_test.conf mask=0x020` |
-| DHCP | busybox udhcpc | 内核内 DHCP 在启动阶段完成 |
+| DHCP | basic/busybox QEMU 网络用例 | 内核常驻 DHCP socket 由 CPU0 worker 推进 |
 | ARP | busybox ping 同网段 IP | 依赖 neighbour.rs |
 | epoll 加网络 | libcbench epoll 测试 | 全测试集 |
 | 多设备 | veth 对测试 | `add_veth_stack` 和 `remove_veth_stack` |
@@ -570,7 +563,8 @@ try_capture_arp_reply(&self.buf, ifindex);
 3. **CPU0 poll owner 的扩展性**：单 owner 简化了中断和锁序，但高 PPS、多设备同时
    繁忙时可能成为瓶颈；必须先依据 poll/lock-busy 计数再决定是否引入 NAPI 风格预算。
 
-4. **DHCP 超时无回退**：DHCP 探测超时（5 秒）后 eth0 无 IP 地址，系统继续运行但网络不可用。没有后续重试或无状态地址自动配置机制。
+4. **DHCP 无静态回退**：DHCP 状态机会持续重试和续租，但没有可用服务器时 eth0
+   保持无 IPv4 地址；当前也没有 IPv4 link-local 或 IPv6 SLAAC 回退。
 
 5. **ARP 表老化机制缺失**：`NEIGHBOUR_TABLE` 是全局持久表（`BTreeMap`），条目不会自动过期。删除依赖 netlink `RTM_DELNEIGH` 或手动干预，缺少 Linux 内核的周期性 NUD 超时回收机制。高 ARP 压力场景下条目可能持续膨胀。
 

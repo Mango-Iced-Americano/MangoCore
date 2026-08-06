@@ -4,7 +4,7 @@ module: "os/src/net/config.rs"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: "2026-08-05"
+last_updated: "2026-08-06"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/net_core.rs"
@@ -93,9 +93,10 @@ glibc 的同步 resolver 还依赖两项 socket ABI：在 UDP 查询 socket 上�
 
 ## QEMU 兼容路径
 
-非 2K1000 GMAC 配置仍保留原有启动期 5 秒 DHCP 探测，以维持现有 QEMU 启动和
-测例时序。该路径现在也保存 DHCP DNS，但完成或超时后仍删除 DHCP socket，尚不
-具备 QEMU 侧续租能力。
+QEMU 与启用 `gmac_dhcp` 的 2K1000LA 共用上述常驻状态机。网络初始化只注册
+DHCP socket 并发布首轮 poll 请求，不在 IRQ-off 的 boot 路径同步发送；调度器启动后，
+固定在 CPU0 的 worker 在受控 IRQ-on 窗口内发送 Discover 并持续处理续租/重新绑定。
+未启用 `gmac_dhcp` 的 2K1000LA 静态直连配置保持不变。
 
 ## 构建与实板验证
 

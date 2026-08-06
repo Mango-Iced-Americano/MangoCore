@@ -4,7 +4,7 @@ module: "net"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: 2026-08-05
+last_updated: 2026-08-06
 code_paths:
   - "os/src/net/"
 entry_points:
@@ -160,7 +160,7 @@ socket/epoll 通知与用户 copy 都在相应业务锁释放后执行。同一 
 | `os/src/net/iface.rs` | 接口管理，地址配置 | [net-core-iface.md](net-core-iface.md) |
 | `os/src/net/ioctl.rs` | SIOCGIF* ioctl 处理函数 | [net-core-iface.md](net-core-iface.md) |
 | `os/src/net/macros.rs` | impl_file_for_socket! 及其他辅助宏 | — |
-| `os/src/net/net_core.rs` | 网络核心初始化，DHCP 探测 | [net-core-iface.md](net-core-iface.md), [dhcp.md](dhcp.md) |
+| `os/src/net/net_core.rs` | 网络核心初始化，DHCP 租约状态同步 | [net-core-iface.md](net-core-iface.md), [dhcp.md](dhcp.md) |
 | `os/src/net/posix.rs` | POSIX 类型转换与常量定义 | — |
 
 ### 系统调用层
@@ -204,7 +204,7 @@ socket/epoll 通知与用户 copy 都在相应业务锁释放后执行。同一 
 | Unix 数据报套接字 | 已完成 | SOCK_DGRAM |
 | Netlink 套接字 | 部分完成 | NETLINK_ROUTE：GETLINK、GETADDR、GETROUTE |
 | Packet 套接字（AF_PACKET） | 已完成 | SOCK_RAW + SOCK_DGRAM 模式 |
-| DHCP | 已完成 | 启动时同步探测，基于 smoltcp |
+| DHCP | 已完成 | 常驻 smoltcp 状态机，由 CPU0 poll worker 推进 |
 | 多接口 | 已完成 | 每设备独立 smoltcp 协议栈，路由器设备 |
 | /proc/net | 已完成 | /proc/net/tcp、/proc/net/udp、/proc/net/unix 等 |
 | 套接字 epoll 支持 | 已完成 | 通过 Socket::epoll_type() 集成事件 |
