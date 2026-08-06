@@ -172,8 +172,11 @@ switch 不再固定执行全量 `invtlb`。这与
 以及 [Linux LoongArch versioned ASID](https://codebrowser.dev/linux/linux/arch/loongarch/include/asm/mmu_context.h.html)
 的原则一致：编号复用前统一换代失效，而不是每次切换地址空间都全刷。
 
-Rust 到 `__restore` 的 ABI 桥接直接把 trap context、token、ASID 约束到
-`$a0/$a1/$a2`，跳转地址使用独立寄存器。禁止用多个泛型 `in(reg)` 再顺序 `move` 到
+Rust 到 `__restore` 的 ABI 桥接直接把 trap context、token、ASID 和用户异常入口约束到
+`$a0/$a1/$a2/$a3`，跳转地址使用独立寄存器。用户 EENTRY 不能在 Rust 中提前安装：
+ASID rollover 等待远端 ack 时会临时开放中断，过早切换会让内核 IPI/timer 错误进入
+用户 trap。`__restore` 在 TrapContext 已写入 `CSR.SAVE` 后才安装用户 EENTRY。
+禁止用多个泛型 `in(reg)` 再顺序 `move` 到
 参数寄存器：LLVM 可以让后续输入复用这些寄存器，模板内的前序写入会在消费前覆盖它。
 从快照取得到 `ertn` 保持本地 IRQ 关闭，保证 rollover IPI 的 flush/ack 不会越过旧快照
 的实际用户态恢复。

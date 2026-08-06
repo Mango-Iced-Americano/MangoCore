@@ -103,6 +103,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | develop Batch 5 signalfd 动态等待域 | 2026-08-03 | GPT/Codex, DeepSeek | Linux signalfd owner 对照、fork/锁序/原始指针审查、双架构 8 核 L4 回归与 RV64 ABI 溯源 | read/poll 动态绑定 current sighand，pending 锁外通知；修复 wait4 rusage 漏参，两架构 regression 7/7 |
 | develop Batch 6 read/pread 可写前缀 | 2026-08-03 | GPT/Codex, DeepSeek | develop 性能意图迁移、VA-backed 生命周期审查、双架构 8 核 L4 回归 | 单 VM 临界区确定可写前缀，只 fault-in 首页；实际 copy 逐页重验，两架构 regression 7/7 |
 | develop Batch 7 procfs CPU 拓扑 | 2026-08-03 | GPT/Codex, DeepSeek | Linux procfs ABI 对照、启动门禁/平台模型审查、双架构 8 核 L4 回归 | cpuinfo/stat 输出 8 个逻辑 CPU；修复 regression PID1 缺少 procfs，双架构 8/8 |
+| RV64 全量 LTP removexattr panic 溯源 | 2026-08-06 | GPT/Codex, DeepSeek | 只读检查全量日志、xattr 调用链、vendored/upstream C 控制流和官方 LTP 行为 | 定位 `ext4_xattr_remove()` 传入未初始化 finder 的复制错误；人工复核采纳核心定因，同时纠正模型控制流文字和遗漏的 ENODATA 边界；尚未实施修复 |
+| RV64 removexattr 与 LA64 ASID rollover 修复 | 2026-08-06 | GPT/Codex, DeepSeek | 双架构根因修复、Docker 串行 8 核构建、focused QEMU 回归和只读代码审查 | RV64 musl/glibc 精确用例通过；LA64 ASID rollover ktest 通过，整组另有一个与本补丁无关的 affinity 失败；人工复核纠正模型对该失败历史和预期页权限异常的过度推断 |
 
 ## 4. 详细使用场景
 
@@ -1489,6 +1491,24 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   精确 ELF 复核显示两架构 `TRACE` 均为 26,869,832 bytes 且位于
   `NOBITS .bss`；两个真实 QEMU runner 均无 mutation/panic/timeout。
 
+### Case 65: RV64 全量 LTP removexattr 空指针溯源
+
+- Evidence: `docs/Work_Log/2026-08-06.md`、
+  `docs/Work_Log/evidence/2026-08-06/smp-full-8g/qemu-rv64.log`；DeepSeek 原始报告
+  保留在本地 Claude plan 目录，不上传 GitHub。
+- AI roles: DeepSeek 以 max-effort 只读审查追踪 syscall→VFS→lwext4 FFI→C finder；
+  GPT/Codex 复核反汇编、官方 LTP 源码、lwext4 upstream master 和 Git blame。
+- Problem: RV64 8 核/8 GiB 全量运行在 `ltp-musl` 第 922 个 `removexattr01`
+  用例中，以 bad address 0 在 `ext4_xattr_set_entry()` 崩溃。
+- AI contribution: DeepSeek 准确发现 inode-body else 分支误传从未初始化的
+  `block_finder.s`，而不是已由搜索函数填充的 `ibody_finder.s`；这解释了 NULL
+  `s->first` 和相同 upstream 源码缺陷。
+- Human adjudication: 核心根因被反汇编和官方测试行为确认；附录中写反的
+  `use_block` 条件被纠正，并补充模型遗漏的“不存在属性且无 block 应返回 ENODATA”
+  相邻语义。当前只完成定因，没有将一行候选 patch 包装成已验证修复。
+- Verification: DeepSeek 审查前后工作树 status/tracked-diff 指纹一致；未运行新构建或
+  QEMU，原全量结果继续标记为 red/partial。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1623,6 +1643,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md` | SMP heap_trace 缓冲所有权 | 记录 Mutex-owned BSS 表、自动 Send、模板/marker 失败披露、模型误判纠正及双架构 feature-on 8 核 34/34 证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b95-production-ipi-summary.md` | SMP 生产 IPI 协议收口 | 记录测试专用 PING/ROUND_TRIP 状态删除、正式 membarrier sequence/ack 三方向验证、helper kernel-stack 生命周期及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b96-zombie-owner-summary.md` | SMP TCB zombie 唯一 owner | 记录 Running(cpu_id) 终态门禁、interruptible zombie 旧路径删除、错误 CPU CAS 建议纠正及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-06.md`、`docs/Work_Log/evidence/2026-08-06/smp-full-8g/qemu-rv64.log` | RV64 LTP removexattr panic | 记录 DeepSeek 未初始化 finder 定因、GPT/Codex 对官方 LTP/upstream/反汇编的复核、模型表述纠正及修复尚未实施的边界 |
 
 ## 9. 交互记录与留痕方式
 

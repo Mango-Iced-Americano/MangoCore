@@ -1195,7 +1195,13 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 	if (ret != EOK)
 		goto out;
 
-	if (ibody_finder.s.not_found && xattr_block) {
+	if (ibody_finder.s.not_found) {
+		/* Neither the inode body nor an external block can contain it. */
+		if (!xattr_block) {
+			ret = ENODATA;
+			goto out;
+		}
+
 		ret = ext4_trans_block_get(fs->bdev, &block, xattr_block);
 		if (ret != EOK)
 			goto out;
@@ -1260,8 +1266,8 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 		}
 
 	} else {
-		/* Now remove the entry */
-		ext4_xattr_set_entry(&i, &block_finder.s, false);
+		/* The entry was found in the inode body, not in block_finder. */
+		ext4_xattr_set_entry(&i, &ibody_finder.s, false);
 		inode_ref->dirty = true;
 	}
 out:

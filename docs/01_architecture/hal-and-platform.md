@@ -326,7 +326,7 @@ la64 trap 后端覆盖：
 | timer interrupt | 清 timer，记录调度统计，调用 `task::timer_interrupt_handler()` |
 | address not aligned | 解码指令，通过 `copy_from_user`/`copy_to_user` 模拟用户态 load/store |
 
-`trap_return()` 调用 `do_signal()`，设置 exception entry 为 `strampoline`，配置 `pplv=3` 与 `pie=true`，把 trap context、用户页表 token 和 ASID 交给恢复汇编。
+`trap_return()` 调用 `do_signal()`，配置 `pplv=3` 与 `pie=true`，把 trap context、用户页表 token、ASID 和 `strampoline` 入口交给恢复汇编。Rust 收尾阶段继续使用内核 EENTRY；`__restore` 在 `CSR.SAVE` 已指向完整 TrapContext 后才安装用户 EENTRY，避免 ASID rollover 临时开放中断时误入用户 trap。
 
 ## 8. HAL 与上层的接口契约
 

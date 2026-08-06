@@ -575,9 +575,10 @@ la64 返回路径包含：
 | 动作 | 说明 |
 |------|------|
 | `do_signal()` | 先执行信号交付 |
-| `set_user_trap_entry()` | exception entry 指向 `strampoline` |
+| 保持内核 EENTRY | Rust 收尾及 ASID rollover 期间的中断仍进入内核 trap |
 | `PrMd` 设置 | `pplv=3`、`pie=true`，准备回到用户态 |
-| 传参 | trap context、用户 token、ASID 传给 `__restore` |
+| 传参 | trap context、用户 token、ASID、用户 EENTRY 传给 `__restore` |
+| 汇编交接 | TrapContext 写入 `CSR.SAVE` 后，`__restore` 才安装用户 EENTRY |
 
 页表根与 ASID 由同一个 `AddressSpace::activate_on()` 快照返回。ASID 属于共享 MM，
 不再属于 TCB；因此 `CLONE_VM` 创建的线程天然使用同一个硬件标签。若 ASID 空间耗尽，
@@ -587,8 +588,8 @@ la64 返回路径包含：
 
 ```rust
 pub fn trap_return() -> ! {
+    set_kernel_trap_entry();
     let task = do_signal();
-    set_user_trap_entry();
     let trap_cx_ptr = {
         let mut inner = task.acquire_inner_lock();
         let trap_cx = inner.trap_context_mut();
@@ -610,6 +611,7 @@ pub fn trap_return() -> ! {
             in("$a0") trap_cx_ptr,
             in("$a1") user_vm.token,
             in("$a2") user_vm.asid as usize,
+            in("$a3") strampoline as usize,
             options(noreturn)
         );
     }
@@ -620,12 +622,14 @@ LA64 将普通 `TRAMPOLINE`、`TRAP_CONTEXT_BASE` 与用户可执行的
 `SIGNAL_TRAMPOLINE` 分为连续三页：普通恢复页仅映射 `R|X`，信号页映射
 `R|X|U`。静态链接下的 `strampoline` 是用户 trap 入口 stub，而 `__restore`
 本身位于内核 direct-map 可执行区，因此返回路径直接跳转到 `__restore` 地址。
-三个恢复参数必须直接绑定 `$a0/$a1/$a2`，不能声明成泛型输入后再在 asm 模板内
+四个恢复参数必须直接绑定 `$a0/$a1/$a2/$a3`，不能声明成泛型输入后再在 asm 模板内
 顺序搬运；编译器不会分析模板内部的寄存器覆盖，可能让后一个输入复用已经被前一条
 `move` 改写的参数寄存器。该 ABI 桥接修改后要检查 release ELF，而不只看 Rust 源码。
 
-从取得 `UserVmContext` 到最终 `ertn` 的窗口保持本地 IRQ 关闭。这一点也是 ASID epoch
-协议的一部分：CPU 不会先处理 rollover IPI 并 ack，再用已经取得的旧快照返回用户态。
+Rust 返回阶段始终保持内核 EENTRY；从取得 `UserVmContext` 到最终 `ertn` 的窗口还必须
+保持本地 IRQ 关闭。这两点共同构成 ASID epoch 协议的一部分：rollover 等待期间即使
+临时开放 IRQ，也只能进入内核 trap；取得快照后则不会先 ack rollover IPI，再带着旧
+快照返回用户态。
 
 ## 9. 与 syscall 分发层的边界
 

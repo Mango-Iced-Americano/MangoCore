@@ -29,6 +29,7 @@ LSX_START = 72*8
 .equ EUEN_LSX, 0x2
 .equ CSR_ERA, 0x6
 .equ CSR_PRMD, 0x1
+.equ CSR_EENTRY, 0xC
 .equ CSR_ASID, 0x18
 .equ CSR_PGDL, 0x19
 .equ CSR_PGD, 0x1b
@@ -117,6 +118,7 @@ __restore:
     # a0: *TrapContext in user space(Constant),
     # a1: user space token
     # a2: 当前 AddressSpace 在本 epoch 内持有的硬件 ASID
+    # a3: 用户态普通例外入口；只能在返回现场准备完成后安装
 
     slli.d $a1, $a1, 12
     csrrd  $t0, CSR_PGDL
@@ -184,6 +186,10 @@ __restore:
         .set m, m+1
     .endr
 .Lrestore_fp_done:
+    # Rust 返回路径必须一直使用内核例外入口，因为 ASID rollover 等待远端
+    # ack 时会临时开放本地中断。此时 TrapContext 已经装入 CSR_SAVE，且当前
+    # CRMD.IE 仍为 0，才可以把 EENTRY 交给用户 trap 汇编。
+    csrwr $a3, CSR_EENTRY
     # Restore general purpose registers only after all control-flow decisions;
     # the selection above uses $t0 and must not clobber the user's saved value.
     LOAD_GP 1

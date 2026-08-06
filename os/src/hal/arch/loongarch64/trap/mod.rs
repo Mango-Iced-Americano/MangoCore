@@ -146,12 +146,6 @@ pub fn set_machine_err_trap_ent() {
     MErrEntry::read().set_addr(trap_handler as usize).write();
 }
 
-fn set_user_trap_entry() {
-    register::EEntry::read()
-        .set_exception_entry(strampoline as usize)
-        .write();
-}
-
 pub fn enable_timer_interrupt() {
     // 保留已经开放的 IPI 位；AP 必须同时接收调度 tick 与远程调度请求。
     ECfg::read()
@@ -498,6 +492,9 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 从这里到 __restore 安装用户 EENTRY 之前，任何 timer/IPI 都必须进入
+    // 内核 trap。尤其是 ASID rollover 的等待路径会临时开放本地中断。
+    set_kernel_trap_entry();
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     let trace_first_return =
         !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
@@ -513,7 +510,6 @@ pub fn trap_return() -> ! {
     if trace_first_return {
         println!("[bringup][user:02] initial signal check complete");
     }
-    set_user_trap_entry();
     let (trap_cx_ptr, _trap_pc, _trap_sp) = {
         let mut inner = task.acquire_inner_lock();
         let trap_cx = inner.trap_context_mut();
@@ -527,6 +523,12 @@ pub fn trap_return() -> ! {
             trap_cx.gp.sp,
         )
     };
+    // 与 RISC-V 保持相同的返回契约：地址空间激活及之后的恢复准备均从关中断
+    // 状态开始，最终由 ERTN 根据 PRMD.PIE 恢复用户态中断。
+    assert!(
+        !CrMd::read().is_interrupt_enabled(),
+        "LoongArch trap_return requires local interrupts disabled"
+    );
     // 页表根、ASID 和 CPU 驻留登记必须来自同一个 AddressSpace 快照；不能再从
     // TCB 单独读取 ASID，否则 CLONE_VM 线程会破坏共享 MM 的标签一致性。
     let user_vm = task.process.activate_user_vm();
@@ -539,9 +541,8 @@ pub fn trap_return() -> ! {
         .acquire_inner_lock()
         .update_process_times_enter_user();
     task.process.account_cpu_time(user_us, system_us);
-    // On LA64, `strampoline` resolves to the kernel-trap stub under the
-    // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;
+    let user_trap_entry = strampoline as usize;
     // 下方恢复汇编不返回，Rust 不会为 trap 栈帧运行析构。
     // current 槽仍是任务 owner，因此在跳转前释放这个临时 Arc。
     drop(task);
@@ -558,8 +559,8 @@ pub fn trap_return() -> ! {
         );
     }
     unsafe {
-        // trap context、页表根和 ASID 是 `__restore` 的固定 ABI 参数，必须直接绑定
-        // 到 $a0/$a1/$a2。若先把多个 `in(reg)` 输入逐个 move 到参数寄存器，LLVM
+        // trap context、页表根、ASID 和用户 trap 入口是 `__restore` 的固定 ABI
+        // 参数，必须直接绑定到 $a0..$a3。若先把多个 `in(reg)` 输入逐个 move，LLVM
         // 可以让后面的输入复用前面的目标寄存器；前一条 move 随后会覆盖尚未读取的
         // 输入，最终把错误的 ASID 交给汇编恢复入口。
         asm!(
@@ -569,6 +570,7 @@ pub fn trap_return() -> ! {
             in("$a0") trap_cx_ptr,
             in("$a1") user_vm.token,
             in("$a2") user_vm.asid as usize,
+            in("$a3") user_trap_entry,
             options(noreturn)
         );
     }
