@@ -153,6 +153,26 @@ else
     echo "[initramfs] WARNING: os_test.conf not found at repo root"
 fi
 
+# 6b. Install a small raw FAT32 volume for ktest memory-block-device tests.
+# The kernel ktest reads /tools/test-fat.img from the initramfs, copies the
+# bytes into an in-memory BlockDevice, and mounts it as a FAT32 volume.
+# 1 MiB keeps the embedded kernel small; test-ext.img is reserved for a
+# future ext4 volume and is intentionally NOT generated in this step.
+FAT_TEST_IMG="$STAGE/tools/test-fat.img"
+if command -v mkfs.vfat >/dev/null 2>&1; then
+    rm -f "$FAT_TEST_IMG"
+    dd if=/dev/zero of="$FAT_TEST_IMG" bs=1M count=1 2>/dev/null
+    mkfs.vfat -F 32 "$FAT_TEST_IMG" >/dev/null 2>&1 || true
+    if [ -s "$FAT_TEST_IMG" ]; then
+        echo "[initramfs] installed /tools/test-fat.img (1 MiB FAT32 for ktest)"
+    else
+        rm -f "$FAT_TEST_IMG"
+        echo "[initramfs] WARNING: mkfs.vfat failed, /tools/test-fat.img omitted"
+    fi
+else
+    echo "[initramfs] WARNING: mkfs.vfat not found, /tools/test-fat.img omitted"
+fi
+
 # 7. 生成 newc cpio 归档
 mkdir -p "$(dirname "$OUT_ABS")"
 (

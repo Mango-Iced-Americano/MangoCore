@@ -114,23 +114,34 @@ pub enum FatType {
 impl BPB {
     #[inline(always)]
     pub fn is_valid(&self) -> bool {
-        let mut root_ent_cnt: u16 = self.root_ent_cnt;
-        let mut tot_sec16: u16 = self.tot_sec16;
+        // FAT32 判定依据：root_ent_cnt == 0（FAT32 根目录是普通簇链）且 fat_sz16 == 0
+        // （FAT 大小放在 fat_sz32）且 fat_sz32 > 0。小型 FAT32 卷（< 32 MB）的总扇区
+        // 数会放在 tot_sec16 而非 tot_sec32（FAT 规范：总扇区数 < 65536 时用 tot_sec16），
+        // 因此这里不能要求 tot_sec16 == 0，也不能沿用旧的"簇数 >= 66625"启发式——否则
+        // mkfs.vfat 生成的 1 MiB 测试卷无法挂载。count_of_cluster() > 0 排除空卷/越界。
         self.root_dir_sec() == 0
-            && self.tot_sec16 == 0
-            && self.count_of_cluster() >= 66625 /*May not apply to the REAL WORLD/test*/
             && self.fat_sz16 == 0
-            && root_ent_cnt == 0
+            && self.root_ent_cnt == 0
+            && self.fat_sz32 > 0
+            && self.count_of_cluster() > 0
     }
     #[inline(always)]
     /// 数据扇区数
     /// # 计算式
     /// 总扇区数 - (保留扇区数 + fat表数*每fat表扇区数 + 根目录扇区数)
     pub fn data_sector_count(&self) -> u32 {
-        self.tot_sec32
-            - (self.rsvd_sec_cnt as u32
+        // FAT 规范：总扇区数 < 65536 时 tot_sec32 为 0，实际值在 tot_sec16。
+        let total_sectors = if self.tot_sec32 != 0 {
+            self.tot_sec32
+        } else {
+            self.tot_sec16 as u32
+        };
+        // 饱和减：损坏的 BPB 不在这里下溢 panic，由 is_valid / Fat::new 的断言拒绝。
+        total_sectors.saturating_sub(
+            self.rsvd_sec_cnt as u32
                 + self.num_fats as u32 * self.fat_sz32
-                + self.root_dir_sec())
+                + self.root_dir_sec(),
+        )
     }
     /// May be WRONG! This function should round DOWN.
     /// 这个函数可能是错的，需要向下取整
@@ -470,11 +481,16 @@ impl FATDirEnt {
     }
     // Check if is a unused and not last entry, like a gap
     pub fn unused_not_last(&self) -> bool {
-        unsafe { self.long_entry.ord == DIR_ENTRY_UNUSED }
+        // 删除标记（0xE5）写在条目首字节（unused_not_last_entry 用 as_bytes_mut()[0]），
+        // 因此必须读首字节。旧实现读 long_entry.ord（union 首字段，偏移 0）在标准
+        // FATDirEnt 布局下与首字节等价，但 union 布局属未指定行为，直接读
+        // as_bytes()[0] 与写端保持显式一致，避免依赖 union 字段重叠假设。
+        unsafe { self.as_bytes()[0] == DIR_ENTRY_UNUSED }
     }
     // Check if is a unused and last entry, marks the end of the directory file
     pub fn last_and_unused(&self) -> bool {
-        unsafe { self.long_entry.ord == DIR_ENTRY_LAST_AND_UNUSED }
+        // "最后且未用"标记（0x00）同样写在首字节（unused_and_last_entry），必须读首字节。
+        unsafe { self.as_bytes()[0] == DIR_ENTRY_LAST_AND_UNUSED }
     }
 }
 
