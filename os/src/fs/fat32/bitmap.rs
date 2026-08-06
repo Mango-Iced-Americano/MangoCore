@@ -1,12 +1,28 @@
 use super::layout::BAD_BLOCK;
 use super::BlockDevice;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use spin::{Mutex, MutexGuard};
+use spin::Mutex;
 
 const VACANT_CLUS_CACHE_SIZE: usize = 64;
 const FAT_ENTRY_FREE: u32 = 0;
 const FAT_ENTRY_RESERVED_TO_END: u32 = 0x0FFF_FFF8;
 pub const EOC: u32 = 0x0FFF_FFFF;
+
+/// 卷级 FAT 变更状态的唯一所有物。
+///
+/// SMP 并发下，空闲簇搜索、占用标记、链指针修改、回收缓存与扫描游标必须属于
+/// 同一个临界区：Linux VFAT 用 per-superblock `fat_lock` 串行化全部 FAT 表修改，
+/// DragonOS 同样以卷级 `fat_lock: Mutex<()>` 修复并发簇分配。本项目没有 Linux 的
+/// FAT buffer cache，同一 FAT 扇区的读-改-写无法原子合成，因此把 `hint` 与
+/// `vacant_clus` 合并为单一 `Mutex<FatMutationState>`，让 alloc 与 free 互斥，
+/// 并覆盖到所有 FAT 副本的扇区写回完成。
+struct FatMutationState {
+    /// 回收的空闲簇缓存（最多 `VACANT_CLUS_CACHE_SIZE` 项）。
+    vacant_clus: VecDeque<u32>,
+    /// 下次空闲扫描起点。
+    hint: usize,
+}
+
 /// *In-memory* data structure
 /// 内存内的fat数据结构.
 /// FAT32 normally keeps mirrored FAT copies. Reads use the active copy selected
@@ -28,10 +44,8 @@ pub struct Fat {
     mirror_writes: bool,
     /// The total number of FAT entries
     max_cluster_exclusive: usize,
-    /// The queue used to store known vacant clusters
-    vacant_clus: Mutex<VecDeque<u32>>,
-    /// The final unused cluster id we found
-    hint: Mutex<usize>,
+    /// 卷级 FAT 变更事务状态：alloc 与 free 在此锁内串行。
+    mutation: Mutex<FatMutationState>,
 }
 
 impl Fat {
@@ -164,8 +178,10 @@ impl Fat {
             // FAT cluster numbers start at 2, so N data clusters occupy IDs
             // 2..N+2 rather than 0..N.
             max_cluster_exclusive,
-            vacant_clus: Mutex::new(VecDeque::new()),
-            hint: Mutex::new(2),
+            mutation: Mutex::new(FatMutationState {
+                vacant_clus: VecDeque::new(),
+                hint: 2,
+            }),
         }
     }
 
@@ -195,6 +211,12 @@ impl Fat {
         )
     }
 
+    /// 分配 `alloc_num` 个连续链接的新簇，返回新簇列表（不含原有尾簇）。
+    ///
+    /// 整个分配在 `mutation` 锁内完成：空闲簇搜索、把候选簇先写 EOC、把前驱
+    /// 链接到候选、更新 hint/回收缓存，全部在锁内串行，任何其他分配/释放都
+    /// 必须等所有 FAT 副本写回后才能进入。候选先写 EOC 再链接前驱，保证无锁
+    /// 链读取者永远不会看到前驱指向一个仍为 FREE 的簇。
     pub fn alloc(
         &self,
         block_device: &Arc<dyn BlockDevice>,
@@ -202,9 +224,9 @@ impl Fat {
         mut last: Option<u32>,
     ) -> Vec<u32> {
         let mut allocated_cluster = Vec::with_capacity(alloc_num);
-        let mut hlock = self.hint.lock();
+        let mut state = self.mutation.lock();
         for _ in 0..alloc_num {
-            last = self.alloc_one(block_device, last, &mut hlock);
+            last = self.alloc_one(block_device, last, &mut state);
             if last.is_none() {
                 log::error!("[alloc]: alloc error, last: {:?}", last);
                 break;
@@ -219,30 +241,38 @@ impl Fat {
         &self,
         block_device: &Arc<dyn BlockDevice>,
         last: Option<u32>,
-        hlock: &mut MutexGuard<usize>,
+        state: &mut spin::MutexGuard<'_, FatMutationState>,
     ) -> Option<u32> {
         if last.is_some() {
             let next_cluster_of_current = self.get_next_clus_num(last.unwrap(), block_device);
             debug_assert!(next_cluster_of_current >= FAT_ENTRY_RESERVED_TO_END);
         }
 
-        if let Some(free_clus_id) = self.vacant_clus.lock().pop_back() {
+        // 优先复用回收缓存；缓存为空才扫描 FAT。取出的簇已被 free() 标为 FREE，
+        // 且仍在 mutation 锁内，其他 CPU 不可能同时分配它。
+        if let Some(free_clus_id) = state.vacant_clus.pop_back() {
+            // 与扫描路径一致：先写候选 EOC 再链接前驱。alloc() 末尾还会把最后一
+            // 个候选统一写 EOC，但这里必须先占位——否则在"last 已链接"与"候选写
+            // EOC"之间的窗口里，无锁链读取者会看到 last 指向一个仍为 FREE(0) 的簇。
+            self.set_next_clus(block_device, Some(free_clus_id), EOC);
             self.set_next_clus(block_device, last, free_clus_id);
             return Some(free_clus_id);
         }
 
-        let start = **hlock;
+        let start = state.hint;
         let free_clus_id = self.get_next_free_clus(start as u32, block_device);
         if free_clus_id.is_none() {
             return None;
         }
         let free_clus_id = free_clus_id.unwrap();
-        **hlock = if free_clus_id as usize + 1 < self.max_cluster_exclusive {
+        state.hint = if free_clus_id as usize + 1 < self.max_cluster_exclusive {
             free_clus_id as usize + 1
         } else {
             2
         };
 
+        // 先写候选 EOC（原子占位），再链接前驱；批次末尾的 EOC 由 alloc() 统一写。
+        self.set_next_clus(block_device, Some(free_clus_id), EOC);
         self.set_next_clus(block_device, last, free_clus_id);
         Some(free_clus_id)
     }
@@ -262,19 +292,54 @@ impl Fat {
         None
     }
 
+    /// 释放一条簇链的后缀。
+    ///
+    /// 调用方传入的 `cluster_list` 是链上**从尾部逆序 pop** 得到的后缀：首元素是
+    /// 链末簇，末元素是紧邻保留尾簇的簇（dealloc_clus 从 `clus_list` 尾部逐个 pop，
+    /// 第一个 pop 出来的就是链尾）。本函数在同一 `mutation` 锁内先断链：把保留尾簇
+    /// 写 EOC，使无锁读取者不再从保留链进入待释放后缀；随后逐项写 FREE，最后把
+    /// 回收簇加入缓存。
     pub fn free(
         &self,
         block_device: &Arc<dyn BlockDevice>,
         cluster_list: Vec<u32>,
         last: Option<u32>,
     ) {
-        let mut lock = self.vacant_clus.lock();
-        for cluster_id in cluster_list {
-            self.set_next_clus(block_device, Some(cluster_id), FAT_ENTRY_FREE);
-            if lock.len() < VACANT_CLUS_CACHE_SIZE {
-                lock.push_back(cluster_id);
+        let mut state = self.mutation.lock();
+        // 1) 先断链：保留尾簇指向 EOC，释放后缀从活跃链分离。
+        //    调用方语义：cluster_list 逆序（首项=链末簇，末项=紧邻保留尾簇的簇）。
+        //    必须验证保留尾簇的 next 确实指向释放后缀的"末项"，防止按错误顺序释放
+        //    导致链损坏。
+        if let Some(retained) = last {
+            let next_of_retained = self.get_next_clus_num(retained, block_device);
+            // 逆序列表末项应等于保留尾簇当前指向；若保留尾已指向 EOC/EOF 且
+            // 列表为空则无需断链。这里只防御明显不一致，不覆盖全部损坏情形。
+            debug_assert!(
+                cluster_list.last().copied() == Some(next_of_retained)
+                    || (next_of_retained >= FAT_ENTRY_RESERVED_TO_END && cluster_list.is_empty()),
+                "free: retained tail does not point at the freed suffix head"
+            );
+            self.set_next_clus(block_device, Some(retained), EOC);
+        }
+        // 2) 锁内逐项写 FREE。cluster_list 按 tail-first 逆序（首项是链末簇）。首项
+        //    的 next 必须是 EOC/保留值（alloc 写入的链尾标记）；其余簇的 next 指向
+        //    已经被本循环处理（写 FREE）的后继簇号，这是 tail-first 释放的正常形态，
+        //    不是 double-free。
+        for (index, cluster_id) in cluster_list.iter().enumerate() {
+            debug_assert!(*cluster_id >= 2 && *cluster_id < self.max_cluster_exclusive as u32);
+            if index == 0 {
+                let tail_next = self.get_next_clus_num(*cluster_id, block_device);
+                debug_assert!(
+                    tail_next >= FAT_ENTRY_RESERVED_TO_END,
+                    "free: freed suffix tail {} is not EOC (next={:#x})",
+                    cluster_id,
+                    tail_next
+                );
+            }
+            self.set_next_clus(block_device, Some(*cluster_id), FAT_ENTRY_FREE);
+            if state.vacant_clus.len() < VACANT_CLUS_CACHE_SIZE {
+                state.vacant_clus.push_back(*cluster_id);
             }
         }
-        self.set_next_clus(block_device, last, EOC);
     }
 }

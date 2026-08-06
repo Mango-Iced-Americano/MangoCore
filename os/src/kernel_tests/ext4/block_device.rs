@@ -8,50 +8,6 @@ use spin::Mutex;
 use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
 
-/// A bounded, zero-extending in-memory block device.
-struct TestMemBlock {
-    data: Mutex<Vec<u8>>,
-    size: u64,
-}
-
-impl TestMemBlock {
-    fn new(size_bytes: usize) -> Self {
-        Self {
-            data: Mutex::new(alloc::vec![0u8; size_bytes]),
-            size: size_bytes as u64,
-        }
-    }
-}
-
-impl BlockDevice for TestMemBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let offset = block_id * BLOCK_SZ;
-        let data = self.data.lock();
-        if offset >= data.len() {
-            buf.fill(0);
-            return;
-        }
-        let end = core::cmp::min(offset + buf.len(), data.len());
-        let copy_len = end - offset;
-        buf[..copy_len].copy_from_slice(&data[offset..end]);
-        buf[copy_len..].fill(0);
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let offset = block_id * BLOCK_SZ;
-        let mut data = self.data.lock();
-        if offset >= data.len() {
-            return;
-        }
-        let end = core::cmp::min(offset + buf.len(), data.len());
-        data[offset..end].copy_from_slice(&buf[..end - offset]);
-    }
-
-    fn size_bytes(&self) -> Option<u64> {
-        Some(self.size)
-    }
-}
-
 /// Records I/O requests so byte-bridge tests can assert batching semantics.
 pub(super) struct RecordingMemBlock<const BLOCK_SIZE: usize> {
     data: Mutex<Vec<u8>>,
@@ -107,7 +63,9 @@ impl<const BLOCK_SIZE: usize> BlockDevice for RecordingMemBlock<BLOCK_SIZE> {
 }
 
 pub(super) fn test_memblk_read_write() -> Result<(), &'static str> {
-    let dev = Arc::new(TestMemBlock::new(64 * 1024 * 1024));
+    let dev = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
+        64 * 1024 * 1024,
+    ));
     let mut pattern = [0u8; BLOCK_SZ];
     for (index, byte) in pattern.iter_mut().enumerate() {
         *byte = (index % 256) as u8;
@@ -133,8 +91,12 @@ pub(super) fn test_memblk_read_write() -> Result<(), &'static str> {
 }
 
 pub(super) fn test_memblk_isolation() -> Result<(), &'static str> {
-    let first = Arc::new(TestMemBlock::new(64 * 1024 * 1024));
-    let second = Arc::new(TestMemBlock::new(64 * 1024 * 1024));
+    let first = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
+        64 * 1024 * 1024,
+    ));
+    let second = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
+        64 * 1024 * 1024,
+    ));
     let first_data = [0x11u8; BLOCK_SZ];
     let second_data = [0x22u8; BLOCK_SZ];
     first.write_block(0, &first_data);
@@ -155,7 +117,9 @@ pub(super) fn test_memblk_isolation() -> Result<(), &'static str> {
 pub(super) fn test_open_unformatted_returns_err() -> Result<(), &'static str> {
     use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
 
-    match Ext4FileSystem::open_ext4rs(Arc::new(TestMemBlock::new(64 * 1024 * 1024))) {
+    match Ext4FileSystem::open_ext4rs(Arc::new(
+        crate::kernel_tests::mem_block::MemBlockDevice::new(64 * 1024 * 1024),
+    )) {
         Ok(_) => Err("open_ext4rs should fail on an all-zero device"),
         Err(_) => Ok(()),
     }

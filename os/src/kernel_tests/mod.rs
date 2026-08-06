@@ -21,6 +21,7 @@
 pub mod runner;
 mod probe;
 mod fs_smp_fixture;
+pub(crate) mod mem_block;
 
 #[path = "waitqueue.rs"]
 mod kt_waitqueue;
@@ -38,6 +39,8 @@ mod kt_ext4;
 mod kt_fs_smp;
 #[path = "net_smp.rs"]
 mod kt_net_smp;
+#[path = "fs_fat_smp.rs"]
+mod kt_fs_fat_smp;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -63,6 +66,7 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("ext4", kt_ext4::tests()),
         ("fs_smp", kt_fs_smp::tests()),
         ("net_smp", kt_net_smp::tests()),
+        ("fs_fat_smp", kt_fs_fat_smp::tests()),
     ]
 }
 

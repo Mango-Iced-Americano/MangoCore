@@ -18,6 +18,16 @@ const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_FTRUNCATE: usize = 46;
+/// O_CREAT|O_WRONLY|O_TRUNC（不带 O_EXCL：每次迭代复用同名文件）。
+const O_CREAT_WRONLY_TRUNC: usize = 0o1101;
+/// FAT 簇表并发探针：每次迭代分配/释放的簇数与循环次数。
+/// 测试卷簇大小 512B（spc=1, bps=512），2048B = 4 簇，512B = 1 簇。
+const FAT_WRITER_ITER: usize = 12;
+const FAT_WRITER_EXTEND: usize = 2048;
+const FAT_FREER_ITER: usize = 12;
+const FAT_FREER_EXTEND: usize = 2048;
+const FAT_FREER_SHRINK: usize = 512;
 /// 项目 syscall_id.rs 自定义编号：epoll 系列并非标准 Linux 的 291/292/293。
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_EPOLL_CTL: usize = 21;
@@ -355,6 +365,256 @@ __ktest_tmpfs_unlink_probe_end:
     unlinkat_syscall = const SYSCALL_UNLINKAT, exit_syscall = const SYSCALL_EXIT,
 );
 
+// ── FAT 簇表并发 writer probe ──────────────────────────────────
+// a0 = 路径指针。文件只创建一次；循环内执行 ftruncate(0) → ftruncate(2048)，
+// 让同一 inode 反复释放整条链并重新分配 4 簇。最后一轮保留 4 簇，供 remount
+// 后的可达性扫描验证。退出码区分阶段：1=openat、2=truncate(0)、3=extend。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_fat_alloc_writer_probe, "a"
+    .balign 4
+    .global __ktest_fat_alloc_writer_probe_start
+    .global __ktest_fat_alloc_writer_probe_end
+__ktest_fat_alloc_writer_probe_start:
+    mv s0, a0
+    li a0, -100
+    mv a1, s0
+    li a2, {open_flags}
+    li a3, 420
+    li a7, {openat_syscall}
+    ecall
+    blt a0, zero, 4f
+    mv s2, a0
+    li s1, {iter_count}
+1:
+    mv a0, s2
+    li a1, 0
+    li a7, {ftruncate_syscall}
+    ecall
+    bnez a0, 5f
+    mv a0, s2
+    li a1, {extend_size}
+    li a7, {ftruncate_syscall}
+    ecall
+    bnez a0, 6f
+    addi s1, s1, -1
+    bnez s1, 1b
+    mv a0, s2
+    li a7, {close_syscall}
+    ecall
+    li a0, 0
+    j 7f
+4:  li a0, 1
+    j 7f
+5:  li a0, 2
+    j 7f
+6:  li a0, 3
+    j 7f
+7:  li a7, {exit_syscall}
+    ecall
+8:  j 8b
+__ktest_fat_alloc_writer_probe_end:
+    .popsection
+"#,
+    iter_count = const FAT_WRITER_ITER,
+    open_flags = const O_CREAT_WRONLY_TRUNC,
+    extend_size = const FAT_WRITER_EXTEND,
+    openat_syscall = const SYSCALL_OPENAT,
+    ftruncate_syscall = const SYSCALL_FTRUNCATE,
+    close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_fat_alloc_writer_probe, "a"
+    .balign 4
+    .global __ktest_fat_alloc_writer_probe_start
+    .global __ktest_fat_alloc_writer_probe_end
+__ktest_fat_alloc_writer_probe_start:
+    move $s0, $a0
+    addi.d $a0, $zero, -100
+    move $a1, $s0
+    li.w $a2, {open_flags}
+    li.w $a3, 420
+    addi.d $a7, $zero, {openat_syscall}
+    syscall 0
+    blt $a0, $zero, 4f
+    move $s2, $a0
+    addi.d $s1, $zero, {iter_count}
+1:
+    move $a0, $s2
+    move $a1, $zero
+    addi.d $a7, $zero, {ftruncate_syscall}
+    syscall 0
+    bnez $a0, 5f
+    move $a0, $s2
+    li.w $a1, {extend_size}
+    addi.d $a7, $zero, {ftruncate_syscall}
+    syscall 0
+    bnez $a0, 6f
+    addi.d $s1, $s1, -1
+    bnez $s1, 1b
+    move $a0, $s2
+    addi.d $a7, $zero, {close_syscall}
+    syscall 0
+    move $a0, $zero
+    b 7f
+4:  addi.d $a0, $zero, 1
+    b 7f
+5:  addi.d $a0, $zero, 2
+    b 7f
+6:  addi.d $a0, $zero, 3
+7:  addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+8:  b 8b
+__ktest_fat_alloc_writer_probe_end:
+    .popsection
+"#,
+    iter_count = const FAT_WRITER_ITER,
+    open_flags = const O_CREAT_WRONLY_TRUNC,
+    extend_size = const FAT_WRITER_EXTEND,
+    openat_syscall = const SYSCALL_OPENAT,
+    ftruncate_syscall = const SYSCALL_FTRUNCATE,
+    close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
+// ── FAT 簇表并发 alloc/free probe ──────────────────────────────
+// a0 = 路径指针。文件只创建一次；循环内执行 ftruncate(2048) [分配 4 簇]
+// → ftruncate(512) [释放 3 簇] → ftruncate(0) [释放剩余 1 簇]。与 writer
+// 探针并发时在同一簇表上覆盖部分后缀释放和整链释放。退出码区分阶段：
+// 1=openat、2=extend、3=shrink、4=truncate(0)。
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_fat_alloc_free_probe, "a"
+    .balign 4
+    .global __ktest_fat_alloc_free_probe_start
+    .global __ktest_fat_alloc_free_probe_end
+__ktest_fat_alloc_free_probe_start:
+    mv s0, a0
+    li a0, -100
+    mv a1, s0
+    li a2, {open_flags}
+    li a3, 420
+    li a7, {openat_syscall}
+    ecall
+    blt a0, zero, 4f
+    mv s2, a0
+    li s1, {iter_count}
+1:
+    mv a0, s2
+    li a1, {extend_size}
+    li a7, {ftruncate_syscall}
+    ecall
+    bnez a0, 5f
+    mv a0, s2
+    li a1, {shrink_size}
+    li a7, {ftruncate_syscall}
+    ecall
+    bnez a0, 6f
+    mv a0, s2
+    li a1, 0
+    li a7, {ftruncate_syscall}
+    ecall
+    bnez a0, 7f
+    addi s1, s1, -1
+    bnez s1, 1b
+    mv a0, s2
+    li a7, {close_syscall}
+    ecall
+    li a0, 0
+    j 8f
+4:  li a0, 1
+    j 8f
+5:  li a0, 2
+    j 8f
+6:  li a0, 3
+    j 8f
+7:  li a0, 4
+8:  li a7, {exit_syscall}
+    ecall
+9:  j 9b
+__ktest_fat_alloc_free_probe_end:
+    .popsection
+"#,
+    iter_count = const FAT_FREER_ITER,
+    open_flags = const O_CREAT_WRONLY_TRUNC,
+    extend_size = const FAT_FREER_EXTEND,
+    shrink_size = const FAT_FREER_SHRINK,
+    openat_syscall = const SYSCALL_OPENAT,
+    ftruncate_syscall = const SYSCALL_FTRUNCATE,
+    close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_fat_alloc_free_probe, "a"
+    .balign 4
+    .global __ktest_fat_alloc_free_probe_start
+    .global __ktest_fat_alloc_free_probe_end
+__ktest_fat_alloc_free_probe_start:
+    move $s0, $a0
+    addi.d $a0, $zero, -100
+    move $a1, $s0
+    li.w $a2, {open_flags}
+    li.w $a3, 420
+    addi.d $a7, $zero, {openat_syscall}
+    syscall 0
+    blt $a0, $zero, 4f
+    move $s2, $a0
+    addi.d $s1, $zero, {iter_count}
+1:
+    move $a0, $s2
+    li.w $a1, {extend_size}
+    addi.d $a7, $zero, {ftruncate_syscall}
+    syscall 0
+    bnez $a0, 5f
+    move $a0, $s2
+    li.w $a1, {shrink_size}
+    addi.d $a7, $zero, {ftruncate_syscall}
+    syscall 0
+    bnez $a0, 6f
+    move $a0, $s2
+    move $a1, $zero
+    addi.d $a7, $zero, {ftruncate_syscall}
+    syscall 0
+    bnez $a0, 7f
+    addi.d $s1, $s1, -1
+    bnez $s1, 1b
+    move $a0, $s2
+    addi.d $a7, $zero, {close_syscall}
+    syscall 0
+    move $a0, $zero
+    b 8f
+4:  addi.d $a0, $zero, 1
+    b 8f
+5:  addi.d $a0, $zero, 2
+    b 8f
+6:  addi.d $a0, $zero, 3
+    b 8f
+7:  addi.d $a0, $zero, 4
+8:  addi.d $a7, $zero, {exit_syscall}
+    syscall 0
+9:  b 9b
+__ktest_fat_alloc_free_probe_end:
+    .popsection
+"#,
+    iter_count = const FAT_FREER_ITER,
+    open_flags = const O_CREAT_WRONLY_TRUNC,
+    extend_size = const FAT_FREER_EXTEND,
+    shrink_size = const FAT_FREER_SHRINK,
+    openat_syscall = const SYSCALL_OPENAT,
+    ftruncate_syscall = const SYSCALL_FTRUNCATE,
+    close_syscall = const SYSCALL_CLOSE,
+    exit_syscall = const SYSCALL_EXIT,
+);
+
 // ── eventfd write probe ────────────────────────────────────────
 // write(fd, &u64=1, 8)：eventfd 计数 +1；返回 8 字节→exit(0)，否则→exit(1)。
 // 供 EPOLLET edge 测试的 writer 使用；fd 与 8 字节值由 build_user_probe 预装。
@@ -582,6 +842,10 @@ extern "C" {
     static __ktest_tmpfs_lookup_probe_end: u8;
     static __ktest_tmpfs_unlink_probe_start: u8;
     static __ktest_tmpfs_unlink_probe_end: u8;
+    static __ktest_fat_alloc_writer_probe_start: u8;
+    static __ktest_fat_alloc_writer_probe_end: u8;
+    static __ktest_fat_alloc_free_probe_start: u8;
+    static __ktest_fat_alloc_free_probe_end: u8;
     static __ktest_eventfd_write_probe_start: u8;
     static __ktest_eventfd_write_probe_end: u8;
     static __ktest_epollet_probe_start: u8;
@@ -798,6 +1062,11 @@ pub(crate) enum ProbeResult {
     TmpfsUnlink,
     EventFdWrite,
     EpollEdge,
+    /// FAT 簇表并发 writer：单次 openat 后循环 truncate(0) → extend(2048)。
+    FatAllocWriter,
+    /// FAT 簇表并发 alloc/free：单次 openat 后循环 extend(2048) → shrink(512)
+    /// → truncate(0)。
+    FatAllocFree,
 }
 
 fn user_probe_program(result: ProbeResult) -> &'static [u8] {
@@ -829,6 +1098,14 @@ fn user_probe_program(result: ProbeResult) -> &'static [u8] {
         ProbeResult::TmpfsUnlink => (
             core::ptr::addr_of!(__ktest_tmpfs_unlink_probe_start),
             core::ptr::addr_of!(__ktest_tmpfs_unlink_probe_end),
+        ),
+        ProbeResult::FatAllocWriter => (
+            core::ptr::addr_of!(__ktest_fat_alloc_writer_probe_start),
+            core::ptr::addr_of!(__ktest_fat_alloc_writer_probe_end),
+        ),
+        ProbeResult::FatAllocFree => (
+            core::ptr::addr_of!(__ktest_fat_alloc_free_probe_start),
+            core::ptr::addr_of!(__ktest_fat_alloc_free_probe_end),
         ),
         ProbeResult::EventFdWrite => (
             core::ptr::addr_of!(__ktest_eventfd_write_probe_start),
@@ -893,9 +1170,8 @@ fn map_user_page(
         // Safety: `space.write()` 独占该测试地址空间，目标页已由上面的
         // store fault 建立，并且测试任务尚未发布到调度器。
         unsafe {
-            pa.floor().with_bytes_mut(|page| {
-                page[offset..offset + data.len()].copy_from_slice(data)
-            });
+            pa.floor()
+                .with_bytes_mut(|page| page[offset..offset + data.len()].copy_from_slice(data));
         }
         if executable {
             space
