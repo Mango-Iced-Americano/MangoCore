@@ -25,6 +25,8 @@ use spin::Mutex;
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
 const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
+/// idle 起点的空值；正常的单调微秒时间不可能达到该值。
+const IDLE_TIME_INACTIVE: u64 = u64::MAX;
 
 #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
@@ -100,6 +102,24 @@ pub(crate) struct CpuTaskState {
     steals: AtomicUsize,
     /// 本 CPU runqueue 曾达到的最大排队任务数，不包含 current。
     run_queue_peak: AtomicUsize,
+    /// 当前 CPU 实际执行用户态代码的累计微秒数。
+    user_time_us: AtomicU64,
+    /// 当前 CPU 为任务执行内核态代码的累计微秒数。
+    system_time_us: AtomicU64,
+    /// 当前 CPU 执行 idle 调度上下文的累计微秒数。
+    idle_time_us: AtomicU64,
+    /// 当前 idle 区间的单调时钟起点；`IDLE_TIME_INACTIVE` 表示正在运行任务。
+    idle_since_us: AtomicU64,
+    /// idle 起止更新的序列号；奇数表示本 CPU 正在改写区间状态。
+    idle_sequence: AtomicU64,
+}
+
+/// `/proc/stat` 使用的单个 CPU 时间快照，单位为微秒。
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CpuTimeSnapshot {
+    pub(crate) user_us: u64,
+    pub(crate) system_us: u64,
+    pub(crate) idle_us: u64,
 }
 
 /// panic/STOP 等不可等待上下文可读取的任务侧诊断快照。
@@ -138,6 +158,63 @@ impl CpuTaskState {
             migrations: AtomicUsize::new(0),
             steals: AtomicUsize::new(0),
             run_queue_peak: AtomicUsize::new(0),
+            user_time_us: AtomicU64::new(0),
+            system_time_us: AtomicU64::new(0),
+            idle_time_us: AtomicU64::new(0),
+            idle_since_us: AtomicU64::new(IDLE_TIME_INACTIVE),
+            idle_sequence: AtomicU64::new(0),
+        }
+    }
+
+    /// 开始一个 idle 调度上下文时间区间，仅由本 CPU idle 栈调用。
+    fn begin_idle_time(&self) {
+        let sequence = self.idle_sequence.fetch_add(1, Ordering::AcqRel);
+        debug_assert_eq!(sequence & 1, 0, "CPU idle accounting writer overlapped");
+        let now = crate::timer::get_time_us() as u64;
+        let previous = self.idle_since_us.swap(now, Ordering::Release);
+        debug_assert_eq!(previous, IDLE_TIME_INACTIVE, "CPU idle interval nested");
+        self.idle_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    /// 在任务即将成为 current 前结束 idle 区间。
+    fn end_idle_time(&self) {
+        let sequence = self.idle_sequence.fetch_add(1, Ordering::AcqRel);
+        debug_assert_eq!(sequence & 1, 0, "CPU idle accounting writer overlapped");
+        let now = crate::timer::get_time_us() as u64;
+        let since = self
+            .idle_since_us
+            .swap(IDLE_TIME_INACTIVE, Ordering::AcqRel);
+        debug_assert_ne!(since, IDLE_TIME_INACTIVE, "CPU left idle without entry");
+        if since != IDLE_TIME_INACTIVE {
+            self.idle_time_us
+                .fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+        }
+        self.idle_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    /// 读取累计时间，并把尚未闭合的当前 idle 区间计入快照。
+    fn read_cpu_time(&self) -> CpuTimeSnapshot {
+        let idle_us = loop {
+            let sequence = self.idle_sequence.load(Ordering::Acquire);
+            if sequence & 1 != 0 {
+                spin_loop();
+                continue;
+            }
+            let accumulated = self.idle_time_us.load(Ordering::Relaxed);
+            let idle_since = self.idle_since_us.load(Ordering::Relaxed);
+            let active = if idle_since == IDLE_TIME_INACTIVE {
+                0
+            } else {
+                (crate::timer::get_time_us() as u64).saturating_sub(idle_since)
+            };
+            if self.idle_sequence.load(Ordering::Acquire) == sequence {
+                break accumulated.saturating_add(active);
+            }
+        };
+        CpuTimeSnapshot {
+            user_us: self.user_time_us.load(Ordering::Relaxed),
+            system_us: self.system_time_us.load(Ordering::Relaxed),
+            idle_us,
         }
     }
 
@@ -344,6 +421,9 @@ pub fn run_tasks() -> ! {
     let cpu = crate::smp::cpu_id();
     let task_state = crate::smp::local_task_state();
     crate::smp::mark_local_scheduler_entered();
+    // Per-CPU 时间从本地调度器接管 CPU 的时刻开始；AP 等待 scheduler release
+    // 的早期启动时间不伪装成用户、系统或 idle CPU 时间。
+    task_state.begin_idle_time();
     if cpu != crate::smp::BOOT_CPU_ID {
         run_secondary_scheduler(cpu, task_state);
     }
@@ -640,11 +720,16 @@ fn dispatch_task(
         );
     }
     // 两个上下文都由 current/idle 槽保持存活，且 processor 锁已经释放。
+    // 从这一点开始 CPU 将执行 current 任务，不再属于 idle 上下文。
+    task_state.end_idle_time();
     unsafe {
         task_state.record_context_switch();
         crate::task::perf::record_context_switch();
         __switch(idle_task_cx_ptr, next_task_cx_ptr);
     }
+    // `__switch` 返回说明 CPU 已重新使用 idle 栈；先打开 idle 计时，再做
+    // current/MM/zombie 收尾，使 idle 调度上下文的执行时间不会丢失。
+    task_state.begin_idle_time();
     finish_current_switch_out(cpu);
     #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
     if trace_first_switch {
@@ -714,6 +799,34 @@ pub(crate) fn cpu_current_count(cpu: usize) -> usize {
             .current_present
             .load(Ordering::Acquire),
     )
+}
+
+/// 把当前任务刚结算的执行时间记到它实际运行的本地 CPU。
+///
+/// 这与 PCB 的批量线程组账户相互独立：PCB 批次可能跨迁移累积，不能拿来
+/// 反推 per-CPU 归属；这里必须在每次 trap/schedule 计时时立即累加。
+pub(crate) fn account_local_cpu_time(user_us: usize, system_us: usize) {
+    let state = crate::smp::local_task_state();
+    if user_us != 0 {
+        state
+            .user_time_us
+            .fetch_add(user_us as u64, Ordering::Relaxed);
+    }
+    if system_us != 0 {
+        state
+            .system_time_us
+            .fetch_add(system_us as u64, Ordering::Relaxed);
+    }
+}
+
+/// 返回指定逻辑 CPU 的无锁时间快照。
+pub(crate) fn cpu_time_snapshot(cpu: usize) -> CpuTimeSnapshot {
+    assert!(
+        cpu < crate::smp::configured_cpu_count(),
+        "CPU time snapshot requested for unconfigured CPU {}",
+        cpu
+    );
+    crate::smp::task_state(cpu).read_cpu_time()
 }
 
 /// 取得触发本次用户 trap 的 current 任务，并验证 CPU 所有权。

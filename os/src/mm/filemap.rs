@@ -92,11 +92,26 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     let page_index = file_offset >> PAGE_SIZE_BITS;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    let allocated_ppn = area.map_one_zeroed_unchecked(mapper, ctx.vpn)?;
-    let dst = allocated_ppn.get_bytes_array();
+    // 先填充未发布页，再安装用户 PTE。若先 map 再 copy，同一 MM 的其它 CPU
+    // 可能在内核写入期间访问该页，既暴露半成品数据也破坏 Rust 独占性。
+    let allocated_ppn = area.alloc_one_zeroed_unmapped(ctx.vpn)?;
     let _copy_start = crate::task::perf::perf_time_now();
-    pc.copy_page_for_private(page_index, dst, file_size)
-        .map_err(map_pc_error)?;
+    let copy_result = unsafe {
+        // Safety: frame 已登记在当前 VMA，但尚未安装 PTE；地址空间写锁保证
+        // 没有其它 fault 路径取得它，因此本路径独占目标页。
+        allocated_ppn.with_bytes_mut(|dst| {
+            pc.copy_page_for_private(page_index, dst, file_size)
+                .map_err(map_pc_error)
+        })
+    };
+    if let Err(error) = copy_result {
+        area.remove_unmapped_frame(ctx.vpn);
+        return Err(error);
+    }
+    if let Err(error) = area.map_existing_in_memory(mapper, ctx.vpn) {
+        area.remove_unmapped_frame(ctx.vpn);
+        return Err(error);
+    }
     let copy_ticks = crate::task::perf::perf_time_now().wrapping_sub(_copy_start);
     crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS
         .fetch_add(copy_ticks, core::sync::atomic::Ordering::Relaxed);

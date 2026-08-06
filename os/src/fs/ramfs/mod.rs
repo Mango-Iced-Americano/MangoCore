@@ -127,8 +127,9 @@ fn alloc_page() -> Option<Arc<FrameTracker>> {
 fn page_ptr(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *const u8 {
     frame
         .ppn
-        .get_bytes_array()
-        .as_ptr()
+        .start_addr()
+        .direct_map_ptr()
+        .cast_const()
         .wrapping_add(offset_within_page)
 }
 
@@ -136,8 +137,8 @@ fn page_ptr(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *const u8 {
 fn page_ptr_mut(frame: &Arc<FrameTracker>, offset_within_page: usize) -> *mut u8 {
     frame
         .ppn
-        .get_bytes_array()
-        .as_mut_ptr()
+        .start_addr()
+        .direct_map_ptr()
         .wrapping_add(offset_within_page)
 }
 
@@ -243,8 +244,13 @@ impl PageCacheBackend for RamFsPageCacheBackend {
         let inode = self.inode.upgrade().ok_or(SyscallErr::EIO)?;
         let inner = inode.0.lock();
         if let Some(frame) = inner.pages.get(&index) {
-            let src = frame.ppn.get_bytes_array();
-            buf[..PAGE_SIZE].copy_from_slice(&src[..PAGE_SIZE]);
+            // Safety: inode 锁固定 frame 并排斥 RamFS 数据写者；backend 的
+            // 输出缓冲由调用方独占。
+            unsafe {
+                frame
+                    .ppn
+                    .with_bytes(|src| buf[..PAGE_SIZE].copy_from_slice(src));
+            }
         } else {
             buf[..PAGE_SIZE].fill(0);
         }
@@ -259,12 +265,21 @@ impl PageCacheBackend for RamFsPageCacheBackend {
         };
         let mut inner = inode.0.lock();
         if let Some(frame) = inner.pages.get(&index) {
-            let dst = frame.ppn.get_bytes_array();
-            dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
+            // Safety: inode 锁排斥所有 RamFS 文件数据访问，目标 frame 在锁内
+            // 保持有效并由当前写回路径独占修改。
+            unsafe {
+                frame
+                    .ppn
+                    .with_bytes_mut(|dst| dst.copy_from_slice(&buf[..PAGE_SIZE]));
+            }
         } else {
             let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
-            let dst = frame.ppn.get_bytes_array();
-            dst[..PAGE_SIZE].copy_from_slice(&buf[..PAGE_SIZE]);
+            // Safety: 新 frame 尚未插入 inode.pages，当前路径独占其内容。
+            unsafe {
+                frame
+                    .ppn
+                    .with_bytes_mut(|dst| dst.copy_from_slice(&buf[..PAGE_SIZE]));
+            }
             inner.pages.insert(index, frame);
             if ramfs.max_pages > 0 {
                 *ramfs.page_count.lock() += 1;

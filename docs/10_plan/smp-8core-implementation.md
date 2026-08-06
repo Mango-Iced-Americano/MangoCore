@@ -85,16 +85,16 @@ related_docs:
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
 | panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照；B91 再加入每 CPU switch、实际 migration、成功 steal 与 runqueue peak；B92 补齐 IPI handler、doorbell 失败及逐 reason 发布/消费计数；B93 按发起 CPU 输出 TLB 后端、精准页数、远端 fanout、同步总/最大 ticks 和失败数 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入；同类 mailbox bit 可合并，IPI 发布/消费差值不是丢中断判据 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用，B87 又删除安全物理地址 API 返回 `'static` 引用的通道，让 trap frame 可变引用只在持 `task.inner` guard 时建立；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45/B87 已删除可逃逸的 trap-context 与物理地址 `'static` 引用，本批又删除最后一个安全整页 `&'static mut [u8]` 入口：未发布私有页只在 unsafe scoped closure 中建立短命 slice，可被用户或 MAP_SHARED 并发访问的页仅做 VM 锁内 raw copy；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；默认限制待最终共享子系统门禁后解除 |
 | 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB；B91 为每核 owner 补齐 switch/migration/steal/rq-peak 生产诊断 | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
 | timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程；B90 删除无读者的 `TIME_SOURCE static mut` 和硬编码 MTIME 旁路，单调时钟统一经 HAL，realtime offset 为原子状态 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
 | MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53/B82 用 CPU1 真实用户 load 证明 CoW 与同 VPN remap 精准失效；B84 再用远端 store fault 证明 `mprotect(RW -> R)`，并修正 LA64 撤销写权限必须同步清 W/D；B85 由全部 8 CPU 经真实 mprotect 交错执行锁外 flush，验证多代 generation、固定槽和 active mask 收尾；B86 删除 `&PageTable -> &mut PTE` 通道，raw PTE 视图按读写拆分且 writer 必须持可变页表借用；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | 通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
-| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验；B86—B88 依次收口 PTE、trap context 与 frame-zero 的安全 `'static mut` 通道；B89 再用短命 `FrameReservation` 把单页 PPN 元数据领取与 4 KiB 清零拆分，全局 allocator 写锁不再覆盖普通单页清零和 `Arc` 构造；B94 让 heap_trace 的锁状态直接拥有两张 BSS 表，删除裸指针发布与手写 `Send` | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；整页 byte view 与其它共享子系统的 unsafe/static 状态由对应负责人处理 |
+| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验；B86—B88 依次收口 PTE、trap context 与 frame-zero 的安全 `'static mut` 通道；B89 再用短命 `FrameReservation` 把单页 PPN 元数据领取与 4 KiB 清零拆分，全局 allocator 写锁不再覆盖普通单页清零和 `Arc` 构造；B94 让 heap_trace 的锁状态直接拥有两张 BSS 表，删除裸指针发布与手写 `Send`；本批将剩余整页 byte view 收口为不可逃逸的 unsafe scoped view/raw copy，并让 filemap 私有页按“先填充、后发布 PTE”顺序建映 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态仍按责任边界持续审计 |
 | 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端、真实 CoW、同 VPN unmap/remap、mprotect 降权与 8 发起者并发 PTE 写均有 focused 证据 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier；develop Batch 7 已让 `/proc/cpuinfo` 与 `/proc/stat` 输出完整 configured CPU 拓扑 | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0；`/proc/stat` 的 per-CPU USER_HZ 时间记账仍未实现 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier；develop Batch 7 已让 `/proc/cpuinfo` 与 `/proc/stat` 输出完整 configured CPU 拓扑；本批实现了每 CPU user/system/idle 微秒账户及 `USER_HZ=100` 转换，aggregate 由各 `cpuN` 显示 tick 求和 | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0；nice/iowait/irq/softirq/steal/guest 尚无独立时间账户，`ctxt/intr` 仍是简化值 |
 
 B83 补充了表中 exec 收尾的关键边界：用户资源清理的 live ack 与撤销
 CPU current 槽的 inactive ack 已分离，旧 leader 真正切回 idle 后才允许身份交换。
@@ -785,7 +785,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
   8/8 字节，证明后半 pipe 数据未被提前消费，`online_mask=0xff` 且源码指纹稳定；
 - develop 融合 Batch 7 让 procfs 与逻辑 CPU 命名空间一致：`/proc/cpuinfo` 为每个 configured
   CPU 输出 processor block 并使用固件 model，`/proc/stat` 依次输出 aggregate 与
-  `cpu0..cpuN`。时间字段继续诚实为 0，不用异量纲诊断计数冒充 USER_HZ。regression 专用 PID1
+  `cpu0..cpuN`。Batch 7 当时的时间字段保持 0，不用异量纲诊断计数冒充 USER_HZ；
+  本批已用真实 per-CPU user/system/idle 账户替代该占位值。regression 专用 PID1
   补挂 procfs，永久用户用例从两个文件交叉核对拓扑；双架构 8 核 L4 均 8/8，processor 与
   cpuN 行数均为 8，`online_mask=0xff` 且源码指纹稳定；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
@@ -956,6 +957,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
   trap context 服务的 `PhysPageNum::get_mut()`。raw pointer 解引用下沉到
   `trap_context_mut(&mut self)`，由 frame 存活、页首对齐和 `task.inner` guard 独占共同
   证明安全；双架构 normal build 与 8 核 SMP 34/34 均通过，frame 地址和恢复 ABI 未改变。
+- 本批继续删除 `PhysPageNum::get_bytes_array() -> &'static mut [u8]`。未发布且由
+  frame/VMA 构造路径独占的页使用 unsafe `with_bytes[_mut]()` scoped closure，
+  用户映射、MAP_SHARED 和 `process_vm_*` 等可能存在并发访问的页则只在 VM/
+  owner 临界区做 raw copy，不伪造 Rust 独占引用。filemap 私有 fault 和带初始数据的
+  VMA push 同时改为先填充未发布 frame、再安装 PTE，失败只回滚无 PTE frame。
+  双架构 8 核 CPU-time QEMU gate 与 normal build 均在冻结源码上通过。
 - B89 使用只在 frame allocator 内部存在的 `FrameReservation`，在写锁内唯一领取
   PPN 后立即释放锁，再在锁外按 recycled/fresh+zero_init 语义清零并构造
   `Arc<FrameTracker>`。`Option::take()` 把回收责任一次移交给 tracker，Drop 只回滚
@@ -1038,6 +1045,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
 - B39 focused 用真实 CPU1 用户死循环证明：没有 syscall、yield、数据 load/store 和远程
   `RESCHEDULE` 的帮助，本地 timer 仍能在返回用户态安全点切出该任务并运行后继 helper。
   双架构 8 核均为 25/25，初赛失败集合没有扩大；
+- 本批在 `CpuTaskState` 内建立 user/system/idle 微秒账户。用户与系统时间在每次
+  trap/schedule 边界立即归属当前 CPU，不借用可能跨迁移累积的 PCB 批量尾数。
+  trap return 拆为安全点前结算 system 与恢复汇编前开启 user 两段，防止安全点
+  切走/迁移的时间误计为 user。idle 区间在本地 idle 栈进出处更新，远程读取以
+  sequence 快照合并已结算值和当前未闭合区间；`/proc/stat` 按 `USER_HZ=100`
+  输出 aggregate 与 `cpu0..cpuN`。双架构 8 核 CPU-time gate 均 PASS。
 - B50 已落实 zombie TCB 在退出 CPU 的 idle 栈上回收；任务仍使用自身
   内核栈时不会释放最后一个调度 Arc。按 pid 的 reap 跨 CPU 逐队扫描，不同时
   持有两个队列锁，Arc 析构发生在所有容器锁之外；B96 进一步要求只有本 CPU

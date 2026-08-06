@@ -145,7 +145,7 @@ pub fn trap_handler() -> ! {
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
-            inner.update_process_times_leave_trap(scause.cause())
+            inner.update_process_times_before_safe_point()
         };
         task.process.account_cpu_time(user_us, system_us);
         if _trap_start != 0 {
@@ -254,9 +254,9 @@ pub fn trap_handler() -> ! {
     }
     {
         let task = current_task().unwrap();
-        let mut inner = task.acquire_inner_lock();
-        let (user_us, system_us) = inner.update_process_times_leave_trap(scause.cause());
-        drop(inner);
+        let (user_us, system_us) = task
+            .acquire_inner_lock()
+            .update_process_times_before_safe_point();
         task.process.account_cpu_time(user_us, system_us);
     }
     trap_return();
@@ -291,6 +291,13 @@ pub fn trap_return() -> ! {
     let user_vm = task.process.activate_user_vm();
     let user_satp = super::sv39::satp_with_asid(user_vm.token, user_vm.asid);
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    // 安全点、信号递送和 MM 激活都仍属于内核态。必须到真正执行 SRET 前
+    // 才闭合 system 区间并开启 user 区间，否则安全点调度出去的时间会被
+    // 错算为 user time，并在迁移后归到错误 CPU。
+    let (user_us, system_us) = task
+        .acquire_inner_lock()
+        .update_process_times_enter_user();
+    task.process.account_cpu_time(user_us, system_us);
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
     drop(task);

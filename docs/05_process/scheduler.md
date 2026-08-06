@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-04
+last_update: 2026-08-06
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -88,6 +88,14 @@ B91 另在同一 per-CPU owner 中维护 `context_switches`、`migrations`、`st
 `run_queue_peak`。它们只用于 panic/稳定化诊断，不参与负载选择和状态交接：migration
 必须等任务相对 `last_cpu` 真正在另一 CPU 进入 `Running` 才计数，queued 搬运不提前计；
 steal 只在窃取方完成 `Migrating -> Running` 后计数；队列峰值不包含 current。
+
+同一 owner 还维护 `user_time_us`、`system_time_us` 和 `idle_time_us`。任务时间在
+trap/schedule 边界按实际执行 CPU 立即入账，不经可能跨迁移的 PCB 批次反推。
+idle 区间从 CPU 在本地 idle 栈上运行开始，到下一个 current 切入前结束；
+因此 CPU0 当前在 idle 调度上下文内完成的 housekeeping 也归入 idle。这是
+对现有调度结构可稳定观测的口径；日后若把 housekeeping 迁入独立内核线程，
+相应时间将自然转入 system。远端 `/proc/stat` 读取用序列号快照合并已结算
+时间与尚未闭合的 idle 区间，不获取远程 CPU 的调度锁。
 
 TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current

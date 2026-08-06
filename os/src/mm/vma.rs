@@ -291,6 +291,18 @@ impl Vma {
         Ok(ppn)
     }
 
+    /// 回滚尚未安装 PTE 的页帧。
+    ///
+    /// 仅供“先初始化、后发布”路径在初始化或映射失败时使用；若 PTE 已经
+    /// 可见，必须改走带 TLB retire 的正式 unmap 流程。
+    pub(super) fn remove_unmapped_frame(&mut self, vpn: VirtPageNum) {
+        let frame = self
+            .inner
+            .remove_in_memory(&vpn)
+            .expect("unmapped VMA frame disappeared during rollback");
+        drop(frame);
+    }
+
     pub(super) fn map_existing_in_memory<T: PageTable>(
         &mut self,
         mapper: &mut UserMapper<'_, T>,
@@ -632,10 +644,14 @@ impl Vma {
             // Safety: 新页会在下面立即用旧页完整覆盖，然后才替换 PTE 暴露给用户。
             let new_frame = unsafe { frame_alloc_uninit().ok_or(MemoryError::OutOfMemory)? };
             let new_ppn = new_frame.ppn;
-            // copy data
-            new_ppn
-                .get_bytes_array()
-                .copy_from_slice(old_ppn.get_bytes_array());
+            // Safety: `old_frame` 的 Arc 固定源页生命周期，外层地址空间写锁
+            // 串行化 CoW 元数据；`new_frame` 尚未写入 VMA/PTE，因而由本路径
+            // 独占。源页可能仍被其它 CPU 只读映射，所以只创建只读视图。
+            unsafe {
+                old_ppn.with_bytes(|src| {
+                    new_ppn.with_bytes_mut(|dst| dst.copy_from_slice(src));
+                });
+            }
             let old_frame = self
                 .inner
                 .remove_in_memory(&vpn)

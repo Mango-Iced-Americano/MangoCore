@@ -140,9 +140,12 @@ fn write_u32_to_task_user(
         vm.fault_in_user_va_retry(VirtAddr::from(base), FaultAccess::Store)?;
         return vm.write(|inner| -> Result<(), isize> {
             let pa = inner.resolve_user_va(VirtAddr::from(base), FaultAccess::Store)?;
-            let page = pa.floor().get_bytes_array();
             let offset = pa.page_offset();
-            page[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            let dst = pa.floor().start_addr().direct_map_ptr().wrapping_add(offset);
+            // Safety: `vm.write()` 固定目标映射，范围检查保证写入不跨页。
+            // 用户线程可能并发观察 tid word，因此使用 raw copy，不为用户页
+            // 建立 Rust `&mut` 独占引用。
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
             Ok(())
         });
     }
@@ -151,7 +154,14 @@ fn write_u32_to_task_user(
         vm.fault_in_user_va_retry(va, FaultAccess::Store)?;
         vm.write(|inner| -> Result<(), isize> {
             let pa = inner.resolve_user_va(va, FaultAccess::Store)?;
-            pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+            let dst = pa
+                .floor()
+                .start_addr()
+                .direct_map_ptr()
+                .wrapping_add(pa.page_offset());
+            // Safety: VM 写锁固定物理映射，Store 解析保证该字节可写；raw
+            // pointer 保留用户共享内存允许并发观察的语义。
+            unsafe { dst.write(*byte) };
             Ok(())
         })?;
     }

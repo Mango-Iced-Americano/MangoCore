@@ -442,17 +442,27 @@ impl<T: PageTable> AddressSpaceInner<T> {
                 let mut start = 0;
                 let len = data.len();
                 for vpn in vma.inner.vpn_range {
-                    let ppn = match vma.map_one(&mut mapper, vpn) {
+                    // 数据页采用“先初始化、后发布”顺序，避免活跃 MM 中其它 CPU
+                    // 在 copy 完成前通过新 PTE 观察半成品页面。
+                    let ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                         Ok(ppn) => ppn,
                         Err(error) => {
                             let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
-                            return Err(error);
+                            return Err((error, vpn));
                         }
                     };
                     first_ppn.get_or_insert(ppn);
                     let end = start + PAGE_SIZE;
                     let src = &data[start..len.min(end)];
-                    ppn.get_bytes_array()[..src.len()].copy_from_slice(src);
+                    // Safety: 页已由当前 VMA 持有但尚无 PTE，当前路径独占写入。
+                    unsafe {
+                        ppn.with_bytes_mut(|dst| dst[..src.len()].copy_from_slice(src));
+                    }
+                    if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                        vma.remove_unmapped_frame(vpn);
+                        let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
+                        return Err((error, vpn));
+                    }
                     start = end;
                 }
             }
@@ -490,37 +500,54 @@ impl<T: PageTable> AddressSpaceInner<T> {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
         if let Some(vpn) = vpn_iter.next() {
             // special treatment for first page
-            let first_ppn = match vma.map_one(&mut mapper, vpn) {
+            let first_ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                 Ok(ppn) => ppn,
-                Err(error) => return Err(error),
+                Err(error) => return Err((error, vpn)),
             };
-            let first_dst = first_ppn.get_bytes_array();
-            first_dst[..offset].fill(0);
             let first_src = &data[..len.min(PAGE_SIZE - offset)];
-            first_dst[offset..offset + first_src.len()].copy_from_slice(first_src);
+            // Safety: 页面尚未安装 PTE，当前构造路径独占其内容。
+            unsafe {
+                first_ppn.with_bytes_mut(|dst| {
+                    dst[..offset].fill(0);
+                    dst[offset..offset + first_src.len()].copy_from_slice(first_src);
+                });
+            }
+            if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                vma.remove_unmapped_frame(vpn);
+                return Err((error, vpn));
+            }
 
             let mut start = PAGE_SIZE - offset;
             for vpn in vpn_iter {
-                let ppn = match vma.map_one(&mut mapper, vpn) {
+                let ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                     Ok(ppn) => ppn,
                     Err(error) => {
                         let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
-                        return Err(error);
+                        return Err((error, vpn));
                     }
                 };
-                let dst = ppn.get_bytes_array();
                 let end = start + PAGE_SIZE;
-                if start < len {
-                    if len >= end {
-                        let src = &data[start..end];
-                        dst[..src.len()].copy_from_slice(src);
-                    } else {
-                        let src = &data[start..len];
-                        dst[..src.len()].copy_from_slice(src);
-                        dst[src.len()..].fill(0);
-                    }
-                } else {
-                    dst.fill(0);
+                // Safety: 页面尚未安装 PTE，当前构造路径独占其内容。
+                unsafe {
+                    ppn.with_bytes_mut(|dst| {
+                        if start < len {
+                            if len >= end {
+                                let src = &data[start..end];
+                                dst[..src.len()].copy_from_slice(src);
+                            } else {
+                                let src = &data[start..len];
+                                dst[..src.len()].copy_from_slice(src);
+                                dst[src.len()..].fill(0);
+                            }
+                        } else {
+                            dst.fill(0);
+                        }
+                    });
+                }
+                if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                    vma.remove_unmapped_frame(vpn);
+                    let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
+                    return Err((error, vpn));
                 }
                 start = end;
             }
@@ -1720,8 +1747,14 @@ impl<T: PageTable> AddressSpaceInner<T> {
                 let pa = page_table.translate_va(VirtAddr::from(dst)).ok_or(EFAULT)?;
                 let page_offset = pa.page_offset();
                 let copy_len = (PAGE_SIZE - page_offset).min(src.len());
-                let page = pa.floor().get_bytes_array();
-                page[page_offset..page_offset + copy_len].copy_from_slice(&src[..copy_len]);
+                // Safety: ELF 地址空间仍是未发布的构造对象；页表翻译固定目标
+                // frame，当前 exec 构造路径独占其用户栈内容。
+                unsafe {
+                    pa.floor().with_bytes_mut(|page| {
+                        page[page_offset..page_offset + copy_len]
+                            .copy_from_slice(&src[..copy_len])
+                    });
+                }
                 dst = dst.checked_add(copy_len).ok_or(EFAULT)?;
                 src = &src[copy_len..];
             }
@@ -2163,7 +2196,8 @@ impl<T: PageTable> AddressSpaceInner<T> {
     fn zero_elf_load_pages(&mut self, pages: &[ElfLoadPage]) -> Result<(), isize> {
         for page in pages {
             let ppn = translate_page(&self.page_table, page.vpn).ok_or(ENOEXEC)?;
-            ppn.get_bytes_array().fill(0);
+            // Safety: ELF 地址空间尚未安装到进程，`&mut self` 独占构造过程。
+            unsafe { ppn.with_bytes_mut(|page| page.fill(0)) };
         }
         Ok(())
     }
@@ -2186,10 +2220,13 @@ impl<T: PageTable> AddressSpaceInner<T> {
             let copy_len = remaining.min(PAGE_SIZE - page_offset);
             let page_end = page_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             let ppn = translate_page(&self.page_table, vpn).ok_or(ENOEXEC)?;
-            copy_file(
-                file_offset,
-                &mut ppn.get_bytes_array()[page_offset..page_end],
-            )?;
+            // Safety: PT_LOAD 页属于尚未发布的 ELF 地址空间，当前 `&mut self`
+            // 是其唯一写者；闭包结束后页切片立即失效。
+            unsafe {
+                ppn.with_bytes_mut(|page| {
+                    copy_file(file_offset, &mut page[page_offset..page_end])
+                })
+            }?;
             virtual_address = virtual_address.checked_add(copy_len).ok_or(ENOEXEC)?;
             file_offset = file_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             remaining -= copy_len;
@@ -2572,8 +2609,22 @@ fn copy_from_page_cache(pc: &PageCache, mut file_off: usize, dst: &mut [u8]) -> 
         let page_off = file_off & (PAGE_SIZE - 1);
         let chunk = remaining.min(PAGE_SIZE - page_off);
         let frame = pc.frame_for_read(page_idx).map_err(|_| EIO)?;
-        dst[dst_off..dst_off + chunk]
-            .copy_from_slice(&frame.ppn.get_bytes_array()[page_off..page_off + chunk]);
+        let src = frame
+            .ppn
+            .start_addr()
+            .direct_map_ptr()
+            .wrapping_add(page_off)
+            .cast_const();
+        // Safety: `frame` 固定 PageCache frame 生命周期，索引计算保证读取不
+        // 跨页，目标范围位于调用方切片内。源页可能被 MAP_SHARED 用户映射
+        // 并发修改，所以使用 raw copy 而不创建共享 Rust 引用。
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                dst.as_mut_ptr().add(dst_off),
+                chunk,
+            );
+        }
         file_off = file_off.checked_add(chunk).ok_or(ENOEXEC)?;
         dst_off = dst_off.checked_add(chunk).ok_or(ENOEXEC)?;
         remaining -= chunk;

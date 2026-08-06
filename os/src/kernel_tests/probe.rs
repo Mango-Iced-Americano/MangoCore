@@ -890,7 +890,13 @@ fn map_user_page(
             .fault_in_user_va(VirtAddr::from(address), FaultAccess::Store)
             .map_err(|_| "failed to populate user probe page")?;
         let offset = pa.page_offset();
-        pa.floor().get_bytes_array()[offset..offset + data.len()].copy_from_slice(data);
+        // Safety: `space.write()` 独占该测试地址空间，目标页已由上面的
+        // store fault 建立，并且测试任务尚未发布到调度器。
+        unsafe {
+            pa.floor().with_bytes_mut(|page| {
+                page[offset..offset + data.len()].copy_from_slice(data)
+            });
+        }
         if executable {
             space
                 .mprotect(

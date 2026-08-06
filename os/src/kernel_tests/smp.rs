@@ -1289,7 +1289,13 @@ fn build_user_task(
         if offset + program.len() > crate::config::PAGE_SIZE {
             return Err("user probe crossed its mapped page");
         }
-        pa.floor().get_bytes_array()[offset..offset + program.len()].copy_from_slice(program);
+        // Safety: 当前闭包独占测试地址空间，用户探针尚未发布，且范围检查
+        // 已证明程序完全位于这个已 fault-in 的物理页内。
+        unsafe {
+            pa.floor().with_bytes_mut(|page| {
+                page[offset..offset + program.len()].copy_from_slice(program)
+            });
+        }
         // 只在装载指令时开放写权限；任务发布前收紧为 RX，避免测试把 W+X
         // 映射带到 AP，也顺带覆盖正式的 mprotect/PTE 提交流程。
         space

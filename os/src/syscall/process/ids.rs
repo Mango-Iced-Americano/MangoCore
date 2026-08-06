@@ -966,7 +966,7 @@ fn for_process_vm_iov_chunks<F>(
     mut f: F,
 ) -> Result<(), isize>
 where
-    F: FnMut(&mut [u8]) -> Result<(), isize>,
+    F: FnMut(*mut u8, usize) -> Result<(), isize>,
 {
     let vm_ref = process.vm();
     let mut total = 0usize;
@@ -989,7 +989,7 @@ fn append_process_vm_iov_chunks<F>(
     f: &mut F,
 ) -> Result<(), isize>
 where
-    F: FnMut(&mut [u8]) -> Result<(), isize>,
+    F: FnMut(*mut u8, usize) -> Result<(), isize>,
 {
     if len == 0 {
         return Ok(());
@@ -1012,7 +1012,16 @@ where
         };
         vm.write(|inner| {
             let pa = inner.resolve_user_va(start_va, access)?;
-            f(&mut pa.floor().get_bytes_array()[start_va.page_offset()..chunk_end])
+            let page_offset = start_va.page_offset();
+            let chunk_len = chunk_end - page_offset;
+            let ptr = pa
+                .floor()
+                .start_addr()
+                .direct_map_ptr()
+                .wrapping_add(page_offset);
+            // VM 写锁只固定映射和 frame 生命周期；远程线程仍可能从用户态
+            // 并发访问同一内存，因此只把 raw pointer 交给复制闭包。
+            f(ptr, chunk_len)
         })?;
         start = end_va.into();
     }
@@ -1026,9 +1035,13 @@ fn copy_process_vm_iovecs_to_slice(
     dst: &mut [u8],
 ) -> Result<(), isize> {
     let mut copied = 0usize;
-    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |chunk| {
-        let end = copied + chunk.len();
-        dst[copied..end].copy_from_slice(chunk);
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |src, chunk_len| {
+        let end = copied + chunk_len;
+        // Safety: chunk 的物理映射由调用层 VM 锁固定；`end <= cap <= dst.len()`，
+        // 且 scratch 目标与远程用户页不重叠。
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.cast_const(), dst.as_mut_ptr().add(copied), chunk_len)
+        };
         copied = end;
         Ok(())
     })
@@ -1041,9 +1054,11 @@ fn copy_slice_to_process_vm_iovecs(
     cap: usize,
 ) -> Result<(), isize> {
     let mut copied = 0usize;
-    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |chunk| {
-        let end = copied + chunk.len();
-        chunk.copy_from_slice(&src[copied..end]);
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |dst, chunk_len| {
+        let end = copied + chunk_len;
+        // Safety: chunk 的物理映射由调用层 VM 锁固定；`end <= cap <= src.len()`，
+        // scratch 源与远程用户页不重叠。
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(copied), dst, chunk_len) };
         copied = end;
         Ok(())
     })

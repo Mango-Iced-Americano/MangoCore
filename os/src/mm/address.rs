@@ -275,16 +275,44 @@ impl PhysPageNum {
         }
     }
 
-    /// 获取整个物理页的可变字节视图。
+    /// 在当前调用作用域内读取整个物理页。
+    ///
+    /// 闭包的高阶生命周期使页切片不能作为返回值逃逸；它只约束引用寿命，
+    /// 不提供任何并发同步，因此接口仍然是 `unsafe`。
     ///
     /// # Safety
     ///
-    /// 调用方必须独占该物理页。
-    pub fn get_bytes_array(&self) -> &'static mut [u8] {
-        let pa: PhysAddr = self.clone().into();
-        // Safety: callers guarantee exclusive access to this whole physical
-        // page through the direct map.
-        unsafe { core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE) }
+    /// 调用方必须保证物理页在闭包执行期间有效，并保证没有并发写者。
+    pub(crate) unsafe fn with_bytes<R, F>(&self, f: F) -> R
+    where
+        F: for<'page> FnOnce(&'page [u8]) -> R,
+    {
+        let pa: PhysAddr = (*self).into();
+        // Safety: 调用方保证页有效且没有并发写者；切片只交给本次闭包调用。
+        let bytes = unsafe {
+            core::slice::from_raw_parts(pa.direct_map_addr() as *const u8, PAGE_SIZE)
+        };
+        f(bytes)
+    }
+
+    /// 在当前调用作用域内修改整个物理页。
+    ///
+    /// 闭包的高阶生命周期阻止可变切片逃逸，避免旧接口从安全函数制造
+    /// `&'static mut [u8]`。独占性仍必须由页帧所有权或外层锁证明。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证物理页在闭包执行期间有效，并独占该页的 Rust 访问。
+    pub(crate) unsafe fn with_bytes_mut<R, F>(&self, f: F) -> R
+    where
+        F: for<'page> FnOnce(&'page mut [u8]) -> R,
+    {
+        let pa: PhysAddr = (*self).into();
+        // Safety: 调用方保证页有效且独占；可变切片只交给本次闭包调用。
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE)
+        };
+        f(bytes)
     }
 
 }

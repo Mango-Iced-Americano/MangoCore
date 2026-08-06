@@ -1792,11 +1792,15 @@ impl File {
                 // pread directly into each frame, avoiding a monolithic heap Vec
                 let mut offset = 0;
                 for tracker in &trackers {
-                    let dst = tracker.ppn.get_bytes_array();
                     let chunk = (size - offset).min(PAGE_SIZE);
-                    let n = self
-                        .pread(offset, &mut dst[..chunk])
-                        .expect("map_to_kernel_space: pread failed");
+                    // Safety: trackers 是本闭包刚分配、尚未插入内核页表的私有
+                    // frame 集合；本次 pread 独占目标页内容。
+                    let n = unsafe {
+                        tracker.ppn.with_bytes_mut(|dst| {
+                            self.pread(offset, &mut dst[..chunk])
+                                .expect("map_to_kernel_space: pread failed")
+                        })
+                    };
                     if n != chunk {
                         log::warn!(
                         "[map_to_kernel_space] pread at offset {} returned {} bytes, expected {}",

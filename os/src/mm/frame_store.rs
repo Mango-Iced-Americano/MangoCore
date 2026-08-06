@@ -54,7 +54,14 @@ impl Frame {
         match self {
             Frame::InMemory(frame_ref) => {
                 if Arc::strong_count(frame_ref) == 1 {
-                    let swap_tracker = SWAP_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())?;
+                    // Safety: `&mut self` 独占该 Frame 状态，strong_count==1
+                    // 证明没有其它 FrameTracker owner；本函数契约还要求调用方
+                    // 已清 PTE 并等完 TLB ack，swap 锁同步设备访问。
+                    let swap_tracker = unsafe {
+                        frame_ref
+                            .ppn
+                            .with_bytes(|src| SWAP_DEVICE.lock().write(src))
+                    }?;
                     let old = core::mem::replace(self, Frame::SwappedOut(swap_tracker));
                     let Frame::InMemory(frame) = old else {
                         unreachable!("swap_out source changed while exclusively borrowed")
@@ -74,9 +81,10 @@ impl Frame {
             Frame::SwappedOut(swap_tracker) => {
                 let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 let ppn = frame.ppn;
-                SWAP_DEVICE
-                    .lock()
-                    .read(swap_tracker.0, ppn.get_bytes_array())?;
+                // Safety: 新 frame 尚未写入 `self` 或 PTE，当前路径独占其内容。
+                unsafe {
+                    ppn.with_bytes_mut(|dst| SWAP_DEVICE.lock().read(swap_tracker.0, dst))
+                }?;
                 *self = Frame::InMemory(frame);
                 Ok(ppn)
             }
@@ -90,9 +98,14 @@ impl Frame {
         match self {
             Frame::InMemory(frame_ref) => {
                 if Arc::strong_count(frame_ref) == 1 {
-                    if let Ok(zram_tracker) =
-                        ZRAM_DEVICE.lock().write(frame_ref.ppn.get_bytes_array())
-                    {
+                    // Safety: `&mut self`、唯一 Arc owner，以及调用方已完成的
+                    // PTE 清除/TLB ack 共同排除页访问；zram 锁串行化压缩器。
+                    let compressed = unsafe {
+                        frame_ref
+                            .ppn
+                            .with_bytes(|src| ZRAM_DEVICE.lock().write(src))
+                    };
+                    if let Ok(zram_tracker) = compressed {
                         let old = core::mem::replace(self, Frame::Compressed(zram_tracker));
                         let Frame::InMemory(frame) = old else {
                             unreachable!("zip source changed while exclusively borrowed")
@@ -115,10 +128,11 @@ impl Frame {
             Frame::Compressed(zram_tracker) => {
                 let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
                 let ppn = frame.ppn;
-                ZRAM_DEVICE
-                    .lock()
-                    .read(zram_tracker.0, ppn.get_bytes_array())
-                    .map_err(|_| MemoryError::BackingStoreFailure)?;
+                // Safety: 新 frame 尚未发布，解压路径独占整个目标页。
+                unsafe {
+                    ppn.with_bytes_mut(|dst| ZRAM_DEVICE.lock().read(zram_tracker.0, dst))
+                }
+                .map_err(|_| MemoryError::BackingStoreFailure)?;
                 *self = Frame::InMemory(frame);
                 Ok(ppn)
             }

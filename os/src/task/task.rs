@@ -25,7 +25,6 @@ use super::{
 use crate::config::{MMAP_BASE, PAGE_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
-use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
@@ -554,13 +553,26 @@ impl TaskControlBlockInner {
         }
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
-        self.group_user_unflushed_us = self.group_user_unflushed_us.saturating_add(diff.to_us());
+        let diff_us = diff.to_us();
+        self.group_user_unflushed_us = self.group_user_unflushed_us.saturating_add(diff_us);
+        // per-CPU 时间必须在测量发生的 CPU 上立即入账；若等 PCB 批量冲刷，
+        // 任务迁移后会把此前区间错误归到新的 CPU。
+        super::processor::account_local_cpu_time(diff_us, 0);
         self.sched_vruntime = self
             .sched_vruntime
-            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
+            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff_us));
     }
-    /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> (usize, usize) {
+    /// 在 trap-return 安全点前结算已经完成的内核态区间。
+    ///
+    /// 这里只更新 system time，不提前开启 user time；安全点可能调度出去，
+    /// 提前切换模式会把离 CPU 时间误计为用户态时间。
+    pub fn update_process_times_before_safe_point(&mut self) -> (usize, usize) {
+        self.account_system_time_until(TimeVal::now());
+        self.take_group_cpu_delta(false)
+    }
+
+    /// 在恢复汇编前结算 trap 尾段，并从此刻开始用户态计时。
+    pub fn update_process_times_enter_user(&mut self) -> (usize, usize) {
         let now = TimeVal::now();
         self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
@@ -585,8 +597,10 @@ impl TaskControlBlockInner {
             return;
         }
         self.rusage.ru_stime = self.rusage.ru_stime + diff;
-        self.group_system_unflushed_us =
-            self.group_system_unflushed_us.saturating_add(diff.to_us());
+        let diff_us = diff.to_us();
+        self.group_system_unflushed_us = self.group_system_unflushed_us.saturating_add(diff_us);
+        // 与用户态时间相同，系统态区间按实际执行它的 CPU 即时记账。
+        super::processor::account_local_cpu_time(0, diff_us);
         self.clock.last_enter_s_mode = now;
     }
 
@@ -657,8 +671,13 @@ impl TaskControlBlock {
             if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
                 let pa = vm.resolve_user_va(base_va, FaultAccess::Store)?;
                 let page_offset = pa.page_offset();
-                let page = pa.floor().get_bytes_array();
-                page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
+                let dst = pa.floor().start_addr().direct_map_ptr().wrapping_add(page_offset);
+                // Safety: VM 写锁固定了 PTE 和 frame 生命周期，范围检查保证写入
+                // 不跨页。这里使用 raw copy，是因为其它线程仍可能从用户态访问
+                // 同一 futex word，不能为这类共享用户内存制造 `&mut [u8]`。
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+                }
                 let after_key = if uses_shared_key {
                     let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
                     Some(SharedFutexKey::new(backing, page_offset))
@@ -671,7 +690,14 @@ impl TaskControlBlock {
             for (offset, byte) in bytes.iter().enumerate() {
                 let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
                 let pa = vm.resolve_user_va(va, FaultAccess::Store)?;
-                pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+                let dst = pa
+                    .floor()
+                    .start_addr()
+                    .direct_map_ptr()
+                    .wrapping_add(pa.page_offset());
+                // Safety: VM 写锁保证物理映射在写入期间有效；逐字节路径天然
+                // 不跨页。raw pointer 避免对并发可见的用户内存声明 Rust 独占。
+                unsafe { dst.write(*byte) };
             }
             let after_key = if uses_shared_key {
                 let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
