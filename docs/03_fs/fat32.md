@@ -254,8 +254,8 @@ FAT32 通过 `FatPageCacheBackend` 接入通用 PageCache 层。该后端持有�
    - 建议：引入随机数种子或递增计数器。
 
 3. **FAT 表的线程安全**
-   - 现象：`Fat` 的 `vacant_clus` 和 `hint` 使用 `Mutex` 保护，但 `get_next_clus_num` 和 `write_fat_entry` 直接操作块设备，没有全局锁。
-   - 根因：单核环境下竞争条件不会触发，但设计上未考虑多核扩展。
+   - 现象：分配路径由 `hint` 锁串行化，释放路径只持有 `vacant_clus` 锁；两条路径可能并发读写同一 FAT entry。
+   - 根因：空闲簇缓存和扫描提示各自受锁，但 FAT entry 的“查找—占用—链接/释放”尚未形成统一事务边界。本轮 PageCache SMP 改造只保护页数据，不等价于 FAT 元数据事务化。
    - 影响：在多核环境中并发分配/释放簇可能导致 FAT 表损坏。
    - 建议：在 `EasyFileSystem` 层面引入 FAT 操作互斥锁。
 

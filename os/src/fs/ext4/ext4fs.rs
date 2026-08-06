@@ -24,6 +24,17 @@ use layout::Ext4OSInode;
 use spin::{Mutex, RwLock};
 type SuperBlock = Ext4Superblock;
 
+/// 递归作用域使前一个 transaction guard 覆盖后一个，维持 inode 号全序。
+fn lock_inode_txns<T>(txns: &[Arc<Mutex<()>>], f: impl FnOnce() -> T) -> T {
+    match txns.split_first() {
+        Some((txn, remaining)) => {
+            let _guard = txn.lock();
+            lock_inode_txns(remaining, f)
+        }
+        None => f(),
+    }
+}
+
 #[derive(Default)]
 pub struct Ext4BudgetPruneStats {
     pub scanned: usize,
@@ -110,6 +121,11 @@ pub struct Ext4FileSystem {
     /// 只在此表锁内 upgrade-or-create，返回 Arc 后立即释放表锁；调用者绝不
     /// 在持有目录 gate 时回头取得该表锁。
     inode_gates: Mutex<BTreeMap<u32, Weak<RwLock<()>>>>,
+    /// 按真实 inode 号 canonicalize 的完整快照提交事务；Weak 不保活 wrapper。
+    ///
+    /// inode object cache 不保证 wrapper 唯一，因此所有 snapshot → modify →
+    /// commit 路径必须通过此表共享同一把锁。
+    inode_txns: Mutex<BTreeMap<u32, Weak<Mutex<()>>>>,
 
     // ── Phase 1: VFS inode object cache (framework-only) ─────────────────
     //
@@ -139,7 +155,7 @@ pub struct Ext4FileSystem {
     children_pruned_gen: AtomicU64,
 
     // ── Phase 4: 底层 ext4 inode table 读缓存 ──
-    // 减少 get_inode_ref 的磁盘 I/O。write_back_inode 改为先更新缓存再写回。
+    // 减少 get_inode_ref 的磁盘 I/O。commit_inode_snapshot 改为先更新缓存再写回。
     pub(super) inode_cache: spin::Mutex<
         BTreeMap<u32, alloc::sync::Arc<spin::Mutex<super::ext4_inode::CachedExt4Inode>>>,
     >,
@@ -197,6 +213,33 @@ impl Ext4FileSystem {
         let gate = Arc::new(RwLock::new(()));
         gates.insert(ino, Arc::downgrade(&gate));
         gate
+    }
+
+    /// 返回 inode 对应的 canonical transaction。
+    ///
+    /// registry lock 只用于 Weak 的 upgrade-or-create；返回前释放，因此不会与
+    /// directory gate、transaction 或 PageCache gate 嵌套。
+    pub(crate) fn inode_txn(&self, ino: u32) -> Arc<Mutex<()>> {
+        let mut txns = self.inode_txns.lock();
+        if let Some(txn) = txns.get(&ino).and_then(Weak::upgrade) {
+            return txn;
+        }
+        let txn = Arc::new(Mutex::new(()));
+        txns.insert(ino, Arc::downgrade(&txn));
+        txn
+    }
+
+    /// 在 inode 号升序下锁住全部去重 transaction 后执行闭包。
+    ///
+    /// 调用者必须在此前取得 rename/目录 gate；这里先从 registry 获得稳定 Arc，
+    /// 再释放 registry 并递归持锁，故不会把 registry 锁带入任何业务临界区。
+    pub(crate) fn with_inode_txns<T>(&self, inos: &[u32], f: impl FnOnce() -> T) -> T {
+        let mut unique_txns = BTreeMap::new();
+        for ino in inos {
+            unique_txns.entry(*ino).or_insert_with(|| self.inode_txn(*ino));
+        }
+        let txns: Vec<Arc<Mutex<()>>> = unique_txns.into_iter().map(|(_, txn)| txn).collect();
+        lock_inode_txns(&txns, f)
     }
 
     /// 在 cross-directory rename gate 内决定父目录锁顺序：祖先在前；无
@@ -461,6 +504,7 @@ impl Ext4FileSystem {
                 page_caches: spin::Mutex::new(BTreeMap::new()),
                 rename_gate: spin::Mutex::new(()),
                 inode_gates: spin::Mutex::new(BTreeMap::new()),
+                inode_txns: spin::Mutex::new(BTreeMap::new()),
                 inode_objects: spin::Mutex::new(BTreeMap::new()),
                 reclaim_cursor: spin::Mutex::new(Ext4ReclaimCursor::new()),
                 inode_objects_prune_gen: AtomicU64::new(0),
@@ -867,6 +911,7 @@ impl layout::Ext4OSInode {
     ) -> alloc::sync::Arc<dyn IndexNode> {
         let inode_num = inode_ref.lock().inode_num;
         let dir_gate = ext4fs.inode_gate(inode_num);
+        let inode_txn = ext4fs.inode_txn(inode_num);
         alloc::sync::Arc::new(Self {
             inode_lock: alloc::sync::Arc::new(spin::RwLock::new(InodeLock {})),
             dir_gate,
@@ -878,7 +923,7 @@ impl layout::Ext4OSInode {
             offset: spin::Mutex::new(0),
             ext4fs,
             new_page_cache: spin::Mutex::new(None),
-            io_txn: spin::Mutex::new(()),
+            inode_txn,
             children: spin::Mutex::new(alloc::collections::BTreeMap::new()),
             negative_dentry: spin::Mutex::new(alloc::collections::BTreeMap::new()),
             dir_version: core::sync::atomic::AtomicU64::new(0),
@@ -939,7 +984,7 @@ impl layout::Ext4OSInode {
     }
 
     fn finalize_removed_inode(&self, child_ref: &mut Ext4InodeRef) -> Result<(), SyscallErr> {
-        self.ext4fs.write_back_inode(child_ref);
+        self.ext4fs.commit_inode_snapshot(child_ref);
         self.reclaim_unlinked_inode(child_ref)
     }
 
@@ -987,7 +1032,7 @@ impl layout::Ext4OSInode {
         let now = crate::timer::current_time_safe() as u32;
         staged.inode.set_mtime(now);
         staged.inode.set_ctime(now);
-        self.ext4fs.write_back_inode(&mut staged);
+        self.ext4fs.commit_inode_snapshot(&mut staged);
 
         self.inode.lock().inode = staged.inode;
         self.cached_file_size.store(new_size, Ordering::Relaxed);
@@ -1000,7 +1045,7 @@ impl layout::Ext4OSInode {
     fn commit_size(&self, mut staged: Ext4InodeRef, new_size: usize) -> Result<(), SyscallErr> {
         let new_size = u64::try_from(new_size).map_err(|_| SyscallErr::EINVAL)?;
         staged.inode.set_size(new_size);
-        self.ext4fs.write_back_inode(&mut staged);
+        self.ext4fs.commit_inode_snapshot(&mut staged);
 
         self.inode.lock().inode = staged.inode;
         self.cached_file_size.store(new_size, Ordering::Relaxed);
@@ -1015,20 +1060,20 @@ impl layout::Ext4OSInode {
         metadata_dirty: bool,
     ) {
         let mut restored = before.clone();
-        self.ext4fs.write_back_inode(&mut restored);
+        self.ext4fs.commit_inode_snapshot(&mut restored);
         self.inode.lock().inode = before.inode;
         self.cached_file_size
             .store(cached_file_size, Ordering::Relaxed);
         self.metadata_dirty.store(metadata_dirty, Ordering::Relaxed);
     }
 
-    /// 写入已位于内核内存中的数据，并在同一 `io_txn` 内串行 extent、PageCache 和 EOF。
+    /// 写入已位于内核内存中的数据，并在同一 canonical inode transaction 内串行 extent、PageCache 和 EOF。
     fn write_at_bounced(&self, offset: usize, bytes: &[u8]) -> Result<usize, SyscallErr> {
         if bytes.is_empty() {
             return Ok(0);
         }
         let end = offset.checked_add(bytes.len()).ok_or(SyscallErr::EINVAL)?;
-        let _txn = self.io_txn.lock();
+        let _txn = self.inode_txn.lock();
 
         let before = self.inode.lock().clone();
         if before.inode.is_dir() {
@@ -1043,7 +1088,7 @@ impl layout::Ext4OSInode {
         let end_lblock = u32::try_from(end.div_ceil(block_size)).map_err(|_| SyscallErr::EINVAL)?;
         let mut staged = before.clone();
 
-        // `io_txn` 先于 PageCache 内部 `op_gate`；这里不触及用户内存。
+        // `inode_txn` 先于 PageCache 内部 `op_gate`；这里不触及用户内存。
         if self
             .ext4fs
             .ensure_blocks_allocated(&mut staged, start_lblock, end_lblock)
@@ -1067,7 +1112,7 @@ impl layout::Ext4OSInode {
         Ok(written)
     }
 
-    /// 在进入 `io_txn` 前将用户数据复制为内核所有的 bounded bounce buffer。
+    /// 在进入 `inode_txn` 前将用户数据复制为内核所有的 bounded bounce buffer。
     fn write_at_user_bounced(
         &self,
         offset: usize,
@@ -1707,6 +1752,7 @@ impl IndexNode for layout::Ext4OSInode {
     }
 
     fn set_metadata(&self, metadata: &Metadata) -> Result<(), SyscallErr> {
+        let _txn = self.inode_txn.lock();
         let inode_num = self.inode.lock().inode_num;
         let mut fresh = self.ext4fs.get_inode_ref(inode_num);
         let file_type = vfs_type_to_inode_mode(metadata.file_type);
@@ -1717,7 +1763,7 @@ impl IndexNode for layout::Ext4OSInode {
         fresh.set_atime(metadata.atime.tv_sec as u32);
         fresh.set_mtime(metadata.mtime.tv_sec as u32);
         fresh.set_ctime(metadata.ctime.tv_sec as u32);
-        self.ext4fs.write_back_inode(&mut fresh);
+        self.ext4fs.commit_inode_snapshot(&mut fresh);
         {
             let mut inode = self.inode.lock();
             inode.inode = fresh.inode;
@@ -1840,7 +1886,8 @@ impl IndexNode for layout::Ext4OSInode {
         // 所有 parent/victim/rename gates 均已释放；只在这里进行可能触及
         // PageCache 的零链接 inode 回收与最终 drop。
         if let Some(mut target) = deferred_target {
-            self.reclaim_unlinked_inode(&mut target)?;
+            self.ext4fs
+                .with_inode_txns(&[target.inode_num], || self.reclaim_unlinked_inode(&mut target))?;
         }
         Ok(())
     }
@@ -1868,12 +1915,15 @@ impl IndexNode for layout::Ext4OSInode {
             return Err(SyscallErr::EEXIST);
         }
 
-        let mut parent_ref = self.ext4fs.get_inode_ref(parent_num);
-        let mut child_ref = self.ext4fs.get_inode_ref(child_num);
-        self.ext4fs
-            .link(&mut parent_ref, &mut child_ref, name)
-            .map_err(|_| SyscallErr::EIO)?;
-        self.ext4fs.write_back_inode(&mut child_ref);
+        self.ext4fs.with_inode_txns(&[parent_num, child_num], || {
+            let mut parent_ref = self.ext4fs.get_inode_ref(parent_num);
+            let mut child_ref = self.ext4fs.get_inode_ref(child_num);
+            self.ext4fs
+                .link(&mut parent_ref, &mut child_ref, name)
+                .map_err(|_| SyscallErr::EIO)?;
+            self.ext4fs.commit_inode_snapshot(&mut child_ref);
+            Ok::<(), SyscallErr>(())
+        })?;
         self.refresh_inode_snapshot();
         self.bump_dir_version();
         self.clear_negative_dentry(name);
@@ -1901,25 +1951,27 @@ impl IndexNode for layout::Ext4OSInode {
             .map_err(|_| SyscallErr::ENOENT)?;
         let child_num = result.dentry.inode;
         // parent → victim: unlink revalidates the child while both canonical
-        // gates are held.  No cache or page operation has run before this.
+        // gates are held. No cache or page operation has run before this.
         let child_gate = self.ext4fs.inode_gate(child_num);
         let _victim_gate = child_gate.write();
 
-        // unlink 不可用于目录 — 必须返回 EISDIR
-        if self.ext4fs.get_inode_ref(child_num).inode.is_dir() {
-            return Err(SyscallErr::EISDIR);
-        }
+        self.ext4fs.with_inode_txns(&[parent_num, child_num], || {
+            // unlink 不可用于目录 — 必须返回 EISDIR
+            if self.ext4fs.get_inode_ref(child_num).inode.is_dir() {
+                return Err(SyscallErr::EISDIR);
+            }
 
-        // Phase 2: flush dirty PageCache BEFORE freeing inode
-        self.ext4fs
-            .flush_inode_pagecache_if_dirty(child_num)
-            .map_err(|_| SyscallErr::EIO)?;
+            // canonical inode transaction 先于 PageCache writeback。
+            self.ext4fs
+                .flush_inode_pagecache_if_dirty(child_num)
+                .map_err(|_| SyscallErr::EIO)?;
 
-        let mut child_ref = self.ext4fs.get_inode_ref(child_num);
-        self.ext4fs
-            .unlink(&mut self.inode.lock(), &mut child_ref, name)
-            .map_err(|_| SyscallErr::EIO)?;
-        self.finalize_removed_inode(&mut child_ref)?;
+            let mut child_ref = self.ext4fs.get_inode_ref(child_num);
+            self.ext4fs
+                .unlink(&mut self.inode.lock(), &mut child_ref, name)
+                .map_err(|_| SyscallErr::EIO)?;
+            self.finalize_removed_inode(&mut child_ref)
+        })?;
 
         // 从 parent.children 移除 (Weak, 不需要持锁释放)
         {
@@ -1953,48 +2005,50 @@ impl IndexNode for layout::Ext4OSInode {
         // canonical victim gate 内提交。
         let child_gate = self.ext4fs.inode_gate(child_ino);
         let _victim_gate = child_gate.write();
-        let mut child_ref = self.ext4fs.get_inode_ref(child_ino);
-        if !child_ref.inode.is_dir() {
-            return Err(SyscallErr::ENOTDIR);
-        }
-        let entries = self
-            .ext4fs
-            .dir_get_entries(child_ino)
-            .map_err(|_| SyscallErr::EIO)?;
-        let non_dot = entries
-            .iter()
-            .filter(|e| {
-                let n = e.get_name();
-                n != "." && n != ".."
-            })
-            .count();
-        if non_dot > 0 {
-            return Err(SyscallErr::ENOTEMPTY);
-        }
-        self.ext4fs
-            .flush_inode_pagecache_if_dirty(child_ino)
-            .map_err(|_| SyscallErr::EIO)?;
-        {
-            let mut parent_ref = self.inode.lock();
-            self.ext4fs
-                .unlink(&mut parent_ref, &mut child_ref, name)
+        self.ext4fs.with_inode_txns(&[parent_num, child_ino], || {
+            let mut child_ref = self.ext4fs.get_inode_ref(child_ino);
+            if !child_ref.inode.is_dir() {
+                return Err(SyscallErr::ENOTDIR);
+            }
+            let entries = self
+                .ext4fs
+                .dir_get_entries(child_ino)
                 .map_err(|_| SyscallErr::EIO)?;
+            let non_dot = entries
+                .iter()
+                .filter(|e| {
+                    let n = e.get_name();
+                    n != "." && n != ".."
+                })
+                .count();
+            if non_dot > 0 {
+                return Err(SyscallErr::ENOTEMPTY);
+            }
+            self.ext4fs
+                .flush_inode_pagecache_if_dirty(child_ino)
+                .map_err(|_| SyscallErr::EIO)?;
+            {
+                let mut parent_ref = self.ext4fs.get_inode_ref(parent_num);
+                self.ext4fs
+                    .unlink(&mut parent_ref, &mut child_ref, name)
+                    .map_err(|_| SyscallErr::EIO)?;
 
-            // Removing a subdirectory also removes its ".." reference to the
-            // parent.  The low-level unlink above only accounts for the named
-            // parent entry, so update the parent directory link count here.
-            let parent_links = parent_ref.inode.links_count();
-            parent_ref
-                .inode
-                .set_links_count(parent_links.saturating_sub(1));
-            self.ext4fs.write_back_inode(&mut parent_ref);
-        }
+                // Removing a subdirectory also removes its ".." reference to the
+                // parent. The low-level unlink above only accounts for the named
+                // parent entry, so update the parent directory link count here.
+                let parent_links = parent_ref.inode.links_count();
+                parent_ref
+                    .inode
+                    .set_links_count(parent_links.saturating_sub(1));
+                self.ext4fs.commit_inode_snapshot(&mut parent_ref);
+            }
 
-        // An empty directory has two links before rmdir: its parent entry and
-        // its own "." entry.  Both disappear atomically from the namespace.
-        // Keeping the count at one leaves an allocated, unreachable inode.
-        child_ref.inode.set_links_count(0);
-        self.finalize_removed_inode(&mut child_ref)?;
+            // An empty directory has two links before rmdir: its parent entry and
+            // its own "." entry. Both disappear atomically from the namespace.
+            // Keeping the count at one leaves an allocated, unreachable inode.
+            child_ref.inode.set_links_count(0);
+            self.finalize_removed_inode(&mut child_ref)
+        })?;
 
         // 从 parent.children 移除 (Weak, 不需要持锁释放)
         {
@@ -2026,14 +2080,14 @@ impl IndexNode for layout::Ext4OSInode {
 
     fn resize(&self, len: usize) -> Result<(), SyscallErr> {
         let new_size = u64::try_from(len).map_err(|_| SyscallErr::EINVAL)?;
-        let _txn = self.io_txn.lock();
+        let _txn = self.inode_txn.lock();
         let mut staged = self.inode.lock().clone();
         if staged.inode.is_dir() {
             return Err(SyscallErr::EISDIR);
         }
         let page_cache = self.get_new_page_cache().ok_or(SyscallErr::EIO)?;
 
-        // 固定顺序 `io_txn -> op_gate`；persistent 只修改 extent，EOF 在 cache
+        // 固定顺序 `inode_txn -> op_gate`；persistent 只修改 extent，EOF 在 cache
         // 剪枝完成后才发布，因此 write 与 ftruncate 只能呈现完整的串行顺序。
         page_cache.truncate_with_backend(len, || {
             self.ext4fs
@@ -2237,11 +2291,20 @@ impl layout::Ext4OSInode {
         let victim = overwritten_target
             .as_ref()
             .map(|target| (target.inode_num, target.inode.is_dir()));
+        // 在 victim gates 后、任何完整快照读取前取得全部事务。缺省 victim 用
+        // source 去重，保证同一 inode 的 hard-link rename 只锁一次。
+        let transaction_inos = [
+            old_parent_num,
+            new_parent_num,
+            child_inode_num,
+            victim.map(|(ino, _)| ino).unwrap_or(child_inode_num),
+        ];
         return self.ext4fs.with_rename_victim_gates(
             child_inode_num,
             is_dir,
             victim,
             || {
+        self.ext4fs.with_inode_txns(&transaction_inos, || {
         // directory victim gate 已取得；现在才读取其 children，避免把锁前
         // emptiness snapshot 当作提交依据。
         if let Some(target) = overwritten_target.as_ref() {
@@ -2269,7 +2332,7 @@ impl layout::Ext4OSInode {
                 if links > 0 {
                     target.inode.set_links_count(links - 1);
                 }
-                self.ext4fs.write_back_inode(&mut target);
+                self.ext4fs.commit_inode_snapshot(&mut target);
                 if let Some(target_obj) = self.ext4fs.lookup_inode_object(target.inode_num) {
                     if let Some(target_osi) = target_obj
                         .as_any_ref()
@@ -2398,12 +2461,12 @@ impl layout::Ext4OSInode {
                 let links = old_p_ref.inode.links_count();
                 if links > 1 {
                     old_p_ref.inode.set_links_count(links - 1);
-                    self.ext4fs.write_back_inode(&mut old_p_ref);
+                    self.ext4fs.commit_inode_snapshot(&mut old_p_ref);
                 }
                 let mut new_p_ref = self.ext4fs.get_inode_ref(new_parent_num);
                 let links = new_p_ref.inode.links_count() + 1;
                 new_p_ref.inode.set_links_count(links);
-                self.ext4fs.write_back_inode(&mut new_p_ref);
+                self.ext4fs.commit_inode_snapshot(&mut new_p_ref);
                 let mut child_ref_mut = self.ext4fs.get_inode_ref(child_inode_num);
                 self.ext4fs
                     .dir_remove_entry(&mut child_ref_mut, "..")
@@ -2449,6 +2512,7 @@ impl layout::Ext4OSInode {
             new_parent_ext4.refresh_inode_snapshot();
             Ok(deferred_target)
         }
+        })
             },
         )
     }

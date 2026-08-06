@@ -4,7 +4,7 @@ module: "net_core + iface"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/net/iface.rs"
   - "os/src/net/net_core.rs"
@@ -33,6 +33,10 @@ related_docs:
 # 网络接口抽象与设备注册中心
 
 ## 概述
+
+设备元数据和路由查询不持有 DeviceStack；变更先在短目录域提交，再由目标栈
+重验。所有 `SIOCSIF*` 用户访问先完成内核快照或复制，不能在 device、route 或
+DeviceStack 锁内触发缺页。
 
 网络接口抽象层和设备注册中心是 MangoCore 网络子系统的底层基础设施。`os/src/net/iface.rs` 定义了 `Iface` trait（所有网络设备的统一接口）、`IfaceCommon`（共享 per-interface 状态）和 `SmoltcpDeviceAccess`（&self 设备抽象）。`os/src/net/net_core.rs` 提供设备注册中心、全局 ifindex 计数器、DHCP 网关状态和 `NetDeviceEntry`（`Iface` 的基准实现）。`os/src/net/ioctl.rs` 实现 SIOCGIF\* 系列 ioctl，通过设备注册中心查询接口元数据。
 
@@ -260,7 +264,8 @@ syscall (SYS_IOCTL, fd, SIOCGIFINDEX, &ifreq)
 | `SIOCGIFTXQLEN` | 按名称查找，返回固定值 1000 |
 | `SIOCSIFFLAGS` / `SIOCSIFADDR` / `SIOCSIFMTU` | 更新元数据并同步到 smoltcp DeviceStack |
 
-设置类 ioctl（`SIOCSIF*`）在更新 netns 设备列表后，通过 `NET_INTERFACE.inner_handler()` 同步到对应的 smoltcp `DeviceStack`。
+设置类 ioctl（`SIOCSIF*`）先在 netns 设备列表提交元数据并释放其锁，再通过
+`add_ip_to_stack`、`remove_ip_from_stack`、`set_stack_mtu` 等单栈 API 同步 smoltcp。
 
 ## 接口与 API
 
@@ -323,9 +328,9 @@ syscall (SYS_IOCTL, fd, SIOCGIFINDEX, &ifreq)
    - 修复方向: 短期无影响，长期可考虑 per-ns 计数器或 ifindex 回收池。
 
 3. **ioctl 设置类命令锁顺序依赖**
-   - 现象: `SIOCSIFFLAGS`、`SIOCSIFADDR`、`SIOCSIFMTU` 先持 `device_list` 锁再取 `NET_INTERFACE.inner` 锁。
-   - 风险: 如果轮询循环反向锁顺序（先 inner 再 device_list），会导致死锁。当前设计通过及时释放 `device_list` 锁来避免。
-   - 影响: 当前单核环境无并发锁竞争风险。多核扩展时需统一锁顺序。
+   - 当前规则：`SIOCSIFFLAGS`、`SIOCSIFADDR`、`SIOCSIFMTU` 在进入 DeviceStack
+     前释放 `device_list`；worker 在释放 DeviceStack 后才提交设备元数据。
+   - 禁止重新引入 `device_list <-> DeviceStack` 双向嵌套。
 
 ## 参考资料
 

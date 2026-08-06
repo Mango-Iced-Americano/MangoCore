@@ -231,55 +231,6 @@ impl PhysAddr {
         self.direct_map_addr() as *mut u8
     }
 
-    /// 通过内核直映区获取 `T` 的共享引用。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须保证物理地址有效、满足 `T` 的对齐要求，且该内存区域在返回
-    /// 引用存活期间不会被释放或以可变方式别名访问。
-    pub fn get_ref<T>(&self) -> &'static T {
-        // Safety: the caller-side contract above ensures the direct-map address
-        // is a valid, aligned `T` reference.
-        unsafe { (self.direct_map_addr() as *const T).as_ref().unwrap() }
-    }
-
-    /// 通过内核直映区获取 `T` 的可变引用。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须独占对应物理内存，并保证地址有效且满足 `T` 的对齐要求。
-    pub fn get_mut<T>(&self) -> &'static mut T {
-        // Safety: the caller-side contract above ensures exclusive access to a
-        // valid, aligned `T` at the direct-map address.
-        unsafe { (self.direct_map_addr() as *mut T).as_mut().unwrap() }
-    }
-
-    /// 以字节数组形式读取从该物理地址开始的 `size_of::<T>()` 字节。
-    pub fn get_bytes_ref<T>(&self) -> &'static [u8] {
-        // Safety: bytes have alignment 1; callers guarantee the physical range
-        // is valid for `size_of::<T>()` bytes.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.direct_map_addr() as *const u8,
-                core::mem::size_of::<T>(),
-            )
-        }
-    }
-    /// 以字节数组形式写入从该物理地址开始的 `size_of::<T>()` 字节。
-    ///
-    /// # Safety
-    ///
-    /// 调用方必须独占对应物理字节范围。
-    pub fn get_bytes_mut<T>(&self) -> &'static mut [u8] {
-        // Safety: bytes have alignment 1; callers guarantee exclusive access to
-        // a valid physical range for `size_of::<T>()` bytes.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.direct_map_addr() as *mut u8,
-                core::mem::size_of::<T>(),
-            )
-        }
-    }
 }
 
 impl PhysPageNum {
@@ -291,55 +242,79 @@ impl PhysPageNum {
     pub fn offset(&self, offset: usize) -> PhysAddr {
         PhysAddr::from((self.0 << PAGE_SIZE_BITS) + offset)
     }
-    /// 将整页解释为页表项数组。
+    /// 将整页解释为只读页表项数组。
     ///
     /// # Safety
     ///
-    /// 调用方必须保证该物理页确实保存 `T` 类型页表项，且当前路径独占该页表页。
-    pub fn get_pte_array<T>(&self) -> &'static mut [T] {
+    /// 调用方必须保证该物理页确实保存 `T` 类型页表项，并在返回引用存活
+    /// 期间保持页表页有效。普通 MM 代码应经过架构页表对象访问。
+    pub(crate) unsafe fn get_pte_array<T>(&self) -> &'static [T] {
         let pa: PhysAddr = self.clone().into();
         let entry_size = core::mem::size_of::<T>();
         assert!(entry_size != 0, "page table entry must not be zero-sized");
-        // Safety: callers guarantee this physical page stores page-table entries
-        // of type `T`; the length is derived from page size and entry size.
+        // Safety: 由本函数的调用方保证页表页类型、有效期和同步约束。
+        unsafe {
+            core::slice::from_raw_parts(pa.direct_map_addr() as *const T, PAGE_SIZE / entry_size)
+        }
+    }
+
+    /// 将整页解释为可写页表项数组。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证物理页保存 T 类型页表项，并独占页表对象的修改权。
+    /// 该约束应由可变 PageTable 借用或外层地址空间锁提供，不能从共享借用
+    /// 制造可变 PTE。
+    pub(crate) unsafe fn get_pte_array_mut<T>(&self) -> &'static mut [T] {
+        let pa: PhysAddr = self.clone().into();
+        let entry_size = core::mem::size_of::<T>();
+        assert!(entry_size != 0, "page table entry must not be zero-sized");
+        // Safety: 由本函数的调用方额外保证对整个页表页的独占修改权。
         unsafe {
             core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut T, PAGE_SIZE / entry_size)
         }
     }
 
-    /// 获取整个物理页的可变字节视图。
+    /// 在当前调用作用域内读取整个物理页。
+    ///
+    /// 闭包的高阶生命周期使页切片不能作为返回值逃逸；它只约束引用寿命，
+    /// 不提供任何并发同步，因此接口仍然是 `unsafe`。
     ///
     /// # Safety
     ///
-    /// 调用方必须独占该物理页。
-    pub fn get_bytes_array(&self) -> &'static mut [u8] {
-        let pa: PhysAddr = self.clone().into();
-        // Safety: callers guarantee exclusive access to this whole physical
-        // page through the direct map.
-        unsafe { core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE) }
+    /// 调用方必须保证物理页在闭包执行期间有效，并保证没有并发写者。
+    pub(crate) unsafe fn with_bytes<R, F>(&self, f: F) -> R
+    where
+        F: for<'page> FnOnce(&'page [u8]) -> R,
+    {
+        let pa: PhysAddr = (*self).into();
+        // Safety: 调用方保证页有效且没有并发写者；切片只交给本次闭包调用。
+        let bytes = unsafe {
+            core::slice::from_raw_parts(pa.direct_map_addr() as *const u8, PAGE_SIZE)
+        };
+        f(bytes)
     }
 
-    /// 将整页解释为 `u64` 数组。
+    /// 在当前调用作用域内修改整个物理页。
+    ///
+    /// 闭包的高阶生命周期阻止可变切片逃逸，避免旧接口从安全函数制造
+    /// `&'static mut [u8]`。独占性仍必须由页帧所有权或外层锁证明。
     ///
     /// # Safety
     ///
-    /// 调用方必须保证该页按 `u64` 对齐并独占访问。
-    pub fn get_dwords_array(&self) -> &'static mut [u64] {
-        let pa: PhysAddr = self.clone().into();
-        // Safety: callers guarantee the page is valid, u64-aligned, and
-        // exclusively accessed for the returned lifetime.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                pa.direct_map_addr() as *mut u64,
-                PAGE_SIZE / core::mem::size_of::<u64>(),
-            )
-        }
+    /// 调用方必须保证物理页在闭包执行期间有效，并独占该页的 Rust 访问。
+    pub(crate) unsafe fn with_bytes_mut<R, F>(&self, f: F) -> R
+    where
+        F: for<'page> FnOnce(&'page mut [u8]) -> R,
+    {
+        let pa: PhysAddr = (*self).into();
+        // Safety: 调用方保证页有效且独占；可变切片只交给本次闭包调用。
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(pa.direct_map_addr() as *mut u8, PAGE_SIZE)
+        };
+        f(bytes)
     }
-    /// 获取指定类型的可变引用
-    pub fn get_mut<T>(&self) -> &'static mut T {
-        let pa: PhysAddr = self.clone().into();
-        pa.get_mut()
-    }
+
 }
 
 /// 范围迭代器

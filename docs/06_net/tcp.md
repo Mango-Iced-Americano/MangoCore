@@ -3,7 +3,7 @@ title: "TCP 协议实现"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: 2026-08-04
+last_updated: 2026-08-05
 tags: [net, tcp, smoltcp, state-machine]
 ---
 
@@ -15,7 +15,10 @@ TCP 子系统基于 smoltcp 协议栈实现，使用 6 状态 `Inner` 枚举管�
 
 设计对标 DragonOS `net/socket/inet/stream/` 架构，兼顾 Linux TCP 语义兼容性。
 
-TCP 的 N1 lifecycle state 只能向下进入目标 N2 DeviceStack；N2 中完成 smoltcp 操作和 route/binding 重验后才更新 pollee 或唤醒 EventWaitQueue/epoll。接收数据先进入内核所有 buffer，释放 socket/DeviceStack 后再 copyout；等待条件只检查 readiness 并 kick poll worker，不在 WaitQueue 闭包内 poll。该协议未使同一 SocketSet 的多 socket 数据路径并行。
+SMP 下 N1 socket lifecycle 只能向下进入一个 N2 DeviceStack；栈内完成 route/binding
+重验和 smoltcp 操作，释放栈锁后才更新 pollee 或唤醒 EventWaitQueue/epoll。接收
+数据先进入内核 buffer，全部网络锁释放后再 copyout。WaitQueue 条件闭包只检查
+readiness，不能在闭包内同步 poll。
 
 ## 源文件地图
 
@@ -322,7 +325,8 @@ pub accept_waiters: EventWaitQueue,    // 等待新连接 (accept)
 
 ## 唤醒机制
 
-`wake_tcp_waiters()` 定义在 `net/socket/mod.rs:854`，每次 `NET_INTERFACE.poll()` 后调用：
+`wake_tcp_waiters()` 定义在 `net/socket/mod.rs`，由 CPU0 poll worker 在释放
+DeviceStack 后调用：
 
 ```rust
 pub fn wake_tcp_waiters() {

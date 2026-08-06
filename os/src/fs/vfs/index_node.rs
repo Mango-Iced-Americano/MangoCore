@@ -27,6 +27,15 @@ pub struct CreateAttrs {
     pub gid: u32,
 }
 
+/// `File` 获取读等待队列时采用的通知域。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadWaitSource {
+    /// 普通文件类型：等待队列由 inode 自身提供。
+    Inode,
+    /// signalfd：open file 可跨 fork 共享，但等待域必须取自当前 sighand。
+    CurrentSighand,
+}
+
 /// IndexNode trait — 所有 inode 实现必须满足的接口
 ///
 /// 方法分为几类：
@@ -480,6 +489,11 @@ pub trait IndexNode: Any + Send + Sync + Debug {
     /// inode 内部锁时操作此队列（防止锁顺序反转）。
     fn read_wait_queue(&self) -> Option<&spin::Mutex<crate::task::WaitQueue>> {
         None
+    }
+
+    /// 指定读等待队列的归属；默认保持传统 inode-owned 语义。
+    fn read_wait_source(&self) -> ReadWaitSource {
+        ReadWaitSource::Inode
     }
 
     /// 返回读端事件队列（可选）

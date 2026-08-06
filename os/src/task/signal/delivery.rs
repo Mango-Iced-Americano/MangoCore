@@ -189,30 +189,32 @@ fn send_thread_signal_info(
     }
     // rlimit 属于 PCB，先复制 soft limit 再进入线程 signal queue，避免锁嵌套。
     let sigpending_limit = task.process.sigpending_limit();
-    let mut inner = task.acquire_inner_lock();
-    if is_realtime_signal(signal) && inner.sigpending.queued_count() >= sigpending_limit {
-        return Err(EAGAIN);
-    }
-    if let Some(siginfo) = siginfo {
-        inner.sigpending.enqueue(PendingSignal {
-            signal,
-            siginfo,
-            timer_event: None,
-        })?;
-    } else {
-        inner.sigpending.enqueue_signal_with_sender(
-            signal,
-            SigInfo::SI_TKILL as usize,
-            current_sender_pid(),
-        )?;
-    }
-    if signal.contains(Signals::SIGCONT) {
-        drop(inner);
-        wake_task_if_interruptible(task.clone());
-        return Ok(());
-    }
-    if signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake) {
-        drop(inner);
+    let should_wake = {
+        let mut inner = task.acquire_inner_lock();
+        if is_realtime_signal(signal) && inner.sigpending.queued_count() >= sigpending_limit {
+            return Err(EAGAIN);
+        }
+        if let Some(siginfo) = siginfo {
+            inner.sigpending.enqueue(PendingSignal {
+                signal,
+                siginfo,
+                timer_event: None,
+            })?;
+        } else {
+            inner.sigpending.enqueue_signal_with_sender(
+                signal,
+                SigInfo::SI_TKILL as usize,
+                current_sender_pid(),
+            )?;
+        }
+        signal.contains(Signals::SIGCONT)
+            || signal.wakes_interruptible(inner.sigmask, inner.signal_wait_mask, wake)
+    };
+
+    // signalfd 会读取当前线程的 private pending；通知必须在 task.inner
+    // 释放后进行，避免 task.inner -> EventWaitQueue 的锁序扩张。
+    task.process.notify_signalfd();
+    if should_wake {
         wake_task_if_interruptible(task.clone());
     }
     Ok(())

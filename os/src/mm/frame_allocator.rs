@@ -14,7 +14,7 @@
 //! `*_uninit` 接口返回未清零的物理页，仅能用于立即完全覆盖整页内容的路径。
 
 use super::{PhysAddr, PhysPageNum};
-use crate::config::{FIRMWARE_RESERVED_REGIONS, MEMORY_REGIONS, PAGE_SIZE};
+use crate::config::PAGE_SIZE;
 use crate::hal::{local_irq_restore, local_irq_save};
 #[cfg(feature = "oom_handler")]
 use crate::task::current_task;
@@ -33,13 +33,13 @@ pub struct FrameTracker {
 impl FrameTracker {
     /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
-        let ptr = ppn.get_dwords_array().as_mut_ptr();
+        let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
         const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
         const UNROLL: usize = 8;
         let mut i = 0;
         while i + UNROLL <= WORDS_PER_PAGE {
-            // Safety: `ppn` 来自帧分配器的可用物理页，`get_dwords_array`
-            // 暴露的页大小正好是 `WORDS_PER_PAGE` 个 u64；循环边界保证写入不越界。
+            // Safety: `ppn` 刚从帧分配器取出，尚未发布给任何 owner；页首按
+            // PAGE_SIZE 对齐，`WORDS_PER_PAGE` 和循环边界保证写入不越界。
             unsafe {
                 ptr.add(i).write(0);
                 ptr.add(i + 1).write(0);
@@ -84,11 +84,54 @@ impl Drop for FrameTracker {
     }
 }
 
+/// 已从全局分配器元数据中摘除、尚未发布给调用者的单页所有权。
+///
+/// reservation 离开 allocator 锁后再完成整页清零，避免把内存带宽操作
+/// 放在全局写锁内。若未来在完成发布前增加失败路径，Drop 会把页归还。
+struct FrameReservation {
+    ppn: Option<PhysPageNum>,
+    needs_zero: bool,
+    started_ticks: usize,
+}
+
+impl FrameReservation {
+    /// 在 allocator 锁外完成初始化，并把页的回收责任转交给 FrameTracker。
+    fn into_tracker(mut self) -> FrameTracker {
+        // 先从 reservation 中取走 PPN，再构造 tracker。这样即使清零
+        // 或后续统计路径意外 panic，reservation 的 Drop 也不会与
+        // 已构造的 tracker 重复归还同一 PPN。
+        let ppn = self
+            .ppn
+            .take()
+            .expect("frame reservation was already consumed");
+        let tracker = if self.needs_zero {
+            FrameTracker::new(ppn)
+        } else {
+            // Safety: 只有 zero_init 启用时首次领取的 fresh 页会跳过清零；
+            // BSP 已在 frame allocator 发布前清零全部可分配 fresh region。
+            unsafe { FrameTracker::new_uninit(ppn) }
+        };
+        crate::task::perf::record_frame_alloc_time_us(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .saturating_sub(self.started_ticks),
+        );
+        tracker
+    }
+}
+
+impl Drop for FrameReservation {
+    fn drop(&mut self) {
+        if let Some(ppn) = self.ppn.take() {
+            frame_dealloc(ppn);
+        }
+    }
+}
+
 /// 帧分配器接口。
 trait FrameAllocator {
     fn new() -> Self;
-    /// 分配并返回一页已清零物理页。
-    fn alloc(&mut self) -> Option<FrameTracker>;
+    /// 锁内唯一领取一页；清零由返回的 reservation 在锁外完成。
+    fn reserve_one(&mut self) -> Option<FrameReservation>;
     /// 分配并返回一页未清零物理页。
     ///
     /// # Safety
@@ -241,81 +284,39 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
         fn ekernel();
     }
 
-    let kernel_start = skernel as usize;
-    let kernel_end = ekernel as usize;
-    let mut previous_end = 0usize;
-
-    let mut exclusions = Vec::with_capacity(FIRMWARE_RESERVED_REGIONS.len() + 1);
-    exclusions.extend_from_slice(FIRMWARE_RESERVED_REGIONS);
-    exclusions.push((kernel_start, kernel_end));
-    exclusions.sort_unstable_by_key(|range| range.0);
-
-    let mut previous_exclusion_end = 0usize;
-    for &(start, end) in &exclusions {
-        assert!(start < end, "empty physical memory exclusion");
-        assert_eq!(start % PAGE_SIZE, 0, "unaligned exclusion start");
-        assert_eq!(end % PAGE_SIZE, 0, "unaligned exclusion end");
-        assert!(
-            start >= previous_exclusion_end,
-            "physical memory exclusions overlap or are unsorted"
-        );
-        previous_exclusion_end = end;
-    }
-
-    for &(region_start, region_end) in MEMORY_REGIONS {
-        assert!(region_start < region_end, "empty physical memory region");
-        assert!(
-            region_start >= previous_end,
-            "physical memory regions overlap or are unsorted"
-        );
-        previous_end = region_end;
-
-        assert_eq!(region_start % PAGE_SIZE, 0, "unaligned DRAM region start");
-        assert_eq!(region_end % PAGE_SIZE, 0, "unaligned DRAM region end");
-
-        let mut cursor = region_start.max(PAGE_SIZE);
-        for &(excluded_start, excluded_end) in &exclusions {
-            if excluded_end <= cursor {
-                continue;
-            }
-            if excluded_start >= region_end {
-                break;
-            }
-            let free_end = excluded_start.min(region_end);
-            if cursor < free_end {
-                f(
-                    PhysAddr::from(cursor).floor(),
-                    PhysAddr::from(free_end).floor(),
-                );
-            }
-            cursor = cursor.max(excluded_end).min(region_end);
-            if cursor == region_end {
-                break;
-            }
-        }
-        if cursor < region_end {
-            f(
-                PhysAddr::from(cursor).floor(),
-                PhysAddr::from(region_end).floor(),
-            );
-        }
-    }
+    let kernel_image = [(skernel as usize, ekernel as usize)];
+    crate::hal::firmware::for_each_usable_ram_range(&kernel_image, |start, end| {
+        f(PhysAddr::from(start).floor(), PhysAddr::from(end).floor());
+    });
 }
 
 /// Return whether a physical byte address belongs to a declared DRAM bank.
 pub fn is_ram_phys_addr(addr: usize) -> bool {
-    MEMORY_REGIONS
+    crate::hal::firmware::memory_regions()
         .iter()
         .any(|&(start, end)| start <= addr && addr < end)
 }
 
-/// Return whether a physical address is DRAM that may back an allocated page.
+/// 判断地址所在整页是否属于固件可用 RAM。
+///
+/// 这里只验证物理拓扑，不查询当前分配状态。页的实时所有权由页表、VMA 与
+/// `FrameTracker` 保证；若在每次 uaccess 后验检查中读取 allocator 锁，会让用户复制
+/// 热路径和帧分配产生无谓竞争。也不能永久排除整个内核链接范围，因为其中的 payload
+/// 完整页会在复制后以 `ReclaimedRegion` 正式归还。
 pub fn is_allocatable_ram_phys_addr(addr: usize) -> bool {
-    addr >= PAGE_SIZE
-        && is_ram_phys_addr(addr)
-        && !FIRMWARE_RESERVED_REGIONS
+    let page_start = addr & !(PAGE_SIZE - 1);
+    let Some(page_end) = page_start.checked_add(PAGE_SIZE) else {
+        return false;
+    };
+    let overlaps_page = |start: usize, end: usize| page_start < end && start < page_end;
+
+    page_start >= PAGE_SIZE
+        && crate::hal::firmware::memory_regions()
             .iter()
-            .any(|&(start, end)| start <= addr && addr < end)
+            .any(|&(start, end)| start <= page_start && page_end <= end)
+        && !crate::hal::firmware::firmware_reserved_regions()
+            .iter()
+            .any(|&(start, end)| overlaps_page(start, end))
 }
 
 /// 栈式多 region 帧分配器。
@@ -336,7 +337,11 @@ impl StackFrameAllocator {
         self.reclaimed_regions.clear();
         self.recycled.clear();
         self.fresh_region = 0;
-        self.regions.reserve(MEMORY_REGIONS.len());
+        self.regions.reserve(
+            crate::hal::firmware::memory_regions().len()
+                + crate::hal::firmware::firmware_reserved_regions().len()
+                + 1,
+        );
 
         let mut total_frames = 0usize;
         for_each_usable_frame_region(|start, end| {
@@ -345,8 +350,6 @@ impl StackFrameAllocator {
                 .expect("physical frame count overflow");
             self.regions.push(FrameRegion::new(start.0, end.0));
         });
-        self.recycled.reserve(total_frames);
-
         boot_trace!(
             "[memory] {} usable physical frames across {} region(s)",
             total_frames,
@@ -582,13 +585,13 @@ impl StackFrameAllocator {
             .0
             .checked_mul(PAGE_SIZE)
             .ok_or("reclaimed frame end overflows")?;
-        if !MEMORY_REGIONS
+        if !crate::hal::firmware::memory_regions()
             .iter()
             .any(|&(region_start, region_end)| region_start <= start_addr && end_addr <= region_end)
         {
             return Err("reclaimed frame range is not inside one DRAM region");
         }
-        if FIRMWARE_RESERVED_REGIONS
+        if crate::hal::firmware::firmware_reserved_regions()
             .iter()
             .any(|&(reserved_start, reserved_end)| {
                 start_addr < reserved_end && reserved_start < end_addr
@@ -672,30 +675,36 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
 
-    /// 分配一个已清零物理页。
-    fn alloc(&mut self) -> Option<FrameTracker> {
-        let _start =
+    /// 从共享元数据中领取一个单页 reservation。
+    fn reserve_one(&mut self) -> Option<FrameReservation> {
+        let started_ticks =
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         crate::task::perf::record_frame_alloc();
-        // 优先使用回收的帧
         let result = if let Some(ppn) = self.take_recycled_ppn() {
-            Some(FrameTracker::new(ppn.into()))
+            // recycled 也包含显式释放的 linker payload 页，必须重新清零。
+            Some((PhysPageNum::from(ppn), true))
         } else if let Some(ppn) = self.take_fresh_ppn() {
-            #[cfg(not(feature = "zero_init"))]
-            let ft = FrameTracker::new(ppn.into());
-            #[cfg(feature = "zero_init")]
-            // Safety: `ppn` 是本分配器刚取出的 fresh 帧，`zero_init`
-            // 配置下调用方承诺后续路径负责初始化。
-            let ft = unsafe { FrameTracker::new_uninit(ppn.into()) };
-            Some(ft)
+            Some((PhysPageNum::from(ppn), !cfg!(feature = "zero_init")))
         } else {
             None
         };
-        crate::task::perf::record_frame_alloc_time_us(
-            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-                .saturating_sub(_start),
-        );
-        result
+        match result {
+            Some((ppn, needs_zero)) => Some(FrameReservation {
+                ppn: Some(ppn),
+                needs_zero,
+                started_ticks,
+            }),
+            None => {
+                // 保持既有统计口径：失败的领取尝试也计数并记录耗时。
+                crate::task::perf::record_frame_alloc_time_us(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .saturating_sub(started_ticks),
+                );
+                None
+            }
+        }
     }
 
     /// 分配一个未清零物理页。
@@ -903,9 +912,9 @@ pub fn frame_reserve(_num: usize) {}
 #[cfg(feature = "oom_handler")]
 /// 分配一页物理页，失败时先尝试 OOM 回收。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let result = FRAME_ALLOCATOR.write().alloc();
-    match result {
-        Some(frame_tracker) => Some(Arc::new(frame_tracker)),
+    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    match reservation {
+        Some(reservation) => Some(Arc::new(reservation.into_tracker())),
         None => {
             let before = unallocated_frames();
             if oom_handler(1).is_err() {
@@ -913,10 +922,8 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
                 return None;
             }
             crate::show_frame_consumption!("GC", before);
-            FRAME_ALLOCATOR
-                .write()
-                .alloc()
-                .map(|frame_tracker| Arc::new(frame_tracker))
+            let reservation = FRAME_ALLOCATOR.write().reserve_one();
+            reservation.map(|reservation| Arc::new(reservation.into_tracker()))
         }
     }
 }
@@ -981,10 +988,8 @@ pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>
 #[cfg(not(feature = "oom_handler"))]
 /// 分配一页物理页。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    FRAME_ALLOCATOR
-        .write()
-        .alloc()
-        .map(|frame_tracker| Arc::new(frame_tracker))
+    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    reservation.map(|reservation| Arc::new(reservation.into_tracker()))
 }
 
 #[cfg(feature = "oom_handler")]

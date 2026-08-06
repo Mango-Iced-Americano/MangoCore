@@ -2,7 +2,6 @@
 //!
 //! 使用 SBI timer 设置下一次时钟中断，`get_time()` 读取硬件 time 寄存器。
 
-use super::config::CLOCK_FREQ;
 use crate::hal::arch::set_timer;
 use riscv::register::time;
 pub const TICKS_PER_SEC: usize = 25;
@@ -14,7 +13,7 @@ pub fn get_time() -> usize {
 
 /// Set next trigger.
 pub fn set_next_trigger() {
-    set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
+    set_timer(get_time() + get_clock_freq() / TICKS_PER_SEC);
 }
 
 /// Program a one-shot timer to fire after `delta_ticks` raw timer ticks.
@@ -36,5 +35,5 @@ pub fn quiesce_local_timer_interrupt() {
 }
 
 pub fn get_clock_freq() -> usize {
-    CLOCK_FREQ
+    crate::hal::firmware::timebase_frequency()
 }

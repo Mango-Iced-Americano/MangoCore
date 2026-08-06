@@ -344,11 +344,41 @@ Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 curr
 因此不能用于声称 generation race、stale translation、ack 前 frame 不复用或用户迁移
 已经完成；frame retirement 由 B23 后续用例覆盖。
 
-B53 的 `remote_user_load_observes_cow_after_range_shootdown` 才是 stale PPN 的直接证据：
-CPU1 用户探针先持续 load 旧页，CPU0 通过生产 CoW 修改 PTE，随后用户 load 必须读到新
-frame canary。用例会静默 CPU1 timer，并把 restore helper 排在 probe 后；helper 若在结果
-前运行、full-user request 增长或 handler 未推进 observed，均判失败。该用例只证明 CoW
-PPN 替换，不应外推到尚未覆盖的 `mprotect/munmap` 权限/有效位压力。
+B84 的 `remote_user_pte_updates_take_effect` 是 stale PPN 与 stale permission 的直接证据：
+CPU1 用户探针先持续 load 旧页，CPU0 依次通过生产 CoW 和正式
+`munmap + MAP_FIXED_NOREPLACE` 修改同一 VPN；用户 load 必须读到两个新 frame canary。
+随后探针先在旧 RW 权限下完成真实 store，CPU0 执行 `mprotect(RW -> R)` 并收齐远端 ack
+后才放行第二次 store；后者必须触发 SIGSEGV，且只读 frame 内容不变。timer 静默、
+full-user request 不增长和 handler observed 共同排除其它 trap 全刷造成的假通过。
+
+`concurrent_pte_updates_keep_shootdowns_separate` 不再直接伪造 range payload。每个在线 CPU
+激活同一个 MM，在各自的常驻匿名共享页上交替执行 8 轮生产 `mprotect`。所有 writer 在
+最后一轮提交完成前保持 active，且 barrier 等待时开放本地中断，因此每代锁外
+`TlbFlush` 都能和其它发起者交叉处理 IPI/ack。用例最终要求 active mask 为零、所有 CPU
+追上最后 generation、full-user request 不变；其后的用例继续通过才能排除残留状态污染。
+
+B86 没有为借用收口增加人工 hook：编译器负责拒绝从共享 `PageTable` 借用修改 PTE；运行期
+语义继续由 B84 的真实权限降级、B85 的并发生产 writer，以及完整 34 项 SMP focused 门禁
+覆盖。验证时必须保证 tracked diff 指纹冻结，避免把验证期间的注释或格式变化误算进结果。
+
+B87 同样不增加测试专用路径。双架构 normal build 负责证明所有旧直映 helper 调用已经清除；
+双架构 8 核完整 SMP ktest 负责覆盖任务创建、exec/clone、signal、用户 trap 往返和跨 CPU
+调度时的真实 trap context 读写。四项必须在同一冻结指纹上串行执行。
+
+B88 保留原有 8×u64 帧清零循环，仅把 raw pointer 建立收回 `FrameTracker::new()`；因此不为
+它增加人工清零测试。双架构完整 SMP ktest 会反复经过页表页、用户页、任务和内核栈的
+分配/回收，门禁同时要求 34/34、无 fatal marker 和测试前后源码指纹一致。
+
+B89 不增加 allocator 调试开关或临时计数；它改变的是锁临界区和 PPN 中间
+owner。验收固定为双架构 normal build，以及 RV64/LA64 `CORE_NUM=8`
+完整 SMP 34 项。除 TAP 通过外，必须检查 double free/重复回收/panic/timeout
+标记和冻结 diff 指纹；第 24 项的 RV64 StorePageFault/LA64 PageModifyFault 是
+`mprotect` 降权门禁的预期用户异常，不能误报为 allocator panic。
+
+B90 只删除全仓无读者的旧 `TIME_SOURCE` 注册表和它的 `MTime` 旁路，
+生产计时在修改前后均调用 HAL。该类不可达代码收口使用 T1：先全仓确认符号
+无调用，再串行完成双架构 normal build 和冻结 diff 检查。不因“时间”两字
+机械重跑刚在 B89 通过的双架构 8 核长测。
 
 ### TAP 输出格式
 
@@ -375,7 +405,7 @@ not ok 5 sched::ready_queue_has_init
 
 TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
 
-### 当前测试清单 (15 个)
+### 当前测试清单 (19 个)
 
 | 测试 | 文件 | 说明 |
 |------|------|------|
@@ -389,15 +419,17 @@ TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elap
 | `timer::time_spec_ops` | `timer.rs` | TimeSpec 构造精度、进位加法、减法钳位、跨单位等价、偏序、is_zero |
 | `timer::now_monotonic` | `timer.rs` | 两次 `now()` 验证单调不倒退 |
 | `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
+| `waitqueue::early_wake_cancels_block` | `waitqueue.rs` | waiter 已登记但尚未 Blocking 时，通知 token 可撤销阻塞 |
+| `waitqueue::condition_can_notify_same_queue` | `waitqueue.rs` | 登记后条件检查可可靠通知同一队列，无自锁或丢 wake |
 | `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
 | `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
+| `waitqueue::wake_one` | `waitqueue.rs` | 真实调度下阻塞 waiter 被另一个内核任务唤醒 |
 | `ext4::memblk_read_write` | `ext4.rs` | `TestMemBlock` BlockDevice 读写正确性 |
 | `ext4::memblk_isolation` | `ext4.rs` | 两个独立 `TestMemBlock` 实例的数据不互泄露 |
 | `ext4::open_unformatted_returns_err` | `ext4.rs` | 未格式化设备上 `open_ext4rs` 返回错误（不 panic） |
 | `ext4::lw_path_isolation` | `ext4.rs` | lwext4 `lw_path()` 路径翻译的实例隔离语义 |
 
 **规划中**（需要内核线程 spawn API 或格式化块设备）：
-- `waitqueue::wake_once`, `wake_all` — 多任务唤醒
 - `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
 - `timer::sleep_returns` — 真正阻塞等待 deadline
 - `fs::tmpfs_create_write_read_unlink` — VFS 基础路径
@@ -484,7 +516,17 @@ make la64-regression   # la64 架构
 3. `/regression` 输出 TAP 格式结果（`ok N name` / `not ok N name`）、累加 pass/fail 计数，exit 0=全部通过 / 非零=有失败
 4. initproc 通过 `exit_code_from_waitpid_status()` 获取子进程退出码，打印 `[L4 REGRESSION PASSED]` 或 `[L4 REGRESSION FAILED]`，然后 `shutdown()`
 
-### 当前覆盖 (4 个用例)
+### 当前覆盖（7 个用例）
+
+| 用例 | 主要覆盖 |
+|------|----------|
+| `usercopy_pipe` | pipe 与用户内存复制边界 |
+| `mmap_edge_cases` | mmap 边界语义 |
+| `timer_realtime_jump` | realtime timer 与时钟跳变 |
+| `rename_long_name` | rename 长名称 |
+| `lwext4_truncate_hole` | ext4 稀疏文件截断 |
+| `signalfd` | 阻塞 read 唤醒、fork 继承 fd 后的 sighand 动态绑定 |
+| `clone_vm_second_slot` | CLONE_VM/vfork 的第二用户资源槽；破坏性探针固定最后执行 |
 
 ---
 

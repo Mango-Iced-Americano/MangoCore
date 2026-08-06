@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-06
 tags: [mm, address-space, vma, elf, maps, mmu-gather, membarrier]
 ---
 
@@ -47,6 +47,13 @@ pub struct AddressSpaceInner<T: PageTable> {
 PCB 以 `Arc<AddressSpace<T>>` 持有 VM；读操作经 `read()`，可能改 PTE 的操作经
 `write()/try_write()`。后者在内部释放 VM 锁后才等待 user-TLB ack，调用方无法取得
 可变 guard 并把锁带过远端等待点。
+
+新页的内容初始化遵循“先填充、后发布 PTE”：`Vma::alloc_one_zeroed_unmapped()`
+先让 VMA 拥有 frame 但不建立用户映射，构造路径在这个未发布窗口填充数据，
+再用 `map_existing_in_memory()` 安装 PTE。初始化或建映失败时，
+`remove_unmapped_frame()` 只回滚尚无 PTE 的 frame；一旦 PTE 已可见，必须走正式
+unmap + TLB retire 协议。这个顺序防止同一 MM 的其它 CPU 在 filemap/ELF 拷贝完成
+前观察到半成品页，也使未发布 frame 的独占写入条件可以明确证明。
 
 ### 1.1 方法地图
 

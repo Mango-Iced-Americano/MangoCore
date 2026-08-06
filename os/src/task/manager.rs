@@ -159,33 +159,6 @@ impl TaskManager {
             interruptible_queue: VecDeque::new(),
         }
     }
-    /// 从可中断队列中逐出一个僵尸任务（零堆分配）。
-    fn take_one_interruptible_zombie(&mut self) -> Option<Arc<TaskControlBlock>> {
-        for i in 0..self.interruptible_queue.len() {
-            if self.interruptible_queue[i].is_zombie() {
-                let zombie = self.interruptible_queue.remove(i);
-                if zombie.is_some() {
-                    sub_interruptible_count(1);
-                }
-                return zombie;
-            }
-        }
-        None
-    }
-    /// 从全局等待 registry 摘取一个属于指定 pid 的 zombie TCB。
-    /// 返回的 Arc 在 `TASK_MANAGER` 锁外收集和析构。
-    fn take_interruptible_zombie_by_pid(&mut self, pid: usize) -> Option<Arc<TaskControlBlock>> {
-        let index = self
-            .interruptible_queue
-            .iter()
-            .position(|task| task.is_zombie() && task.process.pid == pid)?;
-        let zombie = self.interruptible_queue.remove(index);
-        if zombie.is_some() {
-            sub_interruptible_count(1);
-        }
-        zombie
-    }
-
     /// 添加一个任务到可中断队列。
     pub fn begin_interruptible_sleep(&mut self, task: Arc<TaskControlBlock>) {
         // 固定锁序：TASK_MANAGER -> remote_affinity_request。请求槽与
@@ -270,14 +243,6 @@ impl TaskManager {
     /// 可中断队列中任务数量
     pub fn interruptible_count(&self) -> u16 {
         self.interruptible_queue.len() as u16
-    }
-    /// 可中断 registry 中尚未清理的僵尸任务数量。
-    pub fn interruptible_zombie_count(&self) -> u16 {
-        self.interruptible_queue
-            .iter()
-            .filter(|task| task.is_zombie())
-            .count()
-            .min(u16::MAX as usize) as u16
     }
     /// 尝试将任务从 interruptible registry 移动到目标 CPU 的 runqueue。
     ///
@@ -526,6 +491,9 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
             TaskStatus::Zombie => {
                 // 终态任务不会再次 yield，不能把一次性请求带入回收路径。
                 let _ = task.take_migration_target();
+                // processor 已在 idle 栈撤销 current 槽；到这里才能允许
+                // 非 leader exec 交换旧 leader 的 TID。
+                task.process.publish_exit_inactive(&task);
                 // 当前代码已运行在退出 CPU 的 idle 栈；把最后一个调度 owner
                 // 交给本 CPU 回收队列，不再跨核竞争全局 TaskManager。
                 super::processor::enqueue_zombie(cpu, task);
@@ -564,27 +532,10 @@ pub(crate) fn rekey_active_tid(old_tid: usize, new_tid: usize) {
     let _ = (old_tid, new_tid);
 }
 
-/// 从可中断队列中逐出一个僵尸任务（零堆分配），返回后在锁外 drop。
-pub fn take_one_interruptible_zombie() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().take_one_interruptible_zombie()
-}
-
-/// 从 interruptible registry 和全部 Per-CPU 回收队列移除指定 pid 的 zombie TCB，
-/// 在锁外 drop，避免 TCB::drop() 在持有任何容器锁时执行析构链。
+/// 从全部 Per-CPU 回收队列移除指定 pid 的 zombie TCB。
+/// 返回的 Arc 在所有容器锁外 drop，避免析构链反向进入任务子系统。
 pub fn remove_zombie_tasks_by_pid(pid: usize) {
-    let mut zombies = Vec::new();
-    // interruptible registry 与 CPU-local 回收队列是两类互斥的终态
-    // owner：zombie TCB 不会从前者搬到后者。因此可以分两阶段
-    // 扫描，无需为了一个不存在的搬运窗口同时持有两类锁。
-    loop {
-        let Some(zombie) = TASK_MANAGER.lock().take_interruptible_zombie_by_pid(pid) else {
-            break;
-        };
-        zombies.push(zombie);
-    }
-    // 不嵌套持有 TASK_MANAGER 与任一 CPU-local zombie 锁；收集到的 Arc
-    // 及 Vec 扩容都在所有容器锁释放后发生。
-    zombies.extend(super::processor::remove_zombie_tasks_by_pid(pid));
+    let zombies = super::processor::remove_zombie_tasks_by_pid(pid);
     drop(zombies);
 }
 
@@ -906,11 +857,9 @@ pub fn has_ready_task() -> bool {
     super::run_queue::total_count_fast() != 0
 }
 
-/// 返回 interruptible、runqueue 与 Per-CPU 回收队列中的 zombie 任务数量。
+/// 返回 runqueue 诊断残留与 Per-CPU 回收队列中的 zombie 任务数量。
 pub fn zombie_count() -> u16 {
-    let manager = TASK_MANAGER.lock();
-    let mut count = manager.interruptible_zombie_count();
-    drop(manager);
+    let mut count = 0u16;
     for cpu in 0..crate::smp::configured_cpu_count() {
         count = count.saturating_add(super::run_queue::stats(cpu).1 as u16);
     }
@@ -975,20 +924,75 @@ impl WaitResult {
     }
 }
 
+/// 一次等待登记。
+///
+/// `WaitEntry` 只记录“这一轮等待是否收到通知”，不表示任务的
+/// CPU/runqueue 归属。后者仍只由 `TaskStatus` 管理。把两者分开后，
+/// wake 即使早于 `Running -> Blocking` 到达，通知也会留在本条目中，
+/// 阻塞入口随后能撤销睡眠。
+pub struct WaitEntry {
+    task: Weak<TaskControlBlock>,
+    state: AtomicUsize,
+}
+
+impl WaitEntry {
+    const WAITING: usize = 0;
+    const NOTIFIED: usize = 1;
+    const CLOSED: usize = 2;
+
+    fn new(task: Weak<TaskControlBlock>) -> Self {
+        Self {
+            task,
+            state: AtomicUsize::new(Self::WAITING),
+        }
+    }
+
+    /// 领取本轮通知权；多队列等待时只有第一个唤醒源成功。
+    fn notify(&self) -> bool {
+        self.state
+            .compare_exchange(
+                Self::WAITING,
+                Self::NOTIFIED,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// 阻塞条件只在本轮通知尚未到达时成立。
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.state.load(AtomicOrdering::Acquire) == Self::WAITING
+    }
+
+    /// 清理多队列条目前先关闭 token，防止其它队列再次领取。
+    fn close(&self) {
+        let _ = self.state.compare_exchange(
+            Self::WAITING,
+            Self::CLOSED,
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Acquire,
+        );
+    }
+
+    fn matches_task(&self, task: &TaskControlBlock) -> bool {
+        Weak::as_ptr(&self.task) == task as *const TaskControlBlock
+    }
+}
+
 /// 弱引用等待队列。
 ///
 /// # Semantics
 ///
-/// 队列只保存 `Weak<TaskControlBlock>`，不会延长任务生命周期。等待者必须先在
-/// 关联对象的锁内检查条件，再调用 `prepare_to_wait()`，最后通过
-/// `block_current_and_run_next_*` 让出 CPU。
+/// 队列只强持有 `WaitEntry`，条目内对任务仍是弱引用，不会延长
+/// TCB 生命周期。等待者必须先在关联对象的锁内检查条件，
+/// 再注册条目，最后通过 checked block 入口复查 token 并让出 CPU。
 ///
 /// # Locking
 ///
 /// `wake_*` 会读取原子调度状态并操作 `TASK_MANAGER`，但不会获取
 /// `task.inner`。调用方不得在持有调度器锁时调用唤醒函数。
 pub struct WaitQueue {
-    inner: VecDeque<Weak<TaskControlBlock>>,
+    inner: VecDeque<Arc<WaitEntry>>,
 }
 
 #[allow(unused)]
@@ -1005,19 +1009,19 @@ impl WaitQueue {
     ///
     /// 调用方应已持有保护等待条件的锁，并在之后调用阻塞原语。
     pub fn add_task(&mut self, task: Weak<TaskControlBlock>) {
-        self.inner.push_back(task);
+        self.inner.push_back(Arc::new(WaitEntry::new(task)));
     }
 
     /// 弹出一个等待者但不唤醒。
     pub fn pop_task(&mut self) -> Option<Weak<TaskControlBlock>> {
-        self.inner.pop_front()
+        self.inner.pop_front().map(|entry| entry.task.clone())
     }
 
     /// 判断等待队列是否包含给定任务弱引用。
     pub fn contains(&self, task: &Weak<TaskControlBlock>) -> bool {
         self.inner
             .iter()
-            .any(|task_in_queue| Weak::as_ptr(task_in_queue) == Weak::as_ptr(task))
+            .any(|entry| Weak::as_ptr(&entry.task) == Weak::as_ptr(task))
     }
 
     /// 判断等待队列是否为空。
@@ -1027,7 +1031,7 @@ impl WaitQueue {
     /// 清理所有失效 `Weak` 条目，返回清理数量。
     pub fn compact_stale(&mut self) -> usize {
         let before = self.inner.len();
-        self.inner.retain(|task| task.strong_count() > 0);
+        self.inner.retain(|entry| entry.task.strong_count() > 0);
         before - self.inner.len()
     }
     /// 唤醒队列中的所有可唤醒任务。
@@ -1052,35 +1056,19 @@ impl WaitQueue {
         let mut tasks_to_wake = Vec::with_capacity(limit.min(self.inner.len()));
         let mut remaining = VecDeque::new();
         let mut wake_count = 0usize;
-        // 遍历全部条目以自动 compact 失效 Weak，但只唤醒 ≤limit 个任务。
-        while let Some(task) = self.inner.pop_front() {
-            match task.upgrade() {
-                Some(task) => match task.task_status() {
-                    super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked => {
-                        if wake_count < limit {
-                            task.wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            wake_count += 1;
-                            tasks_to_wake.push(task);
-                        } else {
-                            remaining.push_back(Arc::downgrade(&task));
-                        }
-                    }
-                    super::TaskStatus::Queued(_)
-                    | super::TaskStatus::Migrating
-                    | super::TaskStatus::Running(_) => {
-                        if wake_count < limit {
-                            wake_count += 1;
-                            task.wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                        } else {
-                            remaining.push_back(Arc::downgrade(&task));
-                        }
-                    }
-                    // New/Zombie 不应继续停留在等待队列中，直接丢弃。
-                    _ => {}
-                },
-                None => {}
+        // 遍历全部条目以同时回收 stale/closed entry。是否成功唤醒
+        // 只由 entry token 决定，不能再以瞬时 TaskStatus 判定：Running 任务
+        // 可能正处在“已注册条件队列、尚未登记 Blocking”的窗口。
+        while let Some(entry) = self.inner.pop_front() {
+            if wake_count >= limit {
+                if entry.task.strong_count() > 0 {
+                    remaining.push_back(entry);
+                }
+                continue;
+            }
+            if let Some(task) = Self::notify_entry(&entry) {
+                wake_count += 1;
+                tasks_to_wake.push(task);
             }
         }
         self.inner = remaining;
@@ -1091,26 +1079,10 @@ impl WaitQueue {
         // Single wake is a hot path for futex/event waiters.  It only removes
         // entries up to the first wakeable task; later stale entries are compacted
         // by future wake/finish_wait calls or the batch path.
-        while let Some(waiter) = self.inner.pop_front() {
-            let task = match waiter.upgrade() {
-                Some(task) => task,
-                None => continue,
-            };
-            match task.task_status() {
-                super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked => {
-                    task.wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    let _ = wake_interruptible(task);
-                    return 1;
-                }
-                super::TaskStatus::Queued(_)
-                | super::TaskStatus::Migrating
-                | super::TaskStatus::Running(_) => {
-                    task.wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return 1;
-                }
-                _ => {}
+        while let Some(entry) = self.inner.pop_front() {
+            if let Some(task) = Self::notify_entry(&entry) {
+                let _ = wake_interruptible(task);
+                return 1;
             }
         }
         0
@@ -1123,10 +1095,10 @@ impl WaitQueue {
     /// 调用方已持有等待队列所属对象的锁。真正的 `Running -> Blocking`
     /// 登记由随后执行的调度阻塞入口与全局 interruptible registry 一起提交；
     /// `Blocking -> Blocked` 只能在任务切回 idle 栈后完成。
-    pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) {
-        if let Some(task) = task.upgrade() {
-            self.add_task(Arc::downgrade(&task));
-        }
+    pub fn prepare_to_wait(&mut self, task: Weak<TaskControlBlock>) -> Arc<WaitEntry> {
+        let entry = Arc::new(WaitEntry::new(task));
+        self.inner.push_back(entry.clone());
+        entry
     }
 
     /// 从条件等待队列移除任务。调度状态已经由 wake 或重新切入路径处理，
@@ -1135,30 +1107,42 @@ impl WaitQueue {
     /// 返回值表示该任务是否仍在队列中。若返回 `false`，通常说明它已经被
     /// 正常唤醒路径移除。
     pub fn finish_wait(&mut self, task: &TaskControlBlock) -> bool {
-        let task_ptr = task as *const TaskControlBlock;
-        let removed = if self
-            .inner
-            .back()
-            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
-            .unwrap_or(false)
-        {
-            self.inner.pop_back();
-            true
-        } else if self
-            .inner
-            .front()
-            .map(|task_in_queue| Weak::as_ptr(task_in_queue) == task_ptr)
-            .unwrap_or(false)
-        {
-            self.inner.pop_front();
-            true
-        } else {
-            let old_len = self.inner.len();
-            self.inner
-                .retain(|task_in_queue| Weak::as_ptr(task_in_queue) != task_ptr);
-            self.inner.len() != old_len
-        };
-        removed
+        let old_len = self.inner.len();
+        self.inner.retain(|entry| {
+            if entry.matches_task(task) {
+                entry.close();
+                false
+            } else {
+                true
+            }
+        });
+        self.inner.len() != old_len
+    }
+
+    /// 结束精确的一轮等待，不会误删同一任务在其它语义上的条目。
+    pub(crate) fn finish_entry(&mut self, entry: &Arc<WaitEntry>) -> bool {
+        entry.close();
+        let old_len = self.inner.len();
+        self.inner.retain(|queued| !Arc::ptr_eq(queued, entry));
+        self.inner.len() != old_len
+    }
+
+    /// 将唤醒记入 token，再返回可供调度器尝试唤醒的 TCB。
+    fn notify_entry(entry: &WaitEntry) -> Option<Arc<TaskControlBlock>> {
+        let task = entry.task.upgrade()?;
+        // New 从未发布过等待，Zombie 也不可逆；它们只是待回收的
+        // stale entry。Running/Queued 则不能排除，因为早到 wake 正会观察到这两态。
+        if matches!(task.task_status(), TaskStatus::New | TaskStatus::Zombie) {
+            entry.close();
+            return None;
+        }
+        if !entry.notify() {
+            return None;
+        }
+        // 通知一旦发布，本轮 deadline/fallback timer 即不再是唯一唤醒源。
+        task.wait_timer_generation
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        Some(task)
     }
 
     /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
@@ -1188,24 +1172,26 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
 
-            let mut guard = wq.lock();
-            guard.prepare_to_wait(Arc::downgrade(&task));
+            // 等待队列锁只保护 entry 的登记和摘除，不能覆盖条件检查。
+            // `WaitEntry` 会持久化登记后的早到通知，因此这里释放锁不会
+            // 重新打开 lost-wakeup 窗口，反而允许条件检查同步推进生产者。
+            let entry = wq.lock().prepare_to_wait(Arc::downgrade(&task));
 
             if let Some(res) = cond() {
-                guard.finish_wait(task.as_ref());
+                wq.lock().finish_entry(&entry);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                guard.finish_wait(task.as_ref());
+                wq.lock().finish_entry(&entry);
                 return WaitResult::TimedOut;
             }
             // 普通“不可中断”等待仍忽略用户信号，但不能阻止线程组生命周期
             // 前进。返回 Interrupted 让上层先正常析构 syscall 栈上的 Arc。
             if task.process.thread_must_exit(task.gettid()) {
-                guard.finish_wait(task.as_ref());
+                wq.lock().finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             if signal_check {
@@ -1213,10 +1199,17 @@ impl WaitQueue {
                 // waited signal 即使被 sigmask 屏蔽也必须取消睡眠，随后由
                 // sigtimedwait 在 WaitQueue 外重新领取。
                 if has_waited_signal(&task) || has_actionable_signal(&task) {
-                    guard.finish_wait(task.as_ref());
+                    wq.lock().finish_entry(&entry);
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
+            }
+
+            // 通知若在第二次条件检查期间到达，直接重新检查业务条件，
+            // 不必登记 Blocking，也避免为已结束的一轮等待挂兜底 timer。
+            if !entry.is_waiting() {
+                wq.lock().finish_entry(&entry);
+                continue;
             }
 
             if let Some(deadline) = deadline {
@@ -1255,19 +1248,26 @@ impl WaitQueue {
             }
             drop(task);
 
-            block_current_and_run_next_with_lock_checked(guard, |task| {
+            block_current_and_run_next_checked(|task| {
                 // Running -> Blocking 登记后再检查 waited signal，关闭发送方在
                 // Running 状态看到 AlreadyWaken、而接收方随后真正睡下的窗口。
+                // WaitEntry 额外覆盖普通队列 wake 的同类窗口：早到通知
+                // 会使 is_waiting() 失败，从而撤销刚登记的 Blocking。
                 let no_signal =
                     !signal_check || (!has_waited_signal(task) && !has_actionable_signal(task));
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);
-                no_signal && not_timed_out
+                let process_alive = !task.process.thread_must_exit(task.gettid());
+                entry.is_waiting() && no_signal && not_timed_out && process_alive
             });
 
             let task = current_task().unwrap();
-            wq.lock().finish_wait(&task);
+            wq.lock().finish_entry(&entry);
+            if deadline.is_some() {
+                task.wait_timer_generation
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+            }
             task.wait_io_fallback_active_generation
                 .store(0, AtomicOrdering::Release);
         }
@@ -1302,26 +1302,26 @@ impl WaitQueue {
 
             let task = current_task().unwrap();
 
-            queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
+            let entry = queue_of(&mut guard).prepare_to_wait(Arc::downgrade(&task));
             if let Some(res) = cond(&mut guard) {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_entry(&entry);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_entry(&entry);
                 return WaitResult::TimedOut;
             }
             if task.process.thread_must_exit(task.gettid()) {
-                queue_of(&mut guard).finish_wait(task.as_ref());
+                queue_of(&mut guard).finish_entry(&entry);
                 return WaitResult::Interrupted;
             }
             if signal_check {
                 // 持有的是调用方传入的对象锁，不能同时长期持有 task.inner。
                 if has_actionable_signal(&task) {
-                    queue_of(&mut guard).finish_wait(task.as_ref());
+                    queue_of(&mut guard).finish_entry(&entry);
                     return WaitResult::Interrupted;
                 }
                 discard_non_actionable_unblocked_signals(&task);
@@ -1336,19 +1336,27 @@ impl WaitQueue {
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);
-                no_signal && not_timed_out
+                let process_alive = !task.process.thread_must_exit(task.gettid());
+                entry.is_waiting() && no_signal && not_timed_out && process_alive
             });
 
             let task = current_task().unwrap();
             let mut guard = lock.lock();
-            queue_of(&mut guard).finish_wait(&task);
+            queue_of(&mut guard).finish_entry(&entry);
             drop(guard);
+            if deadline.is_some() {
+                task.wait_timer_generation
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+            }
         }
     }
 
-    fn finish_wait_on_queues(queues: &[&Mutex<Self>], task: &TaskControlBlock) {
+    fn finish_wait_on_queues(queues: &[&Mutex<Self>], entry: &Arc<WaitEntry>) {
+        // 先关闭共享 token，再逐队列删除；中间窗口内其它队列的
+        // wake 只会观察到 Closed，不会把同一轮等待领取第二次。
+        entry.close();
         for queue in queues {
-            queue.lock().finish_wait(task);
+            queue.lock().finish_entry(entry);
         }
     }
 
@@ -1367,35 +1375,15 @@ impl WaitQueue {
         }
 
         if queues.is_empty() {
+            // poll/epoll 没有任何 fd 时只需响应 signal 或用户 deadline。
+            // 这条路径没有外部条件生产者，不应伪造 10 ms 周期唤醒。
             let wait_queue = Mutex::new(WaitQueue::new());
-            loop {
-                let next_deadline = match deadline {
-                    Some(deadline) if TimeSpec::now() >= deadline => return WaitResult::TimedOut,
-                    Some(deadline) => {
-                        let fallback =
-                            TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS);
-                        if fallback < deadline {
-                            fallback
-                        } else {
-                            deadline
-                        }
-                    }
-                    None => TimeSpec::now() + TimeSpec::from_ms(Self::WAIT_IO_FALLBACK_MS),
-                };
-                match Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, next_deadline)
-                {
-                    WaitResult::Ready(value) => return WaitResult::Ready(value),
-                    WaitResult::Interrupted => return WaitResult::Interrupted,
-                    WaitResult::TimedOut => {
-                        if deadline
-                            .map(|deadline| TimeSpec::now() >= deadline)
-                            .unwrap_or(false)
-                        {
-                            return WaitResult::TimedOut;
-                        }
-                    }
+            return match deadline {
+                Some(deadline) => {
+                    Self::wait_event_interruptible_timeout(&wait_queue, &mut cond, deadline)
                 }
-            }
+                None => Self::wait_event_interruptible(&wait_queue, &mut cond),
+            };
         }
 
         loop {
@@ -1407,27 +1395,30 @@ impl WaitQueue {
             }
 
             let task = current_task().unwrap();
+            // poll/epoll 可同时登记多个源，所有队列共享同一个
+            // token；任一源的第一次通知都足以取消本轮睡眠。
+            let entry = Arc::new(WaitEntry::new(Arc::downgrade(&task)));
             for queue in queues {
-                queue.lock().prepare_to_wait(Arc::downgrade(&task));
+                queue.lock().inner.push_back(entry.clone());
             }
 
             if let Some(res) = cond() {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &entry);
                 return WaitResult::Ready(res);
             }
             if deadline
                 .map(|deadline| TimeSpec::now() >= deadline)
                 .unwrap_or(false)
             {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &entry);
                 return WaitResult::TimedOut;
             }
             if task.process.thread_must_exit(task.gettid()) {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &entry);
                 return WaitResult::Interrupted;
             }
             if has_actionable_signal(&task) {
-                Self::finish_wait_on_queues(queues, task.as_ref());
+                Self::finish_wait_on_queues(queues, &entry);
                 return WaitResult::Interrupted;
             }
             discard_non_actionable_unblocked_signals(&task);
@@ -1442,11 +1433,17 @@ impl WaitQueue {
                 let not_timed_out = deadline
                     .map(|deadline| TimeSpec::now() < deadline)
                     .unwrap_or(true);
-                no_signal && not_timed_out && cond().is_none()
+                entry.is_waiting() && no_signal && not_timed_out && cond().is_none()
             });
 
             let task = current_task().unwrap();
-            Self::finish_wait_on_queues(queues, &task);
+            Self::finish_wait_on_queues(queues, &entry);
+            // deadline timer 可能在某个队列早到通知之后才被注册。
+            // 清理时统一推进 generation，防止它之后唤醒新一轮无超时等待。
+            if deadline.is_some() {
+                task.wait_timer_generation
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+            }
         }
     }
 
@@ -1454,13 +1451,13 @@ impl WaitQueue {
     ///
     /// 等价于 DragonOS 的 `wait_until`（Uninterruptible）。
     /// 适用于内核内部确定性等待（无需信号检查的场景）。
-    /// 文件和网络 IO 通用——`NET_INTERFACE.poll()` 等操作由调用者在 `cond` 闭包中处理。
+    /// 文件和网络 IO 通用；网络条件闭包只查询 readiness，不能直接 poll。
     ///
     /// # Locking
     ///
-    /// `cond` 会先在无锁快速路径执行一次，并在 `prepare_to_wait` 后持有该
-    /// 等待队列锁再检查一次以闭合 lost-wakeup 窗口。因此条件闭包只能查询或
-    /// 消费底层状态，禁止通知或再次获取同一个等待队列锁。
+    /// `cond` 会先在无锁快速路径执行一次，并在 `prepare_to_wait` 后再次执行。
+    /// 第二次检查也不持有等待队列锁；登记后的早到通知由 `WaitEntry` token
+    /// 持久化，并由 checked block 在提交 Blocking 后作最终复查。
     pub fn wait_until<F>(wq: &Mutex<Self>, mut cond: F) -> isize
     where
         F: FnMut() -> Option<isize>,
@@ -1518,53 +1515,6 @@ impl WaitQueue {
         F: FnMut() -> Option<isize>,
     {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
-    }
-
-    /// 与 `wait_event_interruptible` 相同，但允许静态控制块把队列延迟到首次
-    /// 等待才分配。首次 producer 的 generation 会被条件闭包保留，故队列尚未
-    /// 创建时不需要也不能伪造 wake。
-    pub fn wait_event_interruptible_lazy<F>(
-        wq: &Mutex<Option<Self>>,
-        mut cond: F,
-    ) -> WaitResult
-    where
-        F: FnMut() -> Option<isize>,
-    {
-        if let Some(res) = cond() {
-            return WaitResult::Ready(res);
-        }
-
-        loop {
-            let task = current_task().unwrap();
-            let mut guard = wq.lock();
-            guard
-                .get_or_insert_with(Self::new)
-                .prepare_to_wait(Arc::downgrade(&task));
-
-            if let Some(res) = cond() {
-                guard.as_mut().unwrap().finish_wait(task.as_ref());
-                return WaitResult::Ready(res);
-            }
-            if task.process.thread_must_exit(task.gettid()) {
-                guard.as_mut().unwrap().finish_wait(task.as_ref());
-                return WaitResult::Interrupted;
-            }
-            if has_waited_signal(&task) || has_actionable_signal(&task) {
-                guard.as_mut().unwrap().finish_wait(task.as_ref());
-                return WaitResult::Interrupted;
-            }
-            discard_non_actionable_unblocked_signals(&task);
-            drop(task);
-
-            block_current_and_run_next_with_lock_checked(guard, |task| {
-                !has_waited_signal(task) && !has_actionable_signal(task) && cond().is_none()
-            });
-
-            let task = current_task().unwrap();
-            if let Some(queue) = wq.lock().as_mut() {
-                queue.finish_wait(&task);
-            }
-        }
     }
 
     /// 不可中断等待直到条件满足或绝对 deadline 到达。
@@ -2345,13 +2295,13 @@ pub fn run_deferred_timer_work() -> bool {
         }
     }
 
-    // 每个 CPU 独立推进自己的调度 tick；CPU0 只发布网络 generation，真正 poll
-    // 由固定 CPU0 的 worker 在任务上下文完成。
+    // 每个 CPU 独立推进自己的调度 tick；CPU0 只发布网络 generation，真实 poll
+    // 由固定在 CPU0 的 worker 在任务上下文执行。
     let need_resched = crate::smp::advance_local_sched_tick(now_ns, SCHED_TICK_NS);
     if need_resched && is_boot_cpu {
         crate::net::config::NET_INTERFACE.try_poll_irq();
-        // 此处是 deferred timer 的 task/idle 安全点：IRQ 已经只做原子发布，
-        // 现在才允许取得 WaitQueue 并唤醒 worker。不能把此转换移回 hard IRQ。
+        // hard IRQ 只设置 deferred_wake；到这个 task/idle 安全点才允许获取
+        // WaitQueue 并唤醒 worker。
         crate::net::config::NET_INTERFACE.run_deferred_net_wake();
     }
 
@@ -2379,13 +2329,17 @@ pub fn run_task_safe_point() {
             task.process.thread_must_exit(task.gettid()),
         )
     });
-    if let Some((Some(exit_code), _)) = stop {
+    let exit_code = match stop {
+        Some((Some(exit_code), _)) => Some(exit_code),
+        Some((None, true)) => Some(Signals::SIGKILL.to_signum().unwrap() as u32),
+        _ => None,
+    };
+    if let Some(exit_code) = exit_code {
         // exit 入口统一负责建立可响应 IPI 的清理窗口；安全点不再复制一套
-        // “入口 IRQ 是否开启”的分支。
+        // “入口 IRQ 是否开启”的分支。noreturn 调度不会展开当前内核栈，
+        // 因此必须先释放安全点刚克隆的 current Arc。
+        drop(task);
         super::exit_current_and_run_next(exit_code);
-    }
-    if matches!(stop, Some((None, true))) {
-        super::exit_current_and_run_next(Signals::SIGKILL.to_signum().unwrap() as u32);
     }
     if let Some(task) = task.as_ref() {
         if let Some(signal) = task.process.take_cpu_limit_signal() {

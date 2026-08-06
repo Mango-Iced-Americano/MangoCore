@@ -75,6 +75,7 @@ fn print_task_info() {
 
 fn print_cpu_states() {
     println!("--- PER-CPU (best effort; active_mm=0 means none unless busy=1) ---");
+    println!("IPI reason order: {:?}", crate::smp::IPI_REASON_NAMES);
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         let state = crate::smp::cpu_diagnostics(cpu_id);
         println!(
@@ -99,6 +100,14 @@ fn print_cpu_states() {
             state.task.active_mm_lock_busy
         );
         println!(
+            "cpu{} sched: switches={} migrations={} steals={} rq_peak={}",
+            state.cpu_id,
+            state.task.context_switches,
+            state.task.migrations,
+            state.task.steals,
+            state.task.run_queue_peak
+        );
+        println!(
             "cpu{} work: ipi={:#x} resched={}/{} timer={}/{}/{} ktlb={}/{} utlb={}/{} barrier={}/{}",
             state.cpu_id,
             state.pending_ipi,
@@ -113,6 +122,32 @@ fn print_cpu_states() {
             state.user_tlb_ack,
             state.memory_barrier_request,
             state.memory_barrier_ack
+        );
+        println!(
+            "cpu{} ipi: interrupts={} send_failures={} published={:?} consumed={:?}",
+            state.cpu_id,
+            state.ipi_interrupts,
+            state.ipi_send_failures,
+            state.ipi_reasons_published,
+            state.ipi_reasons_consumed
+        );
+        println!(
+            "cpu{} tlb kinds: kernel_full={} user_full={} range_fw={} range_ipi={} range_fallback={}",
+            state.cpu_id,
+            state.tlb_kernel_full,
+            state.tlb_user_full,
+            state.tlb_user_range_firmware,
+            state.tlb_user_range_ipi,
+            state.tlb_user_range_fallback
+        );
+        println!(
+            "cpu{} tlb cost: range_pages={} remote_targets={} sync_ticks={}/{} failures={}",
+            state.cpu_id,
+            state.tlb_user_range_pages,
+            state.tlb_remote_targets,
+            state.tlb_sync_ticks_total,
+            state.tlb_sync_ticks_max,
+            state.tlb_sync_failures
         );
     }
 }

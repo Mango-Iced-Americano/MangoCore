@@ -1636,6 +1636,10 @@ impl IndexNode for MountFSInode {
         self.inner_inode.read_wait_queue()
     }
 
+    fn read_wait_source(&self) -> super::ReadWaitSource {
+        self.inner_inode.read_wait_source()
+    }
+
     fn read_event_queue(&self) -> Option<&super::event::EventWaitQueue> {
         self.inner_inode.read_event_queue()
     }

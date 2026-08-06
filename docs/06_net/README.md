@@ -4,7 +4,7 @@ module: "net"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-06
 code_paths:
   - "os/src/net/"
 entry_points:
@@ -38,7 +38,10 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 
 该子系统通过标准系统调用接口（socket、bind、connect、sendto、recvfrom 等）为用户进程提供服务，并与 epoll、signalfd 以及 /proc/net 集成，支持事件驱动 I/O 和网络状态监控。
 
-当前 SMP 边界为 per-netns `PortRegistry`、短持 route directory、单 `DeviceStack` 与 generation poll worker。其余 socket/epoll wake 和用户 copy 发生在相应业务锁释放后；同一 smoltcp stack 的 per-socket 并行、eventpoll/fd-table 深路径及 netlink/RAW edge cases 不在本阶段承诺内。
+当前 SMP 边界包括 per-netns `PortRegistry`、短持 `NetDirectory`、per-device
+`DeviceStackCell` 与 CPU0 poll worker。端口目录、route 目录和设备栈不嵌套；
+socket/epoll 通知与用户 copy 都在相应业务锁释放后执行。同一 smoltcp SocketSet
+的数据面仍串行，v1 不宣称多队列或 per-socket 并行。
 
 ## 架构
 
@@ -157,7 +160,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | `os/src/net/iface.rs` | 接口管理，地址配置 | [net-core-iface.md](net-core-iface.md) |
 | `os/src/net/ioctl.rs` | SIOCGIF* ioctl 处理函数 | [net-core-iface.md](net-core-iface.md) |
 | `os/src/net/macros.rs` | impl_file_for_socket! 及其他辅助宏 | — |
-| `os/src/net/net_core.rs` | 网络核心初始化，DHCP 探测 | [net-core-iface.md](net-core-iface.md), [dhcp.md](dhcp.md) |
+| `os/src/net/net_core.rs` | 网络核心初始化，DHCP 租约状态同步 | [net-core-iface.md](net-core-iface.md), [dhcp.md](dhcp.md) |
 | `os/src/net/posix.rs` | POSIX 类型转换与常量定义 | — |
 
 ### 系统调用层
@@ -201,7 +204,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | Unix 数据报套接字 | 已完成 | SOCK_DGRAM |
 | Netlink 套接字 | 部分完成 | NETLINK_ROUTE：GETLINK、GETADDR、GETROUTE |
 | Packet 套接字（AF_PACKET） | 已完成 | SOCK_RAW + SOCK_DGRAM 模式 |
-| DHCP | 已完成 | 启动时同步探测，基于 smoltcp |
+| DHCP | 已完成 | 常驻 smoltcp 状态机，由 CPU0 poll worker 推进 |
 | 多接口 | 已完成 | 每设备独立 smoltcp 协议栈，路由器设备 |
 | /proc/net | 已完成 | /proc/net/tcp、/proc/net/udp、/proc/net/unix 等 |
 | 套接字 epoll 支持 | 已完成 | 通过 Socket::epoll_type() 集成事件 |
@@ -220,7 +223,7 @@ MangoCore 网络子系统基于 smoltcp 实现了兼容 POSIX 的网络协议栈
 | [device-stack-and-poll.md](device-stack-and-poll.md) | NetInterface、DeviceStack、polling、socket handle 管理 |
 | [device-adapter.md](device-adapter.md) | IfaceDevice、SmoltcpDeviceAdapter、NullNetDevice |
 | [net-core-iface.md](net-core-iface.md) | Iface trait、IfaceCommon、设备注册中心、ioctl |
-| [routing.md](routing.md) | RouteSocketHandle、SocketBinding、FIB、route_output |
+| [routing.md](routing.md) | RouteSocketHandle、route 目录、本地 binding、FIB、route_output |
 | [neighbour.md](neighbour.md) | NEIGHBOUR_TABLE、ARP 捕获 |
 | [dhcp.md](dhcp.md) | DHCP 初始化流程 |
 | [tcp.md](tcp.md) | TCP 状态机，connect/accept/数据流，epoll 事件 |

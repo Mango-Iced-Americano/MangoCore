@@ -237,7 +237,6 @@ trait Device {
 | virtio-net 收发 (Eth) | VirtIONetWrapper 的 receive/transmit | iperf, netperf, socket01 | stable |
 | veth 对收发 | VethDriver/Veth 的内存队列 | ip link add veth 系统测试 | stable |
 | NullNetDevice 空设备 | 无网卡时的启动路径 | 手动验证 | stable |
-| RoutingDevice | 多设备软件路由（已弃用） | 历史测试，逐步移除 | deprecated |
 
 ## 已知问题
 
@@ -250,8 +249,5 @@ trait Device {
 3. **`NullNetDevice` 的 MAC 地址硬编码**
    `02:00:00:00:00:01` 是为满足 smoltcp DHCP 客户端而硬编码的。若未来同时存在多个 null 设备场景（不可能，因为 `NullNetDevice` 仅用做全局 fallback），则需要动态生成 MAC。
 
-4. **`RoutingDevice` 残留代码**
-   `ROUTING_BUF` 静态缓冲区（65536 字节）和 `RoutingDevice` / `RoutingRxToken` / `RoutingTxToken` 结构保留在 `adapter.rs` 中，但它们在新架构中不再活跃。应在代码清理阶段移除。
-
-5. **GAT object-safety 限制**
+4. **GAT object-safety 限制**
    因 smoltcp `Device` trait 包含 GAT（`type RxToken<'a>`），无法使用 `Box<dyn Device>` 实现动态分发，必须使用枚举。这意味着新增设备类型必须修改 `IfaceDevice`、`IfaceRxToken`、`IfaceTxToken` 三处枚举定义及所有 `match` 分支。

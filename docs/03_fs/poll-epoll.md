@@ -4,7 +4,7 @@ module: "fs/poll+epoll"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-06-29"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/fs/poll.rs"
   - "os/src/fs/eventpoll.rs"
@@ -53,7 +53,7 @@ MangoCore 提供两套 I/O 事件通知机制：传统的 poll/select（同步�
 
 一次完整的 poll 扫描分为三个阶段：
 
-1. **预扫描（collect_wait=true）**：调用 `scan_ppoll()` 或 `scan_pselect()`，对每个 fd 执行 `file.poll_events()` 获取就绪事件。如果 fd 未就绪且 `collect_wait=true`，收集其 `PollWaitQueue` 用于后续阻塞等待。
+1. **预扫描（collect_wait=true）**：调用 `scan_ppoll()` 或 `scan_pselect()`，对每个 fd 执行 `file.poll_events()` 获取就绪事件。如果 fd 未就绪且 `collect_wait=true`，收集其 `PollWaitQueue` 用于后续阻塞等待。`timeout=0` 时先在所有 fd/EventPoll 锁外调用一次 `NET_INTERFACE.poll_now()`，做有界、绝不等待的逐栈扫描；忙栈只安排下一 tick retry。
 2. **等待**：如果预扫描没有找到就绪 fd，调用 `poll_wait()` 在收集到的 wait_queue 上阻塞。`poll_wait` 使用 `WaitQueue::wait_on_queues_interruptible_timeout` 实现可中断、带超时的多队列等待。条件闭包在每次被唤醒时重新扫描。
 3. **结果写回**：将 `revents` 写回用户空间。
 
@@ -125,10 +125,10 @@ ADD 操作会校验文件的 `FileMode::FMODE_STREAM` 标志，非 stream 文件
 
 1. 扫描（`self.scan(true)` 收集 wait_queue）。
 2. 尝试取 ready（`self.take_ready`），如果有就绪事件，执行 `disable_oneshot` 并返回。
-3. 无就绪时，在文件 wait_queue + epoll 自身 wait_queue 上调用 `WaitQueue::wait_on_queues_interruptible_timeout`。条件闭包在每次被唤醒时重新扫描。
+3. 无就绪时，在文件 wait_queue + epoll 自身 wait_queue 上调用 `WaitQueue::wait_on_queues_interruptible_timeout`。进入等待前只异步 `request_poll()`；条件闭包在每次被唤醒时重新扫描 readiness，绝不从 WaitQueue 内进入 smoltcp。
 4. 醒来后重新扫描并取 ready。
 
-timeout 语义：`-1` 无限等待，`0` 立即返回（非阻塞），正值表示毫秒超时。`epoll_pwait2` 使用 `TimeSpec` 结构支持纳秒精度。
+timeout 语义：`-1` 无限等待，`0` 在一次 `poll_now()` 与就绪扫描后立即返回，正值表示毫秒超时。`epoll_pwait2` 使用 `TimeSpec` 结构支持纳秒精度。
 
 ### 事件回调机制
 

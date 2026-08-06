@@ -41,7 +41,7 @@ use self::inner::{
 };
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::port::{
-    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+    AddressFamily, AutoBindPurpose, BindIntent, PortReservation, TransportProtocol,
 };
 use crate::net::socket::inet::common::BoundInner;
 use crate::net::socket::inet::stream::inner::ConnectResult;
@@ -249,7 +249,7 @@ impl TcpSocket {
         ready
     }
 
-    /// 在 NET_INTERFACE.poll() 之后刷新各状态的事件
+    /// 在 CPU0 poll worker 完成有界扫描后刷新各状态的事件
     pub fn update_io_events(&self) -> (usize, usize) {
         let previous = self.pollee.load(Ordering::Acquire);
         let inner = self.inner.lock();
@@ -288,8 +288,7 @@ impl TcpSocket {
             became_ready & (EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM).bits(),
         );
         if !accept_events.is_empty() {
-            self.accept_waiters
-                .notify_events_all_if_unlocked(accept_events);
+            self.accept_waiters.notify_events_all(accept_events);
         }
 
         // connect 等待者：连接已建立（EPOLLOUT）或被拒绝（EPOLLERR / EPOLLHUP）
@@ -298,8 +297,7 @@ impl TcpSocket {
                 & (EPollEvent::EPOLLOUT | EPollEvent::EPOLLERR | EPollEvent::EPOLLHUP).bits(),
         );
         if !connect_events.is_empty() {
-            self.connect_waiters
-                .notify_events_all_if_unlocked(connect_events);
+            self.connect_waiters.notify_events_all(connect_events);
         }
 
         // recv 等待者：有数据可读、对端关闭或 socket 出错。通知载荷只能
@@ -315,8 +313,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !recv_events.is_empty() {
-            self.recv_waiters
-                .notify_events_at_most_if_unlocked(recv_events, 1);
+            self.recv_waiters.notify_events_at_most(recv_events, 1);
         }
 
         // send 等待者：发送缓冲从不可写转为可写，或 socket 关闭/出错。
@@ -329,8 +326,7 @@ impl TcpSocket {
                     .bits(),
         );
         if !send_events.is_empty() {
-            self.send_waiters
-                .notify_events_at_most_if_unlocked(send_events, 1);
+            self.send_waiters.notify_events_at_most(send_events, 1);
         }
     }
 
@@ -493,6 +489,39 @@ impl Socket for TcpSocket {
         *self.port_reservation.lock() = Some(reservation);
     }
 
+    fn auto_bind_endpoint(
+        &self,
+        peer: Option<&crate::net::Endpoint>,
+        purpose: AutoBindPurpose,
+    ) -> Result<Option<crate::net::Endpoint>, SyscallErr> {
+        let unbound = matches!(&*self.inner.lock(), Inner::Init(Init::Unbound(_, _)));
+        if !unbound {
+            return Ok(None);
+        }
+        let address = match purpose {
+            AutoBindPurpose::Connect | AutoBindPurpose::Send => match peer {
+                Some(crate::net::Endpoint::Ip(peer)) => {
+                    let peer_addr = self.normalize_ipv4_mapped(peer.addr);
+                    let route_addr = if peer_addr.is_unspecified() {
+                        match peer_addr {
+                            IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                            IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+                        }
+                    } else {
+                        peer_addr
+                    };
+                    crate::net::config::lookup_source_ip(route_addr)
+                }
+                _ => return Ok(None),
+            },
+            AutoBindPurpose::Listen => match self.ip_version {
+                IpVersion::Ipv4 => IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED),
+                IpVersion::Ipv6 => IpAddress::Ipv6(smoltcp::wire::Ipv6Address::UNSPECIFIED),
+            },
+        };
+        Ok(Some(crate::net::Endpoint::Ip(IpEndpoint::new(address, 0))))
+    }
+
     /// 将 TCP socket 标记为监听状态。
     ///
     /// # Semantics
@@ -536,8 +565,8 @@ impl Socket for TcpSocket {
     /// # Semantics
     ///
     /// 通过 `Inner::connect()` 在 smoltcp 中创建新的 TCP 控制块并进入
-    /// `Connecting` 状态。调用后立即做一次 `NET_INTERFACE.poll()` 并检查
-    /// 握手是否已完成（`is_connected()` 或 `failure_reason()`）。
+    /// `Connecting` 状态。调用后异步请求 CPU0 poll worker，并检查已发布的
+    /// 握手状态（`is_connected()` 或 `failure_reason()`）。
     /// 若已完成，内部 `finish_connecting()` 将状态转为 `Established` 并返回
     /// `Ok(0)`（同步连接成功）；否则返回 `Err(EAGAIN)`，上层 `sys_connect`
     /// 将根据阻塞/非阻塞模式分别进入 `WaitQueue` 或返回 `EINPROGRESS`。
@@ -595,7 +624,7 @@ impl Socket for TcpSocket {
                 *inner = Inner::Connecting(connecting);
                 drop(inner);
                 // 握手推进由 poll worker 异步完成；不得在 socket 路径内重入 smoltcp。
-                NET_INTERFACE.kick_from_task();
+                NET_INTERFACE.request_poll();
                 let inner = self.inner.lock();
                 match &*inner {
                     Inner::Connecting(c) => {
@@ -625,20 +654,20 @@ impl Socket for TcpSocket {
         }
     }
 
-    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠、不 poll。
+    /// 非阻塞检查 TCP 握手进度——单次尝试，不睡眠。
     ///
     /// # Semantics
     ///
-    /// `sys_connect` 的 `WaitQueue` 条件闭包和 `try_connect` 路径调用此方法。
-    /// 请求 poll worker 推进 smoltcp 状态，然后查询现有底层 TCP state。若状态已是
+    /// `sys_connect` 的 `WaitQueue` 条件闭包和非阻塞路径都调用此方法。方法只
+    /// 发布异步 poll 请求，然后查询已经发布的 TCP state。若状态已是
     /// `Established`/`CloseWait` 但 `Inner::Connecting` 的
     /// `result` 字段未更新，强制修正为 `ConnectResult::Connected`。
     ///
     /// 成功后调用 `finish_connecting()` 做状态转换并发布 fast path 键。
     /// `Closed` 状态（对端 RST）映射为 `ECONNREFUSED`。
     ///
-    /// **重要**：本函数可位于 WaitQueue 条件闭包，但只发布 kick；条件闭包绝不
-    /// 直接 poll 或取得 DeviceStack 锁。
+    /// 条件闭包内不会获取 DeviceStack 锁；worker 在锁外发布的可靠通知负责
+    /// 触发下一次条件检查。
     ///
     /// # Errors
     ///
@@ -646,7 +675,7 @@ impl Socket for TcpSocket {
     /// - `ECONNREFUSED`：对端 RST
     /// - `EAGAIN`：仍在握手中
     fn try_connect(&self) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         let inner = self.inner.lock();
         let ret = match &*inner {
             Inner::Connecting(c) => {
@@ -692,7 +721,7 @@ impl Socket for TcpSocket {
     }
 
     fn take_error(&self) -> Option<SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         let mut inner = self.inner.lock();
         match &mut *inner {
             Inner::Init(Init::Bound { pending_error, .. }) => pending_error.take(),
@@ -968,7 +997,7 @@ impl Socket for TcpSocket {
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLIN.bits() == 0 {
             // route/ifindex 仍由后续 target-stack access 重验；此处仅请求 worker，
             // 不在 syscall/WaitQueue 路径同步推进任何 DeviceStack。
-            NET_INTERFACE.kick_from_task();
+            NET_INTERFACE.request_poll();
         }
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
@@ -1058,7 +1087,7 @@ impl Socket for TcpSocket {
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let fast = self.fast_key_established();
         if self.pollee.load(Ordering::Relaxed) & EPollEvent::EPOLLOUT.bits() == 0 {
-            NET_INTERFACE.kick_from_task();
+            NET_INTERFACE.request_poll();
         }
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
@@ -1114,7 +1143,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_recv_user(&self, buf: &mut UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         if self.read_shutdown.load(Ordering::Acquire) {
             let ret = Ok(0);
             #[cfg(feature = "net_perf_diag")]
@@ -1148,7 +1177,7 @@ impl Socket for TcpSocket {
     }
 
     fn try_send_user(&self, buf: &UserBuffer, flags: MsgFlags) -> Result<isize, SyscallErr> {
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         if self.write_shutdown.load(Ordering::Acquire) {
             return Err(SyscallErr::EPIPE);
         }
@@ -1247,24 +1276,18 @@ impl Socket for TcpSocket {
     }
 }
 
-// Safety: `TcpSocket` 所有字段均为线程安全类型：
-//   - `Mutex<Inner>` 保护内部 TCP 状态机（smoltcp handles），所有访问经过 locking
-//   - `AtomicBool` / `AtomicUsize` / `AtomicU32` / `AtomicU8` 提供无锁同步
-//   - `EventWaitQueue` 内部使用 `Mutex` 保护等待队列
-// 由于单核 `Arc<dyn Socket>` 共享，`Send` + `Sync` 允许在任务间传递 Arc 引用，
-// 不会导致数据竞争。
+// Safety: `Inner`、bind 元数据和 reservation 均由各自 Mutex 排他保护，任何
+// smoltcp handler 的实际访问还会经过对应 DeviceStack 锁；事件队列内部自行
+// 同步，其余跨核状态只通过 Atomic* 访问。没有从锁域中返回内部可变引用。
 unsafe impl Send for TcpSocket {}
-// Safety: 同上，`TcpSocket` 的所有可变状态通过 `Mutex` 和 `Atomic*` 安全共享。
+// Safety: 同上；共享 `&TcpSocket` 只能经 Mutex、EventWaitQueue 或 Atomic* 改变状态。
 unsafe impl Sync for TcpSocket {}
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         self.invalidate_fast();
-        let reservation = self.port_reservation.lock().take();
-        if let Some(reservation) = reservation {
-            // socket 已不再可被新 bind 使用；只按 key+token+Weak 身份移除自己的 owner。
-            reservation.release();
-        }
+        // 唯一 reservation 离开 socket 后由其 Drop 按 token + Weak 身份精确释放。
+        drop(self.port_reservation.lock().take());
         {
             let inner = self.inner.lock();
             let state_name = match &*inner {

@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-06
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -46,8 +46,9 @@ B40 在同一安全点增加永久 group-exit 检查：只读取进程级原子�
 当前 owner 在本 CPU 清理并发布 live-token ack；请求 CPU 不再摘除或销毁远端
 Running TCB。首次 clone 发布也与线程成员登记共用 group-exit 门禁。
 B41 继续让多线程 exec 复用这个 owner 自清理安全点，但使用可恢复的临时 exec
-会话和 Completion：owner 等到 sibling 清理完旧用户映射并把 live count 降为 1
-后才替换 MM，随后重新开放线程创建。
+会话和 Completion。B83 又将资源清理的 live ack 与 idle 撤销 current 槽的
+inactive ack 分开：owner 同时等到 live count 降为 1 且全部 sibling inactive 后
+才替换 MM，随后重新开放线程创建。
 B51 在每个 `CpuTaskState` 中增加当前活跃用户 MM 的 Arc。用户 trap-return 通过
 `switch_user_vm()` 安装它；任务真正切回 idle 栈后，调度器在改变 current owner 前
 调用 `leave_user_vm()`，让 MM 的 active CPU mask 精确反映仍可直接返回用户态的 CPU。
@@ -83,6 +84,19 @@ Release 更新；B37 用两者之和估算放置负载。它们都不参与 owne
 最多造成次优选点。`nr_zombies` 只用于空队列快路径和诊断，真实
 Arc 归属由对应 CPU 的 `local_zombies` 锁保护。
 
+B91 另在同一 per-CPU owner 中维护 `context_switches`、`migrations`、`steals` 和
+`run_queue_peak`。它们只用于 panic/稳定化诊断，不参与负载选择和状态交接：migration
+必须等任务相对 `last_cpu` 真正在另一 CPU 进入 `Running` 才计数，queued 搬运不提前计；
+steal 只在窃取方完成 `Migrating -> Running` 后计数；队列峰值不包含 current。
+
+同一 owner 还维护 `user_time_us`、`system_time_us` 和 `idle_time_us`。任务时间在
+trap/schedule 边界按实际执行 CPU 立即入账，不经可能跨迁移的 PCB 批次反推。
+idle 区间从 CPU 在本地 idle 栈上运行开始，到下一个 current 切入前结束；
+因此 CPU0 当前在 idle 调度上下文内完成的 housekeeping 也归入 idle。这是
+对现有调度结构可稳定观测的口径；日后若把 housekeeping 迁入独立内核线程，
+相应时间将自然转入 system。远端 `/proc/stat` 读取用序列号快照合并已结算
+时间与尚未闭合的 idle 区间，不获取远程 CPU 的调度锁。
+
 TCB 的 `last_cpu` 是最近一次成功完成 `Queued(cpu) -> Running(cpu)` 的运行位置。
 它只为 `Blocked` 任务重新唤醒提供局部性提示，不是 owner；真实 runnable/current
 归属始终由 `sched_state` 和对应 CPU 的容器共同决定。
@@ -109,7 +123,9 @@ B36 对稳定 Queued 使用 owner runqueue 作为 placement 锁。只有新 mask
 `Migrating`；该状态表示 TCB 已离开源队列、尚未进入目标队列，唯一 owner 是同步迁移调用方，
 不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。
 B38 的 Running 路径不借用 `Migrating`：任务切回 idle 前仍是 `Running(source)`，
-切栈后直接由目标 runqueue 提交为 `Queued(target)`。
+切栈后直接由目标 runqueue 提交为 `Queued(target)`。B49 又让空闲 CPU 在本地队列为空时
+从一个 victim 窃取一个 affinity 允许的任务；目标栈 TLB 同步在 victim 队列锁外完成，
+真正摘取仍由 victim 锁内 `Queued -> Migrating` 唯一交接。
 
 ## 3. RunQueue 选择策略
 
@@ -135,7 +151,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
 稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
 新任务与 wake 的 locality/负载选择，B38 已让远程 Running/Blocking 走 owner
-安全点交接。默认全核 mask 和 work stealing 仍未开放。
+安全点交接。work stealing 已可用于 affinity 允许的任务，但普通用户任务默认 mask 仍为
+CPU0-only，因此这不等于已经解除共享子系统门禁。
 
 ### 3.1 首次发布与精确目标入口
 
@@ -347,7 +364,8 @@ panic 诊断不能等待普通锁，也可能发生在 CPU-local 寄存器安装
 `try_current_task()`：先验证寄存器值确实落在 `PER_CPUS` 数组中，再 `try_lock()`。
 CPU-local 不可用或锁正被持有时返回不可用状态，不触发二次 panic。
 
-B56 的 `CpuTaskDiagnostics` 另外读取 current PID/TID、排队数和 zombie 数的原子 hint；
+B56/B91 的 `CpuTaskDiagnostics` 另外读取 current PID/TID、排队数、zombie 数和每 CPU
+switch/migration/steal/runqueue peak 原子 hint；
 `active_user_vm` 只做一次 `try_lock()` 并复制稳定 MM ID。它和外层 `CpuDiagnostics` 都是
 best-effort 输出，不能替代 processor/runqueue 锁或调度状态机的 owner 判定。
 
@@ -363,15 +381,16 @@ CPU0 的 `run_tasks()` 每轮执行：
 schedule_tick += 1
   ├── console poll
   ├── do_wake_expired()
-  ├── NET_INTERFACE.try_poll()        每 64 tick
+  ├── NET_INTERFACE.run_deferred_poll_retry() 每 tick
+  ├── NET_INTERFACE.request_poll()    每 64 tick
   ├── fs::reclaim::maybe_reclaim_fs_caches()
   ├── drain 本 CPU local_zombies
-  ├── 每 64 tick 清理 interruptible zombie 并记录本地/全局队列统计
+  ├── 每 64 tick 记录 runqueue/interruptible 长度和本地队列统计
   ├── compact_shared_futex()
   ├── fetch_task()
   ├── queue sample / perf
   ├── switch to task
-  └── idle path: NET_INTERFACE.poll() 或 spin_loop()
+  └── idle path: NET_INTERFACE.request_poll() 或 spin_loop()
 ```
 
 调度循环承担了若干后台维护职责，不能把它理解成单纯的 “while fetch ready task”。
@@ -435,11 +454,12 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 | 操作 | 频率 |
 |------|------|
-| `NET_INTERFACE.try_poll()` | 每 64 tick |
-| idle 时 `NET_INTERFACE.poll()` | 每 64 idle tick |
+| `NET_INTERFACE.run_deferred_poll_retry()` | 每 tick，消费忙栈 retry 位 |
+| `NET_INTERFACE.request_poll()` | 每 64 tick 与每 64 idle tick |
 | `fs::reclaim::maybe_reclaim_fs_caches()` | 每轮 |
 
-网络 syscall 自己也会 poll；调度循环中的 poll 是后台兜底，避免没有 socket syscall 时网络状态完全不推进。
+网络 syscall 只做一次有界 `poll_now()` 或异步请求；真正的全栈推进由 CPU0 worker
+负责。调度循环中的 request 是后台兜底，避免没有 socket syscall 时网络完全不推进。
 
 ## 9. Per-CPU zombie 回收
 
@@ -458,10 +478,11 @@ exit_current_and_run_next()
 `local_zombies`。CPU0 和 AP 都在自己的 idle 循环、
 下一次 dispatch 之前取出并 drop，因此 AP 退出不再竞争全局 `TASK_MANAGER`。
 
-父进程 wait/auto-reap 需要按 pid 同步清理时，先单独摘取 interruptible zombie，
-再按 CPU 依次扫描本地回收队列；任一时刻只持有一把容器锁，承接 Vec
-的扩容和 TCB 析构都在锁外。PCB 的 wait-visible zombie 状态与这个 TCB
-对象寿命队列仍是两层独立语义。
+父进程 wait/auto-reap 需要按 pid 同步清理时，只按 CPU 依次扫描本地回收
+队列；任一时刻只持有一把容器锁，承接 Vec 的扩容和 TCB 析构都在锁外。
+最后退出的 current 此时可能尚未切回 idle，因此由随后
+`finish_switch_out()` 入队并回收。PCB 的 wait-visible zombie 状态与这个
+TCB 对象寿命队列仍是两层独立语义。
 
 B21 后，TCB 析构只把缓存溢出的内核栈 slot 登记到固定退休队列；
 CPU0 下一次 idle 安全点在无普通锁状态下撤销映射、等待全核 TLB
@@ -494,8 +515,9 @@ syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因�
 2. 以 IRQ-off 状态切回本 CPU idle scheduler；
 3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
 
-CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、network poll、FS reclaim
-等共享路径尚未完成 IRQ 并发审计。AP 已采用独立的“关中断—重查工作—架构 wait”
+CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、FS reclaim 等共享路径
+尚未完成 IRQ 并发审计；network 在这里仅发布原子 request，smoltcp 由独立 worker
+在任务上下文推进。AP 已采用独立的“关中断—重查工作—架构 wait”
 协议，但 B19 kernel-only 任务运行期间也保持 IRQ-off；STOP/RESCHEDULE 最长延迟到
 该短函数返回或主动 yield，不能据此开放无界通用内核线程。
 
@@ -551,7 +573,9 @@ idle: clear current -> Blocking(cpu) -> Blocked
 4. 单个 wake 返回目标 CPU，批量 wake 聚合目标 mask；外层释放 `TASK_MANAGER` 和
    runqueue 后才发送 `RESCHEDULE`。本地目标不发 IPI，远端 AP 由 doorbell 退出 idle。
 
-`WaitQueue::wake_*()` 只筛选原子状态并把候选交给调度器，不能在外部先写状态。
+`WaitQueue::wake_*()` 先以 CAS 领取一次性 entry token，再把 TCB 交给调度器。
+它不能在外部改写 TaskStatus；早到 wake 的 token 会在 checked block 中撤销
+随后登记的 `Blocking`。
 `TASK_MANAGER -> 单个 RunQueue` 是唯一允许的嵌套顺序；任何路径都不得反向取锁或
 同时持有两个 runqueue。
 
@@ -601,6 +625,10 @@ idle: clear current -> Blocking(cpu) -> Blocked
 
 这些用于诊断调度退化，不改变调度决策。
 
+profile 计数受运行期开关控制，适合性能窗口；B91 的四个 per-CPU 计数始终开启，专门保证
+panic 时仍能看到各核调度历史。两套计数用途不同，均只用 relaxed atomic，不提供跨字段
+一致快照。
+
 ## 15. 调试核对点
 
 | 现象 | 检查 |
@@ -610,4 +638,4 @@ idle: clear current -> Blocking(cpu) -> Blocked
 | getpid/gettid 返回旧值 | 本 CPU current 槽与 PID/TID 快照是否同步发布、清理 |
 | getuid/getpgid/token 返回旧值 | TCB/PCB 权威原子 hint 是否在 setter 中更新 |
 | 非零 nice 任务饿死 | owner RunQueue 的 `nonzero_nice_count` 与原子 hint 是否更新 |
-| 网络等待无 syscall 时卡住 | 调度循环后台 `try_poll/poll` 是否执行 |
+| 网络等待无 syscall 时卡住 | CPU0 worker、pending/deferred wake 与后台 request 是否执行 |

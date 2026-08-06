@@ -29,6 +29,7 @@ const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_SIGNALFD4: usize = 74;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -273,15 +274,39 @@ pub fn sys_chdir(path: &str) -> isize {
 }
 
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
-    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, 0])
+    // wait4 的第 4 个参数是 rusage。RV64 三参数封装不会清空 a3，若继续
+    // 使用它，内核会把残留寄存器当成用户指针并在 child 已回收后返回 EFAULT。
+    syscall4(SYSCALL_WAIT4, [pid as usize, exit_code as usize, 0, 0])
 }
 
 pub fn sys_waitpid_flags(pid: isize, exit_code: *mut i32, options: usize) -> isize {
-    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, options])
+    syscall4(
+        SYSCALL_WAIT4,
+        [pid as usize, exit_code as usize, options, 0],
+    )
 }
 
 pub fn sys_kill(pid: usize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid, sig, 0])
+}
+
+pub fn sys_rt_sigprocmask(
+    how: usize,
+    set: *const u64,
+    old_set: *mut u64,
+    sigsetsize: usize,
+) -> isize {
+    syscall4(
+        SYSCALL_SIGPROCMASK,
+        [how, set as usize, old_set as usize, sigsetsize],
+    )
+}
+
+pub fn sys_signalfd4(fd: isize, mask: *const u64, sigsetsize: usize, flags: usize) -> isize {
+    syscall4(
+        SYSCALL_SIGNALFD4,
+        [fd as usize, mask as usize, sigsetsize, flags],
+    )
 }
 
 pub fn sys_rt_sigaction(signum: usize, action: usize, old_action: usize, sigsetsize: usize) -> isize {

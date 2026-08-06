@@ -2,9 +2,9 @@
 title: "网络子系统架构设计"
 module: "net"
 category: net
-status: current
+status: draft
 owner: MangoCore Team
-last_updated: 2026-08-04
+last_updated: 2026-08-06
 code_paths:
   - "os/src/net/mod.rs"
   - "os/src/net/config.rs"
@@ -61,12 +61,8 @@ related_docs:
 1. **POSIX 兼容**：提供 `socket`、`bind`、`connect`、`sendto`、`recvfrom`、`epoll` 等标准接口，运行 unixbench、iperf、libcbench 等测试套件。
 2. **双架构支持**：同一套代码在 riscv64 和 loongarch64 上均可运行，HAL 层隔离架构差异。
 3. **可扩展设备模型**：支持 lo（环回）、eth0（virtio-net）、veth（虚拟以太网对）等多种设备类型，每种设备拥有独立的 smoltcp 栈。
-4. **响应式轮询**：单核环境下通过计时器中断驱动轮询，非阻塞 I/O 路径确保系统不被网络卡死。
+4. **SMP 安全轮询**：IRQ 只发布请求，CPU0 worker 在任务上下文逐设备有界推进协议栈。
 5. **分离的数据平面与控制平面**：Socket handle 与 RouteSocketHandle 双层抽象，将用户态 socket fd 与底层 smoltcp socket 解耦。
-
-### SMP 已完成边界
-
-网络适配已完成 `NetNamespace::ports` 的 reserve→bind→commit/abort、N0 route directory 的 route-ID 重验、单 N2 `DeviceStack` 和 generation poll worker。端口 registry、route directory 与 DeviceStack 不嵌套；socket/epoll 通知与用户 copy 都在业务锁外。这不承诺单个 smoltcp `SocketSet` 的 per-socket 并行，也不代表 eventpoll/fd-table、netlink 或 RAW edge cases 已完成跨子系统 SMP 审计。
 
 ---
 
@@ -87,21 +83,20 @@ related_docs:
                             │ RouteSocketHandle 间接
                             ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Routing Layer — routing.rs + NetInterfaceInner                     │
+│  Routing Layer — routing.rs + NetDirectory                          │
 │                                                                      │
 │  核心职责：                                                            │
 │  - route_output(dst) → RouteDecision {ifindex, source, next_hop}     │
-│  - RouteSocketHandle → SocketBinding {ifindex, handle, proto}        │
-│  - poll 循环：驱动所有 DeviceStack 的 iface.poll()                    │
+│  - RouteSocketHandle → Weak<DeviceStackCell> + protocol + state     │
+│  - CPU0 worker：逐设备有界驱动 iface.poll()                           │
 │  - 清理/重建 socket binding（TCP Closed 去除、UDP rebind 等）          │
 └──────────────────────────┬───────────────────────────────────────────┘
-                            │ DeviceStack 数组（per-device smoltcp 栈）
+                            │ per-device DeviceStackCell
                             ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Device Layer — adapter.rs + iface.rs + drivers/                    │
 │                                                                      │
-│  DeviceStack {nic: Arc<dyn Iface>, device: IfaceDevice,             │
-│              iface: Interface, sockets: SocketSet}                   │
+│  DeviceStackCell {state, inner: Mutex<DeviceStackInner>}            │
 │                                                                      │
 │  IfaceDevice 枚举：Lo(Loopback) | Eth(SmoltcpDeviceAdapter)          │
 │                 | Veth(VethDriver)                                   │
@@ -119,29 +114,25 @@ related_docs:
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RouteSocketHandle(pub(crate) usize);
 
-/// 从 RouteSocketHandle 到 smoltcp SocketHandle 的映射
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SocketBinding {
-    pub ifindex: u32,              // 所属 DeviceStack
-    pub handle: SocketHandle,       // smoltcp 内部 handle
-    pub proto: InetProtocol,        // Tcp / Udp / Raw
+/// 目录项只定位目标栈；真实 SocketHandle 必须在栈锁内重验。
+struct RouteDirectoryEntry<'a> {
+    stack: Weak<DeviceStackCell<'a>>,
+    protocol: InetProtocol,
+    state: RouteState,
 }
-
-/// 每个 NET_INTERFACE 内部维护一个 BTreeMap:
-/// bindings: BTreeMap<RouteSocketHandle, SocketBinding>
 ```
 
 当 `TcpSocket::try_send(buf)` 被调用时：
 
 1. `TcpSocket` 持有 `socket_handler: RouteSocketHandle`。
 2. 调用 `NET_INTERFACE.tcp_routed_socket(rh, |tcp_sock| ...)`。
-3. 内部查找 `bindings[rh]` 得到 `SocketBinding{ifindex, handle, Tcp}`。
-4. 通过 `stack_mut(ifindex)` 定位 DeviceStack，再通过 `sockets.get_mut::<tcp::Socket>(handle)` 获取真实 socket。
+3. 目录中确认 route 为 Active/Tcp 并升级目标 `DeviceStackCell`，随后释放目录锁。
+4. 取得该栈锁，按相同 route ID 与 protocol 重验 `LocalSocketBinding`，再访问真实 socket。
 5. 闭包操作真实的 smoltcp tcp::Socket。
 
 这个抽象实现了两层解耦：
 - 用户态的 `Arc<TcpSocket>` 不依赖 DeviceStack 的布局。
-- 跨 DeviceStack 迁移（如 UDP rebind）只需更新 `SocketBinding`，不改变用户态对象。
+- 跨 DeviceStack 迁移（如 UDP rebind）经过 `Migrating` 状态，不改变用户态对象。
 
 ### 3.3 每设备独立 smoltcp 栈
 
@@ -149,10 +140,10 @@ pub(crate) struct SocketBinding {
 
 ```
 NetInterface
-  └── inner: Mutex<NetInterfaceInner>
-        ├── stacks: Vec<DeviceStack>          ← 多个设备栈
-        ├── bindings: BTreeMap<...>           ← 路由映射
-        └── next_socket_id: usize
+  ├── directory: Mutex<NetDirectory>
+  │     ├── stacks: BTreeMap<ifindex, Arc<DeviceStackCell>>
+  │     └── routes: BTreeMap<RouteId, RouteDirectoryEntry>
+  └── next_route_id: AtomicUsize
 
 DeviceStack (index 0: lo, ifindex=1)
   ├── nic: Arc<dyn Iface>                     ← loopback 元数据
@@ -183,39 +174,40 @@ DeviceStack (index 1: eth0, ifindex=2)
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
 
 pub struct NetInterface<'a> {
-    inner: Mutex<Option<NetInterfaceInner<'a>>>,
+    directory: Mutex<Option<NetDirectory<'a>>>,
+    next_route_id: AtomicUsize,
+    poll: NetPollControl,
 }
 ```
 
-全局单例，是网络子系统的入口点。`inner` 在 `NetInterface::init()` 调用前为 `None`，确保在 init 之前任何网络操作都返回空。
+全局单例是网络子系统入口。目录只保存 stack/route 身份，具体 smoltcp 状态由
+每设备一把 `DeviceStackCell::inner` 保护。
 
-### 4.2 NetInterfaceInner
+### 4.2 NetDirectory
 
 ```rust
-pub struct NetInterfaceInner<'a> {
-    pub stacks: Vec<DeviceStack<'a>>,
-    pub bindings: BTreeMap<RouteSocketHandle, SocketBinding>,
-    pub next_socket_id: usize,
+struct NetDirectory<'a> {
+    stacks: BTreeMap<u32, Arc<DeviceStackCell<'a>>>,
+    routes: BTreeMap<RouteSocketHandle, RouteDirectoryEntry<'a>>,
 }
 ```
 
-- `stacks[0]`：环回设备 lo（ifindex=1）。
-- `stacks[1]`：以太网设备 eth0（ifindex=2）。
-- `bindings`：RouteSocketHandle 到 SocketBinding 的映射。支持 O(log n) 查找。
-- `next_socket_id`：单调递增的 RouteSocketHandle 计数器。
+- `stacks`：ifindex 到 `DeviceStackCell` 的强引用。
+- `routes`：route ID 到目标栈弱引用、protocol 和生命周期状态的映射。
+- route ID 由单调原子计数器分配，删除后不复用。
 
 ### 4.3 DeviceStack
 
 ```rust
-pub struct DeviceStack<'a> {
-    pub nic: Arc<dyn Iface>,
-    pub device: IfaceDevice,
-    pub iface: Interface,
-    pub sockets: SocketSet<'a>,
+struct DeviceStackCell<'a> {
+    ifindex: u32,
+    state: AtomicU8,
+    inner: Mutex<DeviceStackInner<'a>>,
 }
 ```
 
-每个 DeviceStack 代表一个完整的网络设备栈。
+每个 DeviceStack 代表一个完整、独立串行化的网络设备栈。目录锁与栈锁不得嵌套；
+读者释放目录后取得目标栈锁，再按 route ID 和 protocol 重验本地 binding。
 
 - `nic`：元数据接口（名称、MAC、IP 地址、flags）。通过 `Iface` trait 访问。
 - `device`：smoltcp 硬件抽象层。`IfaceDevice` 枚举包装了 `Loopback`、`SmoltcpDeviceAdapter` 和 `VethDriver` 三种设备类型。
@@ -228,15 +220,19 @@ pub struct DeviceStack<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RouteSocketHandle(pub(crate) usize);
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SocketBinding {
-    pub ifindex: u32,
-    pub handle: SocketHandle,
-    pub proto: InetProtocol,
+struct RouteDirectoryEntry<'a> {
+    stack: Weak<DeviceStackCell<'a>>,
+    protocol: InetProtocol,
+    state: RouteState,
+}
+
+struct LocalSocketBinding {
+    handle: SocketHandle,
+    protocol: InetProtocol,
 }
 ```
 
-RouteSocketHandle 是递增整数，作为键用于 `BTreeMap` 查找。SocketBinding 记录该 handle 在哪个 DeviceStack 的哪个位置。
+`RouteSocketHandle` 是不复用的递增整数。目录条目只保存目标栈的 `Weak`、协议和迁移状态；释放目录锁并取得目标栈后，再用同一 route ID 在 `LocalSocketBinding` 中重验 smoltcp handle。
 
 ### 4.5 RouteDecision
 
@@ -271,8 +267,13 @@ QEMU → OpenSBI (M-mode)
       → drivers::init_net_device()         [1]
       → net::config::init()                [2]
       → task::add_initproc()
+      → task::spawn_kernel_worker("[net-poll]", net_poll_worker)
       → task::run_tasks()
 ```
+
+normal 启动必须先发布 PID1，再发布常驻网络轮询 worker。两者首次都进入 CPU0 的
+FIFO runqueue，因此 PID1 先取得首次调度；worker 随后消费 `net::config::init()`
+留下的 pending 事件，并在无工作时进入 WaitQueue，避免启动期抢在 PID1 前阻塞调度链。
 
 **步骤详解：**
 
@@ -296,7 +297,7 @@ pub fn init_net_device() {
 pub fn init() {
     let has_nic = NET_DEVICE.lock().is_some();
     net_core::init();         // 注册 lo 和 eth0 到 netns 设备列表
-    NET_INTERFACE.init();     // 创建 DeviceStack，DHCP 探测
+    NET_INTERFACE.init();     // 创建 DeviceStack、注册 DHCP socket、发布首轮 poll
 }
 ```
 
@@ -304,7 +305,7 @@ pub fn init() {
 1. 创建 ifindex=1 的环回设备 `lo`（IP: 127.0.0.1/8, ::1/128）。
 2. 若 `NET_DEVICE` 存在，创建 ifindex=2 的以太网设备 `eth0`（MAC 来自硬件，无静态 IP）。
 
-`NET_INTERFACE.init()` 执行 `NetInterfaceInner::new()`：
+`NET_INTERFACE.init()` 执行 `NetDirectory::new()`：
 
 1. **构建 lo 的 DeviceStack**：
    - 使用 `IfaceDevice::Lo(Loopback::new(Medium::Ip))`。
@@ -315,30 +316,18 @@ pub fn init() {
    - 使用 `SmoltcpDeviceAdapter::new(NET_DEVICE.take())`。
    - smoltcp 配置为 `HardwareAddress::Ethernet(mac)`。
 
-3. **DHCP 探测**（eth0 有硬件时）：
+3. **注册常驻 DHCP socket**（eth0 有硬件时）：
 
 ```rust
-// DHCP 探测伪代码
+// boot 阶段只注册，不直接 poll VirtIO
 let mut dhcp_socket = dhcpv4::Socket::new();
 dhcp_socket.set_retry_config(/* 2s discover, 1s request, 3 retries */);
-let dhcp_handle = eth_sockets.add(dhcp_socket);
-
-loop {
-    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-    match dhcp_socket.poll() {
-        Some(Event::Configured(cfg)) => {
-            set_eth0_ipv4(cfg.address);
-            set_default_gateway(cfg.router);
-            break;
-        }
-        _ => {}
-    }
-    if timeout(5s) { break; }
-}
-eth_sockets.remove(dhcp_handle);
+runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+NET_INTERFACE.request_poll(); // worker 首次条件复查消费 pending
 ```
 
-4. **注入 DHCP 结果**：将从 netns 收集到的 IP 地址和默认网关写入 eth0 的 smoltcp `Interface`。
+4. **运行时提交租约**：CPU0 worker 在 IRQ-on 窗口内推进 socket；释放 DeviceStack
+   后把地址、默认路由和 DNS 同步到 `net_core` 与当前 netns。
 
 ### 5.2 TCP 发送
 
@@ -351,7 +340,7 @@ sys_sendto
   │
   ├─ 调用 Socket::try_send(buf, flags)
   │    └─ TcpSocket::try_send(buf, _flags)
-  │         ├─ NET_INTERFACE.try_poll()      [1] 轻量轮询，推进发送
+  │         ├─ NET_INTERFACE.request_poll()  [1] 异步请求 worker
   │         ├─ 检查 write_shutdown
   │         ├─ 如果处于 Connecting，先 try_connect
   │         └─ inner.try_send(buf)
@@ -362,10 +351,9 @@ sys_sendto
   │
   └─ [完整的路径还包括 poll 循环触发实际发送]
 
-[1] NET_INTERFACE.try_poll()
-  → inner.try_lock() 防止重入
-  → poll_once()
-    → 对每个 DeviceStack:
+[1] NET_INTERFACE.request_poll()
+  → pending false→true 时唤醒 CPU0 worker
+  → worker 快照 DeviceStack Arc 并逐栈 try_lock
       → iface.poll(timestamp, device, sockets)   [3] smoltcp 驱动发送
         → device.transmit() → SmoltcpDeviceAdapter::transmit()
           → NetTxToken::consume(len, |buf| { ... })
@@ -393,9 +381,9 @@ Task (user space)
   │ file descriptor: SocketFile
   │   └── Arc<TcpSocket>
   │         └── RouteSocketHandle(id=42)
-  │               └── NetInterfaceInner.bindings[RH(42)]
-  │                     └── SocketBinding {ifindex=2, handle=H5, Tcp}
-  │                           └── DeviceStack[1].sockets.get(H5): &mut tcp::Socket
+  │               └── NetDirectory.routes[RH(42)] → DeviceStackCell
+  │                     └── LocalSocketBinding {handle=H5, Tcp}
+  │                           └── sockets.get(H5): &mut tcp::Socket
 ```
 
 ### 5.3 UDP 本地投递
@@ -453,67 +441,35 @@ syscall_sendto(sockfd, buf, len, flags, dest_addr, addrlen)
 
 ### 5.4 Poll 循环
 
-网络轮询由 `NetInterface::poll()` 或 `try_poll()` 触发。`poll()` 在有锁时阻塞等待，`try_poll()` 在锁被持有时不等待直接返回。
+普通 socket 路径调用 `request_poll()` 异步唤醒 CPU0 worker；`O_NONBLOCK` 与零超时
+查询可调用 `poll_now()` 做一次有界 `try_lock` 扫描。hard IRQ 的 `try_poll_irq()`
+只发布 `pending/deferred_wake`，由安全点转换成 WaitQueue 唤醒。
 
-**驱动时机**：
-- 每次 socket 读写系统调用时会调用 `NET_INTERFACE.try_poll()`。
-- 系统空转时由定时器中断触发轮询。
+worker 每次醒来最多消费两轮 pending，并按以下顺序推进：
 
-**poll_once 详细步骤（4 阶段）**：
-
-```
-poll_once()
-  │
-  ├── [阶段 0] 收集待移除的 socket
-  │     ├─ UDP_SOCKETS_TO_REMOVE  → (rh, ifindex) 映射
-  │     └─ TCP_SOCKETS_TO_REMOVE  → (rh, ifindex) 映射
-  │
-  ├── [阶段 1-4] 逐 DeviceStack 处理
-  │
-  │   for each stack in stacks:
-  │   │
-  │   ├── [1] 清理 UDP socket
-  │   │     for rh in udp_removes:
-  │   │       if rh.ifindex == stack.nic.nic_id:
-  │   │         stack.sockets.remove(rh.handle)
-  │   │         bindings.remove(rh)
-  │   │
-  │   ├── [1.5] Veth 帧分发（仅在 veth 设备上）
-  │   │     deliver_frames_from_veth_queue(nic_id, rx_queue)
-  │   │
-  │   ├── [2] smoltcp 协议栈推进
-  │   │     stack.iface.poll(timestamp, device, sockets)
-  │   │     → 处理入站帧、ARP 解析、TCP 重传、UDP 发送等
-  │   │
-  │   ├── [3] 清理 TCP socket（必须确认 Closed 状态）
-  │   │     for rh in tcp_removes:
-  │   │       if socket.state() == Closed:
-  │   │         stack.sockets.remove(rh.handle)
-  │   │         bindings.remove(rh)
-  │   │       else:
-  │   │         TCP_SOCKETS_TO_REMOVE.push(rh)  // 下次再试
-  │   │
-  │   └── [4] UDP 数据分发
-  │         dispatch_udp_packets(stack.sockets)
-  │         → 从 smoltcp udp::Socket recv() 数据
-  │         → 通过 find_best_match 匹配 OS UdpSocket
-  │         → 推入 OS UdpSocket.rx_queue
-  │         → 唤醒接收等待队列
-  │
-  └── [阶段 5] 全局唤醒
-        ├─ wake_tcp_waiters(): 遍历 TCP_SOCKETS，唤醒就绪 socket
-        └─ wake_raw_waiters(): 遍历 RAW_SOCKETS，唤醒可读 socket
+```text
+清理待删除 route
+  -> NetDirectory 内快照 DeviceStack Arc
+  -> 释放目录锁
+  -> 打开本 CPU 受控 IRQ 窗口
+  -> 每个栈只 try_lock 一次：veth tap -> smoltcp poll -> 提取 packet/DHCP 结果
+  -> 释放栈锁
+  -> 提交 DHCP/route/device 状态并通知 socket、EventPoll、WaitQueue
+  -> 关闭 IRQ 窗口 -> 任务安全点
 ```
 
-**关键设计要点**：
+关键边界：
 
-1. **惰性清理**：TCP socket 的清理必须等待 smoltcp 状态机进入 `Closed`，确保四次挥手完成。未完成的 socket 重新放回 `TCP_SOCKETS_TO_REMOVE` 等待下次轮询。
-
-2. **UDP 双缓冲机制**：OS 层的 `UdpSocket` 有自己的 `rx_queue: VecDeque<(Vec<u8>, IpEndpoint)>`。`dispatch_udp_packets` 将 smoltcp udp::Socket 的数据批量抽干到 OS 层队列中，之后 OS 路径不再需要 smoltcp 锁。
-
-3. **避免重入**：`try_poll()` 使用 `try_lock()` 尝试获取 `inner` 锁，如果锁已被持有（如 syscall 路径中嵌套调用），则跳过本次轮询。这防止了单线程环境下的死锁。
-
-4. **Veth 帧预分发**：在 smoltcp `poll()` 之前，veth 设备的 RX 队列中的原始帧被提前递交给 packet socket（AF_PACKET），确保类 wireshark 的 socket 不会错过任何帧。
+1. **不在 IRQ 轮询**：中断路径不取得网络业务锁、不分配、不输出。
+2. **不同设备可并行**：每个设备独立锁；同一 smoltcp SocketSet 仍串行。
+3. **通知在栈锁外**：UDP packet、TCP/RAW readiness 和 accept edge 都先提取成
+   内核所有的数据，再进入 OS socket 与事件队列。
+4. **忙栈延迟重试**：`try_lock` 失败只置 `retry_armed`，由 CPU0 下一 tick 重提请求，
+   worker 不在内核栈上忙等。
+5. **Veth 帧预分发**：在 smoltcp 消费前把原始帧递交给 AF_PACKET。
+6. **同步 TX 期间可响应中断**：kernel worker 可能在 VirtIO TX 中轮询
+   used ring，真实扫描因此只在受控 IRQ-on 窗口执行；hard IRQ 仍只发布
+   原子状态，窗口关闭并释放全部网络锁后才允许安全点调度。
 
 ---
 
@@ -523,7 +479,7 @@ poll_once()
 
 | 方法 | 说明 |
 |------|------|
-| `init()` | 初始化 NetInterfaceInner，创建 lo 和 eth0 的 DeviceStack |
+| `init()` | 初始化 NetDirectory，创建 lo 和 eth0 的 DeviceStack |
 | `add_socket(ifindex, socket)` | 在指定 DeviceStack 添加 smoltcp socket |
 | `add_routed_socket(proto, socket)` | 创建路由 socket（自动绑定到默认设备） |
 | `add_routed_socket_on(proto, socket, ifindex)` | 在指定设备上创建路由 socket |
@@ -533,14 +489,12 @@ poll_once()
 | `tcp_connect(rh, remote, local)` | 发起 TCP 连接 |
 | `remove_routed(rh)` | 移除路由 socket（从 SocketSet 和 bindings 中移除） |
 | `rebind_routed_udp(rh, new_ifindex)` | 将 UDP socket 迁移到另一个设备栈 |
-| `rebind_routed_raw(rh, new_ifindex, ...)` | 将 RAW socket 迁移到另一个设备栈 |
 | `tcp_socket(handler, ifindex, f)` | 直接通过 SocketHandle 访问 tcp::Socket |
 | `udp_socket(handler, ifindex, f)` | 直接通过 SocketHandle 访问 udp::Socket |
 | `raw_socket(handler, ifindex, f)` | 直接通过 SocketHandle 访问 raw::Socket |
-| `inner_handler(f)` | 通用闭包访问 NetInterfaceInner |
-| `poll()` | 阻塞式轮询（等待锁） |
-| `try_poll()` | 非阻塞轮询（锁被持有时跳过） |
-| `poll_until_quiescent()` | 反复 try_poll 直到无数据 |
+| `request_poll()` | 异步请求 CPU0 worker 推进网络栈 |
+| `poll_now()` | 为非阻塞/零超时路径执行一次有界扫描 |
+| `try_poll_irq()` | IRQ 内只发布 deferred 请求 |
 | `remove(handler, ifindex)` | 从指定 DeviceStack 移除 socket |
 | `add_veth_stack(nic, device)` | 注册 veth DeviceStack |
 | `remove_veth_stack(nic_id)` | 移除 veth DeviceStack |
@@ -595,7 +549,7 @@ try_capture_arp_reply(&self.buf, ifindex);
 | UDP 收发 | libcbench UDP 延迟测试 | `os_test.conf mask=0x080` (libcbench) |
 | 环回 | basic ping 127.0.0.1 | `os_test.conf mask=0x001` |
 | 并发连接 | unixbench 网络相关测试 | `os_test.conf mask=0x020` |
-| DHCP | busybox udhcpc | 内核内 DHCP 在启动阶段完成 |
+| DHCP | basic/busybox QEMU 网络用例 | 内核常驻 DHCP socket 由 CPU0 worker 推进 |
 | ARP | busybox ping 同网段 IP | 依赖 neighbour.rs |
 | epoll 加网络 | libcbench epoll 测试 | 全测试集 |
 | 多设备 | veth 对测试 | `add_veth_stack` 和 `remove_veth_stack` |
@@ -606,13 +560,16 @@ try_capture_arp_reply(&self.buf, ifindex);
 
 ## 8. 已知问题
 
-1. **单核限制**：当前系统为单核，`NET_INTERFACE.inner` 使用 `spin::Mutex`。多核环境下需要改为更细粒度的锁或无锁结构。
+1. **单栈串行限制**：目录已经拆成 per-device `DeviceStackCell`，但同一设备的
+   smoltcp Interface 与 SocketSet 仍由一把锁串行化；v1 不提供多队列数据面。
 
 2. **TCP 清理延迟**：`TCP_SOCKETS_TO_REMOVE` 循环重试可能导致极少数情况下 socket 销毁延迟 1 到 2 个 poll 周期。这通常不会影响功能，但在大量短连接场景（连接数每秒超过 1000）下可能积压。
 
-3. **UDP 接收缓冲区竞争**：`dispatch_udp_packets` 和 `try_deliver_local` 各自操作 OS `UdpSocket.rx_queue`，但两者不同时执行（dispatch 在 poll 中，try_deliver_local 在 syscall 路径中），目前是安全的。未来添加多核支持时需要互斥。
+3. **CPU0 poll owner 的扩展性**：单 owner 简化了中断和锁序，但高 PPS、多设备同时
+   繁忙时可能成为瓶颈；必须先依据 poll/lock-busy 计数再决定是否引入 NAPI 风格预算。
 
-4. **DHCP 超时无回退**：DHCP 探测超时（5 秒）后 eth0 无 IP 地址，系统继续运行但网络不可用。没有后续重试或无状态地址自动配置机制。
+4. **DHCP 无静态回退**：DHCP 状态机会持续重试和续租，但没有可用服务器时 eth0
+   保持无 IPv4 地址；当前也没有 IPv4 link-local 或 IPv6 SLAAC 回退。
 
 5. **ARP 表老化机制缺失**：`NEIGHBOUR_TABLE` 是全局持久表（`BTreeMap`），条目不会自动过期。删除依赖 netlink `RTM_DELNEIGH` 或手动干预，缺少 Linux 内核的周期性 NUD 超时回收机制。高 ARP 压力场景下条目可能持续膨胀。
 

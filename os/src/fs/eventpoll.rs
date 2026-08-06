@@ -149,7 +149,7 @@ impl EventPoll {
     fn scan(&self, collect_wait: bool) -> EPollScan {
         // scan 只读取既有 pollee/event queue 状态；真实 smoltcp 推进由 CPU0 poll
         // worker 完成。这样 WaitQueue 的条件重检不会在队列锁内重入网络锁。
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         let items = self.snapshot_items();
         let mut wait_queues = Vec::new();
 
@@ -469,6 +469,9 @@ impl EventPoll {
         } else if timeout == -1 {
             None
         } else if timeout == 0 {
+            // 零超时不能等待 CPU0 worker；在无 EventPoll/File/N2 锁时做一次
+            // 有界 try-lock 扫描，忙栈交给下一 tick 重试。
+            NET_INTERFACE.poll_now();
             self.scan(false);
             let ready = self.take_ready(maxevents);
             self.disable_oneshot(&ready);

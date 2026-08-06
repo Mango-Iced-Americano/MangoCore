@@ -31,7 +31,7 @@ related_docs:
 | [device-stack-and-poll.md](device-stack-and-poll.md) | NetInterface、DeviceStack、polling、socket handle 管理 |
 | [device-adapter.md](device-adapter.md) | IfaceDevice、SmoltcpDeviceAdapter、NullNetDevice |
 | [net-core-iface.md](net-core-iface.md) | Iface trait、IfaceCommon、设备注册中心、ioctl |
-| [routing.md](routing.md) | RouteSocketHandle、SocketBinding、FIB、route_output |
+| [routing.md](routing.md) | RouteSocketHandle、route 目录、本地 binding、FIB、route_output |
 | [neighbour.md](neighbour.md) | NEIGHBOUR_TABLE、ARP 捕获 |
 | [dhcp.md](dhcp.md) | DHCP 初始化流程 |
 

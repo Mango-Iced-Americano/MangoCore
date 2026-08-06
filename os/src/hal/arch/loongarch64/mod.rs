@@ -40,6 +40,11 @@ pub fn kernel_tlb_invalidate() {
     tlb::tlb_global_invalidate();
 }
 
+/// 在创建内核页表前按固件 DRAM 上界建立恒等映射 dirty 元数据。
+pub fn init_kernel_mapping_metadata() {
+    laflex::init_identity_dirty_tracking();
+}
+
 /// 清除当前 core 上所有用户/non-global TLB 翻译。
 ///
 /// LoongArch `invtlb 0x3` 按 G 位筛选，不读取当前 ASID；因此 IPI handler
@@ -60,9 +65,7 @@ pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
 /// 按 LoongArch 硬件的相邻偶/奇页 entry 粒度失效有界区间。
 pub fn user_tlb_invalidate_range(asid: u16, range: crate::mm::VPNRange) {
     assert_ne!(asid, tlb::KERN_ASID, "precise user TLB flush used ASID 0");
-    debug_assert!(
-        range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES
-    );
+    debug_assert!(range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES);
     tlb::tlb_invalidate_user_range(asid, range);
 }
 

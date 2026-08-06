@@ -44,7 +44,9 @@ eventfd、timerfd、pidfd 和 signalfd 是四种通过标准文件描述符接�
 - 支持 `*_NONBLOCK` 和 `*_CLOEXEC` 标志
 - 集成 VFS 框架，通过 `File` / `FdTable` 管理
 
-注意各 fd 的 epoll/poll 集成程度不同：eventfd、timerfd 完整支持 `poll()` 和 `read_event_queue()`；pidfd 只实现 `poll()`，没有 `read_event_queue()`；signalfd 有 `poll()` 和 `is_stream() -> true`，但没有 `read_event_queue()`。
+注意各 fd 的 epoll/poll 集成程度不同：eventfd、timerfd 完整支持 `poll()` 和 inode-owned
+`read_event_queue()`；pidfd 只实现 `poll()`，没有 `read_event_queue()`；signalfd 同时支持
+`poll()`、阻塞 `read()` 和事件订阅，但它的等待队列属于当前 sighand，不属于共享 inode。
 
 ## eventfd -- 事件通知 fd
 
@@ -237,6 +239,12 @@ struct SignalFd {
 ```
 
 `Signals` 是一个 `bitflags` 值，表示当前 signalfd 接收的信号集合。掩码可以通过第二次 `sys_signalfd4` 调用（带已有 fd）修改。
+`SIGKILL` 和 `SIGSTOP` 不能被 signalfd 消费，创建或更新时会从 mask 中静默移除。
+
+`SignalFd` 故意不保存等待队列。fork 后父子可共享同一个 `Arc<File>` 和 mask，但普通 fork
+会创建独立 sighand，pending 信号也分别属于父子。VFS 因此通过
+`ReadWaitSource::CurrentSighand` 在每次 read/poll 时解析当前任务的 `signalfd_events`，避免
+继承 fd 的子进程继续睡在父进程队列上；`CLONE_SIGHAND` 线程则自然共享同一通知域。
 
 ### 读语义
 
@@ -272,6 +280,16 @@ struct SignalfdSiginfo {
 
 `poll()` 检查当前线程和进程是否有匹配 signalfd 掩码的待处理信号。可读时返回 `EPOLLIN | EPOLLRDNORM`。
 
+信号生产者先在线程 private pending 或进程 shared pending 的权威锁内完成入队，释放锁后再
+通知 sighand 的 `EventWaitQueue`。通知本身不保存信号，只促使 read/poll 重查 pending；因此
+虚假唤醒安全，而信号消费仍由 pending 队列的锁唯一化。修改共享 signalfd mask 后也会通知
+当前 sighand，让已阻塞读者立即按新 mask 重查。
+
+和 Linux 一样，epoll 在注册 signalfd 时订阅当时调用者的 sighand。fork 后继承的 epoll 项
+不会自动改绑到 child sighand；child 若要监听自己的信号，应在 fork 后重新执行 `epoll_ctl()`。
+对应语义可对照 [Linux 6.6 signalfd 实现](https://github.com/torvalds/linux/blob/v6.6/fs/signalfd.c)
+和 [signalfd(2)](https://man7.org/linux/man-pages/man2/signalfd.2.html)。
+
 ### 实现位置
 
 `SignalFd` 和 `sys_signalfd4` 实现在 `os/src/syscall/process/signal.rs`。与信号系统的集成点包括 `take_pending_signal_matching()`（读）和 `has_pending_signal_matching()`（poll）。
@@ -297,6 +315,7 @@ struct SignalfdSiginfo {
 | `timerfd*` | timerfd_create、timerfd_settime 相对/绝对时间、周期性定时器 |
 | `pidfd*` | pidfd_open、pidfd_send_signal、pidfd_getfd |
 | `signalfd*` | signalfd 创建、掩码修改、信号读取、非阻塞模式 |
+| L4 `signalfd` | 延迟信号唤醒阻塞 read、fork 继承 fd 后动态绑定 child sighand |
 
 OSComp 基础测试（mask=0x001）包含以上四种 fd 的冒烟测试。
 

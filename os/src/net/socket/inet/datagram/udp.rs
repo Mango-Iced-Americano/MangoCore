@@ -27,7 +27,7 @@ use smoltcp::{
 
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::port::{
-    AddressFamily, BindIntent, PortManager, PortReservation, TransportProtocol,
+    AddressFamily, AutoBindPurpose, BindIntent, PortReservation, TransportProtocol,
 };
 use crate::net::socket::inet::common::BoundInner;
 use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
@@ -66,9 +66,8 @@ impl Socket for UdpSocket {
     ///
     /// # Semantics
     ///
-    /// 规范化 IPv4-mapped IPv6 地址，处理 `port=0` 的临时端口分配（
-    /// `PortManager::alloc_ephemeral_port()`）。通过 `NET_INTERFACE.udp_routed_socket()`
-    /// 在 smoltcp socket set 中调用 `socket.bind()`。
+    /// 规范化 IPv4-mapped IPv6 地址。`port=0` 已由 `PortRegistry` 在进入本方法前
+    /// 选择并预留；这里通过 `NET_INTERFACE.udp_routed_socket()` 调用 socket.bind()。
     ///
     /// # Locking
     ///
@@ -102,14 +101,14 @@ impl Socket for UdpSocket {
         log::info!("[Udp::bind] bind to {:?}", addr);
         // PortRegistry 已在 N0 为 port=0 选择并保留端口；这里绝不能重新分配。
         let bind_addr = addr;
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         NET_INTERFACE
             .udp_routed_socket(self.socket_handler, |socket| {
                 socket.bind(bind_addr).ok().ok_or(SyscallErr::EINVAL)
             })
             .ok_or(SyscallErr::EAGAIN)??;
         self.inner.lock().local_endpoint = Some(bind_addr);
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         let ifindex = crate::net::net_core::ifindex_for_local_addr(bind_addr.addr);
         self.bound
             .lock()
@@ -156,6 +155,45 @@ impl Socket for UdpSocket {
         *self.port_reservation.lock() = Some(reservation);
     }
 
+    fn auto_bind_endpoint(
+        &self,
+        peer: Option<&Endpoint>,
+        purpose: AutoBindPurpose,
+    ) -> Result<Option<Endpoint>, SyscallErr> {
+        let remote = {
+            let inner = self.inner.lock();
+            if inner.local_endpoint.is_some() {
+                return Ok(None);
+            }
+            inner.remote_endpoint
+        };
+        let peer = match purpose {
+            AutoBindPurpose::Connect | AutoBindPurpose::Send => peer
+                .and_then(|endpoint| match endpoint {
+                    Endpoint::Ip(endpoint) => Some(*endpoint),
+                    _ => None,
+                })
+                .or(remote),
+            AutoBindPurpose::Listen => return Ok(None),
+        };
+        let Some(peer) = peer else {
+            return Ok(None);
+        };
+        let peer_addr = self.normalize_ipv4_mapped(peer.addr);
+        let route_addr = if peer_addr.is_unspecified() {
+            match peer_addr {
+                IpAddress::Ipv4(_) => IpAddress::v4(127, 0, 0, 1),
+                IpAddress::Ipv6(_) => IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1),
+            }
+        } else {
+            peer_addr
+        };
+        Ok(Some(Endpoint::Ip(IpEndpoint::new(
+            lookup_source_ip(route_addr),
+            0,
+        ))))
+    }
+
     fn listen(&self) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
@@ -164,14 +202,12 @@ impl Socket for UdpSocket {
     ///
     /// # Semantics
     ///
-    /// 存储 `remote_endpoint` 到 `self.inner`。若 socket 尚未绑定（`local.port==0`），
-    /// 通过 `NET_INTERFACE.udp_routed_socket()` 调用 smoltcp `socket.bind()` 自动
-    /// 分配临时端口和源 IP。`unspecified` 远程地址映射为 127.0.0.1 / ::1。
+    /// syscall 层先经 `PortManager::ensure_auto_bound()` 绑定本地端点，再存储
+    /// `remote_endpoint`。`unspecified` 远程地址映射为 127.0.0.1 / ::1。
     ///
     /// # Locking
     ///
-    /// 获取 `self.inner` 锁。`NET_INTERFACE.udp_routed_socket()` 闭包内调用
-    /// `socket.bind()` 不持锁。
+    /// 只短暂获取 `self.inner` 锁；PortRegistry 和 DeviceStack 都不在此路径嵌套。
     ///
     /// # Errors
     ///
@@ -196,57 +232,18 @@ impl Socket for UdpSocket {
             ep
         };
         log::info!("[Udp::connect] connect to {:?}", remote_endpoint);
+        let local_ep = self.inner.lock().local_endpoint.ok_or(SyscallErr::EINVAL)?;
         {
             let mut inner = self.inner.lock();
             inner.remote_endpoint = Some(remote_endpoint);
         }
-        NET_INTERFACE.poll();
-        let local_ep = NET_INTERFACE
-            .udp_routed_socket(self.socket_handler, |socket| {
-                let local = socket.endpoint();
-                info!("[Udp::connect] local: {:?}", local);
-                if local.port == 0 {
-                    info!("[Udp::connect] don't have local");
-                    let src_ip = lookup_source_ip(remote_endpoint.addr);
-                    let port =
-                        crate::net::socket::inet::common::PortManager::alloc_ephemeral_port();
-
-                    let endpoint = IpListenEndpoint {
-                        addr: Some(src_ip),
-                        port,
-                    };
-
-                    let ret = socket.bind(endpoint);
-                    if ret.is_err() {
-                        match ret.err().unwrap() {
-                            socket::udp::BindError::Unaddressable => {
-                                info!("[Udp::bind] unaddr");
-                                return Err(SyscallErr::EINVAL);
-                            }
-                            socket::udp::BindError::InvalidState => {
-                                info!("[Udp::bind] invaild state");
-                                return Err(SyscallErr::EINVAL);
-                            }
-                        }
-                    }
-                    log::info!("[Udp::bind] bind to {:?}", endpoint);
-                    Ok(endpoint)
-                } else {
-                    Ok(local)
-                }
-            })
-            .ok_or(SyscallErr::EAGAIN)??;
-        self.inner.lock().local_endpoint = Some(local_ep);
         let ifindex = crate::net::net_core::ifindex_for_local_addr(local_ep.addr);
-        self.bound
-            .lock()
-            .bind(self.socket_handler, ifindex, local_ep.addr, local_ep.port);
         log::debug!(
             "udp_connect: remote={:?} ifindex={}",
             remote_endpoint,
             ifindex
         );
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         Ok(0)
     }
 
@@ -280,10 +277,10 @@ impl Socket for UdpSocket {
     }
 
     fn local_endpoint(&self) -> Option<Endpoint> {
-        NET_INTERFACE.poll();
+        // endpoint accessor 只读取已经提交的绑定状态。网络推进由 syscall 的
+        // 显式 poll 路径或 CPU0 worker 负责，避免 /proc 等查询触发全局扫描。
         let local: Option<IpListenEndpoint> =
             NET_INTERFACE.udp_routed_socket(self.socket_handler, |socket| socket.endpoint());
-        NET_INTERFACE.poll();
         local.map(|ep| {
             let addr = ep.addr.unwrap_or_else(|| match self.ip_version {
                 IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
@@ -459,7 +456,7 @@ impl Socket for UdpSocket {
     ///
     /// 从 `self.inner.rx_queue` 弹出最早的数据报（`VecDeque` 前端）。
     /// 将最多 `buf.len()` 字节数据复制到 `buf` 中，返回 `(本地读取长度, Some(Endpoint::Ip(remote)))`。
-    /// 队列由 `dispatch_udp_packets()` 填充，该函数在每次 `NET_INTERFACE.poll()` 后调用。
+    /// 队列由 CPU0 poll worker 的 `dispatch_udp_packets()` 填充。
     ///
     /// **阻塞模型**：`try_xxx` 模式——仅消费已有数据，不等待。队列为空时返回
     /// `EAGAIN`，调用者通过 `recv_wait_queue` 进入阻塞等待。
@@ -590,7 +587,7 @@ impl Socket for UdpSocket {
     fn socket_r_ready(&self) -> bool {
         // epoll/poll 的 state scan 只能读取已发布队列状态；poll worker 会在锁外
         // 分发 UDP 包并通知 recv_waiters，不能从这里重入 smoltcp。
-        NET_INTERFACE.kick_from_task();
+        NET_INTERFACE.request_poll();
         self.recv_ready()
     }
 
@@ -652,7 +649,7 @@ impl UdpSocket {
             .add_routed_socket(InetProtocol::Udp, socket)
             .unwrap();
         log::info!("[UdpSocket::new] new {}", socket_handler);
-        NET_INTERFACE.poll();
+        NET_INTERFACE.request_poll();
         Self {
             inner: Mutex::new(UdpSocketInner {
                 remote_endpoint: None,
@@ -755,11 +752,8 @@ impl UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        let reservation = self.port_reservation.lock().take();
-        if let Some(reservation) = reservation {
-            // 释放与本 socket Weak 身份相同的一个 owner；reuse peer 不受影响。
-            reservation.release();
-        }
+        // 唯一 reservation 离开 socket 后由其 Drop 按 token + Weak 身份精确释放。
+        drop(self.port_reservation.lock().take());
         // log::info!(
         //     "[UdpSocket::drop] drop socket {}, remoteep {:?}, localep {:?}",
         //     self.socket_handler,
@@ -778,7 +772,7 @@ impl Drop for UdpSocket {
 
 impl UdpSocket {
     fn _read<'a>(&'a self, buf: &'a mut [u8]) -> GeneralRet<usize> {
-        NET_INTERFACE.poll();
+        NET_INTERFACE.poll_now();
 
         let mut inner = self.inner.lock();
         if let Some((data, remote)) = inner.rx_queue.pop_front() {
@@ -862,7 +856,9 @@ pub(crate) fn dispatch_udp_packets(deliveries: Vec<UdpPacketDelivery>) {
         };
         {
             let mut inner = socket.inner.lock();
-            inner.rx_queue.push_back((delivery.payload, delivery.remote));
+            inner
+                .rx_queue
+                .push_back((delivery.payload, delivery.remote));
         }
         socket
             .recv_waiters
@@ -915,33 +911,33 @@ fn find_best_match(
     let mut best_score = 0;
 
     for sock in sockets {
-            let inner = sock.inner.lock();
-            let local_match = inner.local_endpoint.map(|l| l.port).unwrap_or(0) == local.port;
+        let inner = sock.inner.lock();
+        let local_match = inner.local_endpoint.map(|l| l.port).unwrap_or(0) == local.port;
 
-            // 如果本地端口匹配，计算匹配得分
-            if local_match {
-                let score = match inner.remote_endpoint {
-                    // 1. 完美匹配：这是专门负责这个远端的 Socket
-                    Some(ep) if ep == remote => 2,
+        // 如果本地端口匹配，计算匹配得分
+        if local_match {
+            let score = match inner.remote_endpoint {
+                // 1. 完美匹配：这是专门负责这个远端的 Socket
+                Some(ep) if ep == remote => 2,
 
-                    // 2. 名花有主：已经 connect 了别的地址，绝不能收这个包
-                    Some(_) => 0,
+                // 2. 名花有主：已经 connect 了别的地址，绝不能收这个包
+                Some(_) => 0,
 
-                    // 3. 备胎/监听者：没有 connect 任何地址，可以接纳新来的包
-                    None => 1,
-                };
-                log::debug!(
-                    "[find_best_match] remote={:?} local_port={} remote_ep={:?} score={}",
-                    remote,
-                    local.port,
-                    inner.remote_endpoint,
-                    score
-                );
-                if score > best_score {
-                    best_score = score;
-                    best_match = Some(Arc::clone(sock));
-                }
+                // 3. 备胎/监听者：没有 connect 任何地址，可以接纳新来的包
+                None => 1,
+            };
+            log::debug!(
+                "[find_best_match] remote={:?} local_port={} remote_ep={:?} score={}",
+                remote,
+                local.port,
+                inner.remote_endpoint,
+                score
+            );
+            if score > best_score {
+                best_score = score;
+                best_match = Some(Arc::clone(sock));
             }
+        }
     }
     best_match
 }

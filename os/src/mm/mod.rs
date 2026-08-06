@@ -43,7 +43,7 @@ pub use address::PPNRange;
 pub(crate) use address::VPNRange;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub(crate) use address_space::UserVmContext;
-pub use address_space::{AddressSpace, AddressSpaceInner, MemoryError};
+pub use address_space::{AddressSpace, AddressSpaceInner, FaultOutcome, MemoryError, RetryWait};
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
     frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
@@ -67,6 +67,7 @@ pub use sysctl::{
 };
 pub(crate) use tlb::{TlbContext, TlbFlush};
 pub use vma::{MapFlags, MapPermission};
+pub(crate) use vma::{FileVmaRmap, FileVmaSnapshot, Vma};
 type MmResult<T> = Result<T, MemoryError>;
 
 /// Stack alignment required whenever the kernel enters userspace.
@@ -77,25 +78,10 @@ type MmResult<T> = Result<T, MemoryError>;
 pub const USER_STACK_ABI_ALIGN: usize = 16;
 #[allow(unused_imports)]
 pub use uaccess::{
-    check_user_range,
-    copy_from_user,
-    copy_from_user_array,
-    copy_to_user,
-    copy_to_user_array,
-    copy_to_user_string,
-    fault_in_user_range,
-    get_from_user,
-    translated_str,
-    try_get_from_user,
-    user_accessible_len,
-    UserBuffer,
-    UserBufferReader,
-    UserBufferWriter,
-    UserCString,
-    UserIoVec,
-    UserPtr,
-    UserPtrMut,
-    UserSlice,
+    check_user_range, copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array,
+    copy_to_user_string, fault_in_user_range, get_from_user, translated_str, try_get_from_user,
+    user_accessible_len, UserBuffer, UserBufferReader, UserBufferWriter, UserCString, UserIoVec,
+    UserPtr, UserPtrMut, UserSlice,
 };
 
 /// 初始化内核堆、物理页帧分配器并激活内核页表。
@@ -108,6 +94,9 @@ pub fn init() {
     heap_allocator::init_heap();
     #[cfg(feature = "heap_trace")]
     heap_trace::enable();
+    // LA64 的恒等映射没有叶子 PTE，必须先按运行期 DRAM 上界建立软件 dirty
+    // 元数据；RV64 在真实 PTE 中记录 dirty，此架构钩子为空操作。
+    crate::hal::init_kernel_mapping_metadata();
     frame_allocator::init_frame_allocator();
     activate_kernel_page_table();
 }

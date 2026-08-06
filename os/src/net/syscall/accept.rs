@@ -15,16 +15,16 @@ use core::sync::atomic::Ordering;
 /// `TCP_SOCKETS` 表。若 `addr != 0`，将 peer 地址写入用户空间。
 ///
 /// **阻塞模式**：在 `WaitQueue::wait_until_interruptible` 中循环，每次迭代
-/// 调用 `socket.accept()`。遵循 harness-patterns 规则：`NET_INTERFACE.try_poll()`
-/// 在循环外调用，永不放入 `WaitQueue` 条件闭包内。
+/// 调用 `socket.accept()`。进入等待前只向 CPU0 worker 发布一次请求；后续进展
+/// 通过可靠 WaitQueue 通知唤醒。
 /// 计数器 `ACCEPT_WAITER_COUNT` 防止无阻塞任务时的昂贵监听器扫描。
 ///
-/// **非阻塞模式**：单次 `socket.accept()` 尝试。
+/// **非阻塞模式**：先做一次不等待的有界 poll，再单次尝试 `socket.accept()`。
 ///
 /// # Locking
 ///
-/// `WaitQueue` 条件闭包内不得调用 `NET_INTERFACE.poll()` —— 这在 smoltcp
-/// 内部持锁时会导致死锁或活锁。
+/// 普通 `WaitQueue` 条件闭包不持有队列锁。这里仍只做 `accept()`，避免每次
+/// 条件复查都主动扫描全局网络栈，把事件驱动等待退化为忙轮询。
 ///
 /// # Errors
 ///
@@ -47,14 +47,14 @@ pub fn sys_accept(sockfd: u32, addr: usize, addrlen: usize) -> isize {
 
     if let Some(wait_queue) = socket.accept_wait_queue() {
         if is_nonblock {
+            NET_INTERFACE.poll_now();
             match socket.accept(sockfd, addr, addrlen) {
                 Ok(n) => n as isize,
                 Err(e) => -(e as isize),
             }
         } else {
-            // Pre-poll OUTSIDE the WaitQueue closure — harness-patterns rule:
-            // never put poll inside WaitQueue condition closure.
-            NET_INTERFACE.try_poll();
+            // 只在条件闭包外发布请求；闭包本身只能消费 accept 状态。
+            NET_INTERFACE.request_poll();
 
             ACCEPT_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
             let result = loop {

@@ -304,8 +304,9 @@ __smp_timer_probe_end:
 );
 
 // 用户探针只做普通访存，不通过 syscall/yield 重新进入内核。a0/a1 分别是
-// 待换页与进度页，a2/a3 是 old/new canary；因此完成标记能证明 CPU1 的
-// 第二次 load 已经越过真实 PPN 替换，而不是内核代替用户读取页表。
+// 待换页与进度页，a2/a3/a4 是原页、CoW 页和重映射页的 canary。前三个标记
+// 证明 CPU1 的 load 越过 CoW 与 munmap/remap；标记 5 由 CPU0 在 mprotect 返回后
+// 发布，此后的 store 必须触发 SIGSEGV，不得执行到失败标记 4。
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
     r#"
@@ -326,11 +327,29 @@ __smp_stale_tlb_probe_start:
     fence rw, rw
     addi t1, zero, 2
     sd t1, 0(a1)
-    addi a0, zero, 0
+.Lstale_tlb_remap_wait:
+    ld t0, 0(a0)
+    beq t0, a3, .Lstale_tlb_remap_wait
+    bne t0, a4, .Lstale_tlb_fail
+    # 先在旧 RW 权限下执行一次 store，排除只验证过可读 TLB 的假阳性。
+    sd a4, 0(a0)
+    fence rw, rw
+    addi t1, zero, 3
+    sd t1, 0(a1)
+.Lstale_tlb_protect_wait:
+    ld t1, 0(a1)
+    addi t2, zero, 5
+    bne t1, t2, .Lstale_tlb_protect_wait
+    # 正确的远程降权应在这条 store 触发 SIGSEGV，后续代码不应执行。
+    sd a2, 0(a0)
+    fence rw, rw
+    addi t1, zero, 4
+    sd t1, 0(a1)
+    addi a0, zero, 1
     j .Lstale_tlb_exit
 .Lstale_tlb_fail:
     fence rw, rw
-    addi t1, zero, 3
+    addi t1, zero, 4
     sd t1, 0(a1)
     addi a0, zero, 1
 .Lstale_tlb_exit:
@@ -364,11 +383,29 @@ __smp_stale_tlb_probe_start:
     dbar 0
     addi.d $t1, $zero, 2
     st.d $t1, $a1, 0
-    move $a0, $zero
+.Lstale_tlb_remap_wait:
+    ld.d $t0, $a0, 0
+    beq $t0, $a3, .Lstale_tlb_remap_wait
+    bne $t0, $a4, .Lstale_tlb_fail
+    # 先在旧 RW 权限下执行一次 store，排除只验证过可读 TLB 的假阳性。
+    st.d $a4, $a0, 0
+    dbar 0
+    addi.d $t1, $zero, 3
+    st.d $t1, $a1, 0
+.Lstale_tlb_protect_wait:
+    ld.d $t1, $a1, 0
+    addi.d $t2, $zero, 5
+    bne $t1, $t2, .Lstale_tlb_protect_wait
+    # 正确的远程降权应在这条 store 触发 SIGSEGV，后续代码不应执行。
+    st.d $a2, $a0, 0
+    dbar 0
+    addi.d $t1, $zero, 4
+    st.d $t1, $a1, 0
+    addi.d $a0, $zero, 1
     b .Lstale_tlb_exit
 .Lstale_tlb_fail:
     dbar 0
-    addi.d $t1, $zero, 3
+    addi.d $t1, $zero, 4
     st.d $t1, $a1, 0
     addi.d $a0, $zero, 1
 .Lstale_tlb_exit:
@@ -428,10 +465,10 @@ static AP_USER_TLB_FREE_DURING_WAIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static AP_USER_TLB_REQUEST_BEFORE: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID: AtomicUsize = AtomicUsize::new(0);
 static AP_SHARED_MM_ASID_READY: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_START: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_READY: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_DONE: AtomicUsize = AtomicUsize::new(0);
-static RANGE_SYNC_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_START: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_READY: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_DONE: AtomicUsize = AtomicUsize::new(0);
+static PTE_UPDATE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_START: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_PHASE: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_MM_ERRORS: AtomicUsize = AtomicUsize::new(0);
@@ -471,6 +508,12 @@ static EXEC_IDENTITY_CHECKED: AtomicUsize = AtomicUsize::new(0);
 static EXEC_IDENTITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static MEMBARRIER_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
 static MEMBARRIER_REMOTE_RELEASE: AtomicUsize = AtomicUsize::new(0);
+const AP_BARRIER_WAITING: usize = 0;
+const AP_BARRIER_PASSED: usize = 1;
+const AP_BARRIER_FAILED: usize = 2;
+static AP_BARRIER_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+static AP_BARRIER_RESULT: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(AP_BARRIER_WAITING) }; crate::smp::MAX_CPUS];
 
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
@@ -513,10 +556,13 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::secondary_cpus_enter_idle_context",
             secondary_cpus_enter_idle_context,
         ),
-        KernelTest::new("smp::bsp_to_ap_ipi_ping", bsp_to_ap_ipi_ping),
         KernelTest::new(
-            "smp::bsp_broadcasts_ipi_to_all_aps",
-            bsp_broadcasts_ipi_to_all_aps,
+            "smp::bsp_to_ap_memory_barrier",
+            bsp_to_ap_memory_barrier,
+        ),
+        KernelTest::new(
+            "smp::bsp_broadcasts_memory_barrier_to_all_aps",
+            bsp_broadcasts_memory_barrier_to_all_aps,
         ),
         KernelTest::new(
             "smp::kernel_timer_irq_is_deferred",
@@ -526,7 +572,10 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::user_timer_preempts_on_secondary_cpu",
             user_timer_preempts_on_secondary_cpu,
         ),
-        KernelTest::new("smp::ap_to_bsp_ipi_round_trip", ap_to_bsp_ipi_round_trip),
+        KernelTest::new(
+            "smp::ap_to_bsp_memory_barrier",
+            ap_to_bsp_memory_barrier,
+        ),
         KernelTest::new(
             "smp::syscall_irq_window_survives_schedule",
             syscall_irq_window_survives_schedule,
@@ -578,12 +627,12 @@ pub fn tests() -> Vec<KernelTest> {
             user_tlb_range_sync_uses_arch_backend,
         ),
         KernelTest::new(
-            "smp::remote_user_load_observes_cow_after_range_shootdown",
-            remote_user_load_observes_cow_after_range_shootdown,
+            "smp::remote_user_pte_updates_take_effect",
+            remote_user_pte_updates_take_effect,
         ),
         KernelTest::new(
-            "smp::concurrent_range_shootdowns_keep_payloads_separate",
-            concurrent_range_shootdowns_keep_payloads_separate,
+            "smp::concurrent_pte_updates_keep_shootdowns_separate",
+            concurrent_pte_updates_keep_shootdowns_separate,
         ),
         KernelTest::new(
             "smp::user_tlb_retirement_waits_for_ack",
@@ -664,7 +713,7 @@ fn build_ktest_sibling(
     let kstack = crate::hal::kstack_alloc();
     let task_cx =
         crate::task::TaskContext::goto_address(entry as usize, kstack.get_top());
-    let task = crate::task::TaskControlBlock::new_ktest_independent(
+    let task = crate::task::TaskControlBlock::new_kernel_only(
         tid, process, kstack, task_cx, entry,
     );
     task.set_initial_cpus_allowed(1usize << cpu);
@@ -1108,58 +1157,71 @@ fn exec_owner_becomes_group_leader() -> Result<(), &'static str> {
     crate::task::try_publish_task_on(owner.clone(), 0)
         .map_err(|_| "failed to publish non-leader exec owner")?;
 
-    let mut timed_out = false;
+    let mut failure = None;
     crate::hal::with_local_interrupts_enabled(|| {
         let deadline =
             crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(5));
         while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 1 {
-            if EXEC_IDENTITY_PHASE.load(Ordering::Acquire) == 2
-                || crate::hal::get_time() >= deadline
-            {
-                timed_out = true;
+            if EXEC_IDENTITY_PHASE.load(Ordering::Acquire) == 2 {
+                failure = Some("non-leader exec owner failed before identity exchange");
+                return;
+            }
+            if crate::hal::get_time() >= deadline {
+                failure = Some("non-leader exec owner did not publish exchanged identity");
                 return;
             }
             crate::task::run_task_safe_point();
         }
 
-        if owner.gettid() != process.pid || leader.gettid() != old_owner_tid {
+        if owner.gettid() != process.pid
+            || leader.gettid() != old_owner_tid
+            || !leader.exit_inactive.load(Ordering::Acquire)
+        {
             EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
         }
         drop(leader);
         // 等到旧 leader 的最后一个强引用真正消失，证明后续 registry 检查
         // 覆盖的是迟到 Drop，而不只是“可能已经回收”的时序猜测。
-        while leader_weak.upgrade().is_some() {
+        while leader_weak.strong_count() != 0 {
             drop(crate::task::take_zombie_tasks(64));
+            // 回收动作本身可能刚好释放最后一个调度 Arc；先确认结果再判断
+            // deadline，且不要用 Weak::upgrade() 给被观察对象续一轮强引用。
+            if leader_weak.strong_count() == 0 {
+                break;
+            }
             if crate::hal::get_time() >= deadline {
-                timed_out = true;
+                failure = Some("former exec leader TCB was not reclaimed");
                 break;
             }
             crate::task::run_task_safe_point();
         }
-        let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
-            .map(|registered| Arc::ptr_eq(&registered, &owner))
-            .unwrap_or(false);
-        if !pid_still_points_to_owner
-            || crate::task::find_task_by_tid(old_owner_tid).is_some()
-        {
-            EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+        if failure.is_none() {
+            let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
+                .map(|registered| Arc::ptr_eq(&registered, &owner))
+                .unwrap_or(false);
+            if !pid_still_points_to_owner
+                || crate::task::find_task_by_tid(old_owner_tid).is_some()
+            {
+                EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
+            }
         }
 
         EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
-        while EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 2
-            || owner.task_status() != crate::task::TaskStatus::Zombie
+        while failure.is_none()
+            && (EXEC_IDENTITY_PHASE.load(Ordering::Acquire) != 2
+                || owner.task_status() != crate::task::TaskStatus::Zombie)
         {
             if crate::hal::get_time() >= deadline {
-                timed_out = true;
+                failure = Some("new exec leader did not reach zombie state");
                 break;
             }
             crate::task::run_task_safe_point();
         }
     });
 
-    if timed_out {
+    if let Some(failure) = failure {
         EXEC_IDENTITY_CHECKED.store(1, Ordering::Release);
-        return Err("non-leader exec identity exchange timed out");
+        return Err(failure);
     }
     if EXEC_IDENTITY_ERRORS.load(Ordering::Acquire) != 0 {
         return Err("non-leader exec identity exchange broke a TID invariant");
@@ -1227,7 +1289,13 @@ fn build_user_task(
         if offset + program.len() > crate::config::PAGE_SIZE {
             return Err("user probe crossed its mapped page");
         }
-        pa.floor().get_bytes_array()[offset..offset + program.len()].copy_from_slice(program);
+        // Safety: 当前闭包独占测试地址空间，用户探针尚未发布，且范围检查
+        // 已证明程序完全位于这个已 fault-in 的物理页内。
+        unsafe {
+            pa.floor().with_bytes_mut(|page| {
+                page[offset..offset + program.len()].copy_from_slice(program)
+            });
+        }
         // 只在装载指令时开放写权限；任务发布前收紧为 RX，避免测试把 W+X
         // 映射带到 AP，也顺带覆盖正式的 mprotect/PTE 提交流程。
         space
@@ -1610,9 +1678,9 @@ fn read_shared_mm_asid_on_ap() {
 
 /// 同一 AddressSpace 在不同 CPU 上必须取得同一个 ASID；ASID 不再属于 TCB。
 fn address_space_owns_asid() -> Result<(), &'static str> {
-    let vm = Arc::new(crate::mm::AddressSpace::new(
+    let vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
+    );
     let local = vm.activate_on(crate::smp::BOOT_CPU_ID);
     #[cfg(target_arch = "loongarch64")]
     if local.asid == 0 {
@@ -1672,9 +1740,9 @@ fn asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
     } else {
         0
     };
-    let first_vm = Arc::new(crate::mm::AddressSpace::new(
+    let first_vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
+    );
     if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
         return Err("first rollover test MM received ASID 0");
     }
@@ -1731,66 +1799,43 @@ fn configured_cpus_are_online() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// CPU0 逐个唤醒 AP，并等待目标 CPU 在硬中断上下文发布 ack。
-fn bsp_to_ap_ipi_ping() -> Result<(), &'static str> {
-    let timeout_ticks = crate::hal::get_clock_freq();
+/// CPU0 逐个要求 AP 执行正式的 membarrier fence，并核对 request/ack。
+fn bsp_to_ap_memory_barrier() -> Result<(), &'static str> {
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        let expected = match crate::smp::send_ipi_ping(cpu_id) {
-            Ok(expected) => expected,
-            Err(error) => {
-                crate::println!("# SMP IPI send failed: cpu={} error={}", cpu_id, error);
-                return Err("failed to send BSP-to-AP IPI");
-            }
-        };
-        let deadline = crate::hal::get_time().saturating_add(timeout_ticks);
-        while crate::smp::ipi_ping_ack(cpu_id) != expected {
-            if crate::hal::get_time() >= deadline {
-                crate::println!(
-                    "# SMP IPI ack timeout: cpu={} expected={} observed={}",
-                    cpu_id,
-                    expected,
-                    crate::smp::ipi_ping_ack(cpu_id)
-                );
-                return Err("AP did not acknowledge IPI");
-            }
-            core::hint::spin_loop();
+        let before = crate::smp::memory_barrier_request(cpu_id);
+        crate::smp::synchronize_memory(1usize << cpu_id)
+            .map_err(|_| "failed to synchronize BSP-to-AP membarrier")?;
+        let request = crate::smp::memory_barrier_request(cpu_id);
+        if request != before.wrapping_add(1)
+            || crate::smp::memory_barrier_ack(cpu_id) < request
+        {
+            return Err("AP did not acknowledge the production membarrier request");
         }
     }
+    // 同步等待窗口可能接收本地 timer IRQ；在退出用例前消费正式 deferred work。
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
-/// CPU0 先发布全部 AP 的 mailbox，再连续敲响 doorbell，最后逐项等待 ack。
-fn bsp_broadcasts_ipi_to_all_aps() -> Result<(), &'static str> {
-    let targets = crate::smp::online_cpu_mask() & !(1usize << crate::smp::BOOT_CPU_ID);
-    let mut expected = [0usize; crate::smp::MAX_CPUS];
+/// CPU0 用一次正式 membarrier 广播覆盖全部在线 AP。
+fn bsp_broadcasts_memory_barrier_to_all_aps() -> Result<(), &'static str> {
+    let targets = crate::smp::online_cpu_mask();
+    let mut before = [0usize; crate::smp::MAX_CPUS];
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        expected[cpu_id] = crate::smp::ipi_ping_ack(cpu_id).wrapping_add(1);
+        before[cpu_id] = crate::smp::memory_barrier_request(cpu_id);
     }
 
-    if let Err(error) = crate::smp::send_ipi_mask(targets, crate::smp::IpiReason::PING) {
-        crate::println!(
-            "# SMP IPI broadcast failed: targets={:#x} error={}",
-            targets,
-            error
-        );
-        return Err("failed to broadcast BSP-to-AP IPI");
-    }
-
-    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+    crate::smp::synchronize_memory(targets)
+        .map_err(|_| "failed to broadcast the production membarrier")?;
     for cpu_id in 1..crate::smp::configured_cpu_count() {
-        while crate::smp::ipi_ping_ack(cpu_id) != expected[cpu_id] {
-            if crate::hal::get_time() >= deadline {
-                crate::println!(
-                    "# SMP IPI broadcast ack timeout: cpu={} expected={} observed={}",
-                    cpu_id,
-                    expected[cpu_id],
-                    crate::smp::ipi_ping_ack(cpu_id)
-                );
-                return Err("AP did not acknowledge broadcast IPI");
-            }
-            core::hint::spin_loop();
+        let request = crate::smp::memory_barrier_request(cpu_id);
+        if request != before[cpu_id].wrapping_add(1)
+            || crate::smp::memory_barrier_ack(cpu_id) < request
+        {
+            return Err("AP did not acknowledge the broadcast membarrier request");
         }
     }
+    crate::task::run_task_safe_point();
     Ok(())
 }
 
@@ -1986,72 +2031,83 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 反复验证 AP hard IRQ → idle deferred reply → CPU0 kernel trap 的完整闭环。
-fn ap_to_bsp_ipi_round_trip() -> Result<(), &'static str> {
+/// AP kernel task 使用正式 membarrier 协议向 CPU0 发起同步。
+fn ap_to_bsp_memory_barrier_helper() {
+    let cpu_id = crate::smp::cpu_id();
+    let rounds = AP_BARRIER_ROUNDS.load(Ordering::Acquire);
+    let mut result = AP_BARRIER_PASSED;
+    if cpu_id == crate::smp::BOOT_CPU_ID || rounds == 0 {
+        result = AP_BARRIER_FAILED;
+    } else {
+        for _ in 0..rounds {
+            if crate::smp::synchronize_memory(1usize << crate::smp::BOOT_CPU_ID).is_err() {
+                result = AP_BARRIER_FAILED;
+                break;
+            }
+        }
+    }
+    AP_BARRIER_RESULT[cpu_id].store(result, Ordering::Release);
+}
+
+/// 在 CPU0 开中断窗口内运行一个 AP→BSP 正式同步批次，并收回 helper。
+fn run_ap_to_bsp_memory_barriers(cpu_id: usize, rounds: usize) -> Result<(), &'static str> {
+    AP_BARRIER_ROUNDS.store(rounds, Ordering::Release);
+    AP_BARRIER_RESULT[cpu_id].store(AP_BARRIER_WAITING, Ordering::Release);
+    let task = crate::task::spawn_ktest_task_on(cpu_id, ap_to_bsp_memory_barrier_helper);
+    let deadline = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+
+    while AP_BARRIER_RESULT[cpu_id].load(Ordering::Acquire) == AP_BARRIER_WAITING {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP-to-BSP production membarrier timed out");
+        }
+        core::hint::spin_loop();
+    }
+    if AP_BARRIER_RESULT[cpu_id].load(Ordering::Acquire) != AP_BARRIER_PASSED {
+        return Err("AP-to-BSP production membarrier failed");
+    }
+
+    // helper 先发布结果再从 trampoline 进入退出路径。Zombie 状态早于实际
+    // context switch，必须继续等 AP current 槽清空，才能释放本地 Arc。
+    while task.task_status() != crate::task::TaskStatus::Zombie
+        || crate::task::processor::cpu_has_current(cpu_id)
+    {
+        if crate::hal::get_time() >= deadline {
+            return Err("AP membarrier helper did not leave its current slot");
+        }
+        core::hint::spin_loop();
+    }
+    drop(task);
+    drop(crate::task::take_zombie_tasks(64));
+    Ok(())
+}
+
+/// 反复验证 AP→BSP 的生产 mailbox、doorbell、kernel trap 与 ack 闭环。
+fn ap_to_bsp_memory_barrier() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
-        return Err("round-trip test ran on an AP");
+        return Err("AP-to-BSP membarrier test ran on an AP");
     }
     if crate::smp::configured_cpu_count() == 1 {
         return Ok(());
     }
 
-    // CPU0 的 kernel task 默认关中断。请求先送到 AP，随后只在受控窗口打开
-    // 本地全局中断接收 reply；每轮结束仍保持关中断。
+    const ROUNDS_PER_AP: usize = 64;
+    // AP 在正式同步入口等待 CPU0 ack，因此 CPU0 必须在整个批次保持 IRQ-on。
     let original_irq_state = crate::hal::local_irq_save();
-    let result = round_trip_all_aps();
+    crate::hal::local_irq_restore(true);
+    let mut result = Ok(());
+    for cpu_id in 1..crate::smp::configured_cpu_count() {
+        if let Err(error) = run_ap_to_bsp_memory_barriers(cpu_id, ROUNDS_PER_AP) {
+            result = Err(error);
+            break;
+        }
+    }
+    let _ = crate::hal::local_irq_save();
     // 受控窗口内可能同时收到 timer hard IRQ；用 B11 的生产安全点收尾，
     // 避免把 quiesced one-shot 留给后续测试或 shutdown。
     crate::task::run_task_safe_point();
     crate::hal::local_irq_restore(original_irq_state);
     result
-}
-
-fn round_trip_all_aps() -> Result<(), &'static str> {
-    const ROUNDS_PER_AP: usize = 64;
-
-    for cpu_id in 1..crate::smp::configured_cpu_count() {
-        let failures_before = crate::smp::ipi_send_failures(cpu_id);
-        for round in 0..ROUNDS_PER_AP {
-            let expected = match crate::smp::send_ipi_round_trip(cpu_id) {
-                Ok(expected) => expected,
-                Err(error) => {
-                    crate::println!(
-                        "# SMP round-trip request failed: cpu={} round={} error={}",
-                        cpu_id,
-                        round,
-                        error
-                    );
-                    return Err("failed to send round-trip request");
-                }
-            };
-
-            crate::hal::local_irq_restore(true);
-            let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-            while crate::smp::round_trip_reply_ack() != expected {
-                if crate::hal::get_time() >= deadline {
-                    let _ = crate::hal::local_irq_save();
-                    crate::println!(
-                        "# SMP round-trip timeout: cpu={} round={} expected={} observed={} send_failures={}",
-                        cpu_id,
-                        round,
-                        expected,
-                        crate::smp::round_trip_reply_ack(),
-                        crate::smp::ipi_send_failures(cpu_id)
-                    );
-                    return Err("AP-to-BSP IPI reply timed out");
-                }
-                core::hint::spin_loop();
-            }
-            if !crate::hal::local_irq_save() {
-                return Err("round-trip test lost its controlled interrupt window");
-            }
-        }
-
-        if crate::smp::ipi_send_failures(cpu_id) != failures_before {
-            return Err("AP failed to send a deferred IPI reply");
-        }
-    }
-    Ok(())
 }
 
 /// 读取并原样恢复本 CPU 的全局中断状态。
@@ -2102,9 +2158,9 @@ fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
             return Err("resumed task did not recover its IRQ window");
         }
 
-        // 窗口恢复后再接收一次真实 AP reply，证明不只是 CSR 位看起来
-        // 开启，而是 kernel trap 确实能在该任务上下文中往返。
-        receive_one_ap_reply_while_irqs_enabled()
+        // 窗口恢复后再接收一次 AP 发起的生产 membarrier，证明不只是 CSR
+        // 位看起来开启，而是 kernel IPI trap 确实能在该任务上下文中往返。
+        receive_ap_memory_barrier_while_irqs_enabled()
     });
 
     // helper 正常返回后必须恢复入口快照。先关中断再消费窗口内
@@ -2120,19 +2176,12 @@ fn syscall_irq_window_survives_schedule() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn receive_one_ap_reply_while_irqs_enabled() -> Result<(), &'static str> {
+fn receive_ap_memory_barrier_while_irqs_enabled() -> Result<(), &'static str> {
     if crate::smp::configured_cpu_count() == 1 {
         return Ok(());
     }
-    let expected = crate::smp::send_ipi_round_trip(1)
-        .map_err(|_| "failed to request AP reply inside syscall IRQ window")?;
-    let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while crate::smp::round_trip_reply_ack() != expected {
-        if crate::hal::get_time() >= deadline {
-            return Err("AP reply did not interrupt the syscall IRQ window");
-        }
-        core::hint::spin_loop();
-    }
+    run_ap_to_bsp_memory_barriers(1, 1)
+        .map_err(|_| "AP membarrier did not interrupt the syscall IRQ window")?;
     if !local_interrupts_enabled() {
         return Err("kernel IPI trap returned with syscall IRQ window closed");
     }
@@ -3053,6 +3102,7 @@ fn user_tlb_full_flush_reaches_online_cpus() -> Result<(), &'static str> {
 
 const STALE_TLB_OLD_VALUE: u64 = 0x1357_2468_89ab_cdef;
 const STALE_TLB_NEW_VALUE: u64 = 0xfedc_ba98_7654_3210;
+const STALE_TLB_REMAP_VALUE: u64 = 0xa55a_33cc_f00d_9696;
 
 /// 返回物理页首字的内核直映地址，不构造会和用户访存重叠的 Rust 引用。
 fn stale_tlb_word_ptr(ppn: crate::mm::PhysPageNum) -> *mut u64 {
@@ -3105,9 +3155,9 @@ fn restore_stale_tlb_probe_timer() {
         STALE_TLB_ERRORS.fetch_or(4, Ordering::Release);
     }
     let progress = STALE_TLB_PROGRESS_PTR.load(Ordering::Acquire);
-    if progress == 0 || !matches!(read_stale_tlb_word(progress), 2 | 3) {
-        // 成功路径若在结果发布前运行到这里，说明发生了意外调度，全刷可能
-        // 污染 stale-TLB 证据。失败清理路径也保留该位用于诊断。
+    if progress == 0 || !matches!(read_stale_tlb_word(progress), 3 | 4 | 5) {
+        // 这是防御性检查：正常 FIFO 顺序下 restore 只能在探针退出后运行。
+        // 若结果尚未发布，说明发生了意外调度，全刷可能污染 stale-TLB 证据。
         STALE_TLB_ERRORS.fetch_or(8, Ordering::Release);
     }
 
@@ -3119,9 +3169,10 @@ fn restore_stale_tlb_probe_timer() {
     crate::hal::local_irq_restore(irq_flags);
 }
 
-/// CPU1 先以用户 load 填充旧翻译，CPU0 再通过真实 CoW 更新同一 PTE。
-/// 探针只有在精确 shootdown 后读到新物理页的 canary 才能正常退出。
-fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static str> {
+/// CPU1 先以用户访存填充旧翻译；CPU0 依次执行真实 CoW、
+/// munmap/remap 和 RW->R mprotect。前两次必须读到新物理页，最后一次
+/// 必须让远端 store 产生 SIGSEGV，从硬件行为证明三类 PTE 更新都已生效。
+fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
         return Err("stale-TLB user probe did not run on CPU0");
     }
@@ -3136,11 +3187,17 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
 
     let old_frame = crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB old frame")?;
+    let remap_frame =
+        crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB remap frame")?;
     let progress_frame =
         crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB progress frame")?;
     let old_word = stale_tlb_word_ptr(old_frame.ppn) as usize;
     let progress_word = stale_tlb_word_ptr(progress_frame.ppn) as usize;
     write_stale_tlb_word(old_word, STALE_TLB_OLD_VALUE);
+    write_stale_tlb_word(
+        stale_tlb_word_ptr(remap_frame.ppn) as usize,
+        STALE_TLB_REMAP_VALUE,
+    );
     write_stale_tlb_word(progress_word, 0);
 
     let (task, _) = build_user_task(stale_tlb_probe_program())?;
@@ -3194,6 +3251,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         cx.gp.a1 = progress_addr;
         cx.gp.a2 = STALE_TLB_OLD_VALUE as usize;
         cx.gp.a3 = STALE_TLB_NEW_VALUE as usize;
+        cx.gp.a4 = STALE_TLB_REMAP_VALUE as usize;
     }
     task.set_initial_cpus_allowed(1usize << 1);
     STALE_TLB_PROGRESS_PTR.store(progress_word, Ordering::Release);
@@ -3210,7 +3268,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         || holder.task_status() != crate::task::TaskStatus::Running(1)
     {
         if crate::hal::get_time() >= holder_deadline {
-            write_stale_tlb_word(progress_word, 3);
+            write_stale_tlb_word(progress_word, 4);
             let restore =
                 crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
             STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
@@ -3237,7 +3295,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     }
 
     if parent.add_child(process.clone()).is_err() {
-        write_stale_tlb_word(progress_word, 3);
+        write_stale_tlb_word(progress_word, 4);
         let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
         STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
         let cleanup_deadline = crate::hal::get_time()
@@ -3272,12 +3330,12 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     loop {
         let progress = read_stale_tlb_word(progress_word);
         if progress == 1 {
-            // 与用户 probe 在 ready store 前的架构 fence 配对：看到 1 后，
-            // CPU0 才允许发布 PTE 修改和 shootdown。
+            // 看到 1 后再执行全屏障，保证用户 probe 在发布 ready 前完成的
+            // 旧页 load 已经发生；此后 CPU0 才允许修改 PTE 并发起 shootdown。
             fence(Ordering::SeqCst);
             break;
         }
-        if progress == 3 || process.is_zombie() {
+        if progress == 4 || process.is_zombie() {
             validation_error = Some("user probe rejected the initial stale-TLB canary");
             break;
         }
@@ -3299,12 +3357,10 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         } else {
             let target = crate::mm::VirtAddr::from(target_addr);
             let before = vm.read(|space| space.translate(target.floor()));
-            let cow = vm.write(|space| {
-                space.do_page_fault(target, crate::mm::FaultAccess::Store)?;
-                space
-                    .translate(target.floor())
-                    .ok_or(crate::mm::MemoryError::NotMapped)
-            });
+            let cow = vm
+                .fault_in_user_va_retry(target, crate::mm::FaultAccess::Store)
+                .map(|_| vm.read(|space| space.translate(target.floor())))
+                .and_then(|ppn| ppn.ok_or(crate::syscall::errno::EFAULT));
             match (before, cow) {
                 (Some(before), Ok(after)) if before == old_frame.ppn && after != before => {
                     new_ppn = Some(after);
@@ -3326,7 +3382,7 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         loop {
             match read_stale_tlb_word(progress_word) {
                 2 => break,
-                3 => {
+                4 => {
                     validation_error = Some("user probe read an unexpected post-COW canary");
                     break;
                 }
@@ -3338,11 +3394,90 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
             }
         }
     }
-    if crate::smp::user_tlb_request(1) != full_request_before {
-        validation_error.get_or_insert("one-page COW degraded to a full user-TLB flush");
-    }
     if new_ppn.is_some() && !vm.cpu_tlb_is_current(1) {
         validation_error.get_or_insert("range handler did not publish the observed MM generation");
+    }
+
+    if validation_error.is_none() {
+        let remapped = vm.write(|space| {
+            space
+                .munmap(target_addr, crate::config::PAGE_SIZE)
+                .map_err(|_| "production munmap rejected the target page")?;
+            let mapped = space.shm_mmap(
+                target_addr,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::W
+                    | crate::mm::MapPermission::U,
+                crate::mm::MapFlags::MAP_PRIVATE
+                    | crate::mm::MapFlags::MAP_ANONYMOUS
+                    | crate::mm::MapFlags::MAP_FIXED_NOREPLACE,
+                &[remap_frame.clone()],
+                true,
+            );
+            (mapped == target_addr as isize)
+                .then_some(())
+                .ok_or("fixed remap did not reuse the target VPN")
+        });
+        if let Err(error) = remapped {
+            validation_error = Some(error);
+        }
+    }
+
+    if validation_error.is_none() {
+        let remap_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        loop {
+            match read_stale_tlb_word(progress_word) {
+                3 => break,
+                4 => {
+                    validation_error = Some("user probe read a stale PPN after munmap/remap");
+                    break;
+                }
+                _ if crate::hal::get_time() >= remap_deadline => {
+                    validation_error = Some("CPU1 user load did not observe the remapped page");
+                    break;
+                }
+                _ => core::hint::spin_loop(),
+            }
+        }
+    }
+
+    if validation_error.is_none() {
+        // marker 3 在用户态的旧 RW 映射上完成一次 store 后才发布。
+        // 只有这个前置条件成立，后续写保护异常才能排除“PTE 原本就不可写”。
+        let protected = vm.write(|space| {
+            space.mprotect(
+                target_addr,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R | crate::mm::MapPermission::U,
+            )
+        });
+        if protected.is_err() {
+            validation_error = Some("production mprotect rejected the target page");
+        }
+    }
+
+    if validation_error.is_none() {
+        // AddressSpace::write() 已在返回前收齐远程 shootdown ack；此后
+        // 才放行 CPU1 的 store，因而成功写入只能说明它仍使用旧 W 权限。
+        write_stale_tlb_word(progress_word, 5);
+        let protect_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while !process.is_zombie() {
+            if read_stale_tlb_word(progress_word) == 4 {
+                validation_error = Some("CPU1 store bypassed the mprotect downgrade");
+                break;
+            }
+            if crate::hal::get_time() >= protect_deadline {
+                validation_error = Some("CPU1 store did not fault after mprotect");
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    if crate::smp::user_tlb_request(1) != full_request_before {
+        validation_error.get_or_insert("single-page updates degraded to a full user-TLB flush");
     }
 
     if validation_error.is_none() && !process.is_zombie() {
@@ -3367,9 +3502,11 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
         || crate::task::run_queue_count(1) != 0
     {
         if crate::hal::get_time() >= cleanup_deadline {
-            // 用户任务若仍在执行，可能继续通过旧 TLB 访问 source/progress。
-            // 测试已经失败，此处保留外部 owner，禁止返回后复用这两页。
+            // 用户任务若仍在执行，可能继续通过旧 TLB 访问 source、remap 或
+            // progress。测试已经失败，只能永久保留外部 owner，禁止分配器
+            // 在后续用例中复用这三页造成 UAF。
             core::mem::forget(old_frame);
+            core::mem::forget(remap_frame);
             core::mem::forget(progress_frame);
             return Err("stale-TLB probe cleanup did not quiesce CPU1");
         }
@@ -3391,8 +3528,11 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     if reaped.pid != pid {
         validation_error.get_or_insert("stale-TLB probe reaped the wrong child");
     }
-    if validation_error.is_none() && reaped.status != 0 {
-        validation_error = Some("stale-TLB user probe exited with failure");
+    if validation_error.is_none() {
+        let sigsegv = crate::task::Signals::SIGSEGV.to_signum().unwrap() as u32;
+        if reaped.status & 0x7f != sigsegv {
+            validation_error = Some("mprotect violation did not terminate the probe with SIGSEGV");
+        }
     }
     if STALE_TLB_ERRORS.load(Ordering::Acquire) != 0
         || STALE_TLB_TIMER_RESTORED.load(Ordering::Acquire) != 1
@@ -3401,6 +3541,11 @@ fn remote_user_load_observes_cow_after_range_shootdown() -> Result<(), &'static 
     }
     if read_stale_tlb_word(old_word) != STALE_TLB_OLD_VALUE {
         validation_error.get_or_insert("COW modified the retained source frame");
+    }
+    if read_stale_tlb_word(stale_tlb_word_ptr(remap_frame.ppn) as usize)
+        != STALE_TLB_REMAP_VALUE
+    {
+        validation_error.get_or_insert("mprotect violation modified the read-only frame");
     }
 
     drop(crate::task::take_zombie_tasks(usize::MAX));
@@ -3451,44 +3596,85 @@ fn user_tlb_range_sync_uses_arch_backend() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn run_concurrent_range_shootdown() {
+const CONCURRENT_PTE_BASE: usize = crate::config::ELF_PIE_BASE + 0x40_0000;
+const CONCURRENT_PTE_STRIDE: usize = 4 * crate::config::PAGE_SIZE;
+const CONCURRENT_PTE_ROUNDS: usize = 8;
+
+fn run_concurrent_pte_updates() {
     let cpu_id = crate::smp::cpu_id();
     let vm = SHARED_TLB_VM
         .lock()
         .as_ref()
-        .expect("concurrent range-shootdown VM missing")
+        .expect("concurrent PTE-update VM missing")
         .clone();
-    let asid = vm.activate_on(cpu_id).asid;
-    RANGE_SYNC_READY.fetch_add(1, Ordering::Release);
-    while RANGE_SYNC_START.load(Ordering::Acquire) == 0 {
+    vm.activate_on(cpu_id);
+    PTE_UPDATE_READY.fetch_add(1, Ordering::Release);
+    while PTE_UPDATE_START.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
 
-    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    // 每个发起者使用独立的三页区间，让并发槽同时承载不同 payload。
-    let start = crate::mm::VirtAddr::from(
-        0x54_0000 + cpu_id * 4 * crate::config::PAGE_SIZE,
-    )
-    .floor();
-    let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
-    if crate::smp::synchronize_user_tlb(targets, asid, Some(range), None).is_err() {
-        RANGE_SYNC_ERRORS.fetch_add(1, Ordering::Release);
+    let address = CONCURRENT_PTE_BASE + cpu_id * CONCURRENT_PTE_STRIDE;
+    for round in 0..CONCURRENT_PTE_ROUNDS {
+        let mut permission = crate::mm::MapPermission::R | crate::mm::MapPermission::U;
+        if round & 1 != 0 {
+            permission |= crate::mm::MapPermission::W;
+        }
+        if vm
+            .write(|space| space.mprotect(address, crate::config::PAGE_SIZE, permission))
+            .is_err()
+        {
+            PTE_UPDATE_ERRORS.fetch_add(1, Ordering::Release);
+            break;
+        }
     }
-    RANGE_SYNC_DONE.fetch_add(1, Ordering::Release);
+
+    // 所有 writer 完成前保持 MM active，保证每轮 PTE 修改都必须向全部 CPU
+    // 发送真实 shootdown。等待时开放本地中断，避免形成互等 ack 的环。
+    PTE_UPDATE_DONE.fetch_add(1, Ordering::Release);
+    crate::hal::with_local_interrupts_enabled(|| {
+        while PTE_UPDATE_DONE.load(Ordering::Acquire) != crate::smp::configured_cpu_count() {
+            core::hint::spin_loop();
+        }
+    });
+    vm.deactivate_on(cpu_id);
 }
 
-/// 所有 CPU 同时发布不同 ASID/区间 payload，证明固定槽不会被 reason 合并覆盖。
-fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static str> {
-    RANGE_SYNC_START.store(0, Ordering::Release);
-    RANGE_SYNC_READY.store(0, Ordering::Release);
-    RANGE_SYNC_DONE.store(0, Ordering::Release);
-    RANGE_SYNC_ERRORS.store(0, Ordering::Release);
+/// 所有 CPU 经真实 `AddressSpace::write()` 修改不同 PTE。VM 锁内写入虽串行，
+/// 解锁后的 `TlbFlush` 可以重叠，从而验证多代 generation 与固定槽 payload 不会串线。
+fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str> {
+    PTE_UPDATE_START.store(0, Ordering::Release);
+    PTE_UPDATE_READY.store(0, Ordering::Release);
+    PTE_UPDATE_DONE.store(0, Ordering::Release);
+    PTE_UPDATE_ERRORS.store(0, Ordering::Release);
 
-    let vm = Arc::new(crate::mm::AddressSpace::new(
+    let vm = crate::mm::AddressSpace::new(
         crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    ));
-    let local_asid = vm.activate_on(crate::smp::BOOT_CPU_ID).asid;
-    *SHARED_TLB_VM.lock() = Some(vm);
+    );
+    let mut frames = Vec::new();
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        let frame = crate::mm::frame_alloc().ok_or("concurrent PTE frame allocation failed")?;
+        let address = CONCURRENT_PTE_BASE + cpu_id * CONCURRENT_PTE_STRIDE;
+        let mapped = vm.write(|space| {
+            space.shm_mmap(
+                address,
+                crate::config::PAGE_SIZE,
+                crate::mm::MapPermission::R
+                    | crate::mm::MapPermission::W
+                    | crate::mm::MapPermission::U,
+                crate::mm::MapFlags::MAP_SHARED
+                    | crate::mm::MapFlags::MAP_ANONYMOUS
+                    | crate::mm::MapFlags::MAP_FIXED_NOREPLACE,
+                core::slice::from_ref(&frame),
+                true,
+            )
+        });
+        if mapped != address as isize {
+            return Err("concurrent PTE test could not map its fixed page");
+        }
+        frames.push(frame);
+    }
+    vm.activate_on(crate::smp::BOOT_CPU_ID);
+    *SHARED_TLB_VM.lock() = Some(vm.clone());
 
     let mut full_requests = [0usize; crate::smp::MAX_CPUS];
     for cpu_id in 0..crate::smp::configured_cpu_count() {
@@ -3498,49 +3684,50 @@ fn concurrent_range_shootdowns_keep_payloads_separate() -> Result<(), &'static s
     for cpu_id in 1..crate::smp::configured_cpu_count() {
         tasks.push(crate::task::spawn_ktest_task_on(
             cpu_id,
-            run_concurrent_range_shootdown,
+            run_concurrent_pte_updates,
         ));
     }
 
     let deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while RANGE_SYNC_READY.load(Ordering::Acquire) != tasks.len() {
+    while PTE_UPDATE_READY.load(Ordering::Acquire) != tasks.len() {
         if crate::hal::get_time() >= deadline {
-            return Err("APs did not enter the concurrent range-shootdown barrier");
+            return Err("APs did not enter the concurrent PTE-update barrier");
         }
         core::hint::spin_loop();
     }
 
-    RANGE_SYNC_START.store(1, Ordering::Release);
-    let targets = crate::smp::online_cpu_mask() & !crate::smp::stopped_cpu_mask();
-    let local_start = crate::mm::VirtAddr::from(0x53_0000).floor();
-    let local_range = crate::mm::VPNRange::new(
-        local_start,
-        crate::mm::VirtPageNum(local_start.0 + 3),
-    );
-    crate::smp::synchronize_user_tlb(targets, local_asid, Some(local_range), None)
-        .map_err(|_| "CPU0 concurrent range shootdown failed")?;
+    PTE_UPDATE_START.store(1, Ordering::Release);
+    run_concurrent_pte_updates();
 
     let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
-    while RANGE_SYNC_DONE.load(Ordering::Acquire) != tasks.len()
-        || tasks
-            .iter()
-            .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
+    while tasks
+        .iter()
+        .any(|task| task.task_status() != crate::task::TaskStatus::Zombie)
     {
         if crate::hal::get_time() >= completion_deadline {
-            return Err("concurrent range shootdowns did not finish before timeout");
+            return Err("concurrent PTE updates did not finish before timeout");
         }
         core::hint::spin_loop();
     }
     *SHARED_TLB_VM.lock() = None;
 
-    if RANGE_SYNC_ERRORS.load(Ordering::Acquire) != 0 {
-        return Err("an AP range shootdown returned an error");
+    if PTE_UPDATE_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("a concurrent production mprotect failed");
+    }
+    if vm.active_cpu_mask() != 0 {
+        return Err("a concurrent PTE writer retained an active-MM bit");
+    }
+    for cpu_id in 0..crate::smp::configured_cpu_count() {
+        if !vm.cpu_tlb_is_current(cpu_id) {
+            return Err("a concurrent PTE writer missed the final MM generation");
+        }
     }
     for cpu_id in 0..crate::smp::configured_cpu_count() {
         if crate::smp::user_tlb_request(cpu_id) != full_requests[cpu_id] {
-            return Err("concurrent range shootdown degraded to full user-TLB flush");
+            return Err("concurrent PTE updates degraded to full user-TLB flush");
         }
     }
+    drop(frames);
     crate::task::run_task_safe_point();
     Ok(())
 }
@@ -3601,7 +3788,7 @@ fn user_tlb_retirement_waits_for_ack() -> Result<(), &'static str> {
         crate::mm::VirtAddr::from(TEST_BASE + TEST_PAGES * crate::config::PAGE_SIZE),
         crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
     );
-    let vm = Arc::new(crate::mm::AddressSpace::new(space));
+    let vm = crate::mm::AddressSpace::new(space);
     vm.activate_on(crate::smp::BOOT_CPU_ID);
     *USER_TLB_RETIRE_VM.lock() = Some(vm.clone());
     let task = crate::task::spawn_ktest_task_on(1, observe_user_tlb_retirement_window);

@@ -1,12 +1,12 @@
 use crate::mm::{UserBufferReader, UserIoVec, UserPtr};
 use crate::net::config::NET_INTERFACE;
 use crate::net::posix::MsgHdr;
+use crate::net::socket::inet::common::port::{AutoBindPurpose, PortManager};
 use crate::net::{Endpoint, PSOCK};
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
 use crate::task::{WaitQueue, WaitResult};
 use crate::utils::error::SyscallErr;
-use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 use super::common::MsgFlags;
 
@@ -63,18 +63,28 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
         Ok(iov) => iov,
         Err(errno) => return errno,
     };
+    let socket = crate::get_socket!(sockfd);
+    let dest_endpoint = resolve_dest(&msg, token, &*socket);
+    if socket.socket_type() == PSOCK::Datagram {
+        if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
+            return -(SyscallErr::EDESTADDRREQ as isize);
+        }
+        if let Err(error) = PortManager::ensure_auto_bound(
+            &task,
+            &socket,
+            dest_endpoint.as_ref(),
+            AutoBindPurpose::Send,
+        ) {
+            return -(error as isize);
+        }
+    }
     let total_len = user_iov.capped_len();
     if total_len == 0 {
-        let socket = crate::get_socket!(sockfd);
-        let dest_endpoint = resolve_dest(&msg, token, &*socket);
         return wait_io(
             || socket.try_sendmsg(&[], dest_endpoint.clone(), msg_flags),
             is_nonblock,
         );
     }
-
-    let socket = crate::get_socket!(sockfd);
-    let dest_endpoint = resolve_dest(&msg, token, &*socket);
 
     match socket.socket_type() {
         PSOCK::Stream => send_stream_chunked(
@@ -86,20 +96,6 @@ pub fn sys_sendmsg(sockfd: u32, msg_ptr: usize, flags: u32) -> isize {
             is_nonblock,
         ),
         PSOCK::Datagram => {
-            if socket
-                .local_endpoint()
-                .map(|ep| ep.port() == 0)
-                .unwrap_or(true)
-            {
-                let auto_bind = Endpoint::Ip(IpEndpoint::new(
-                    IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
-                    0,
-                ));
-                let _ = socket.bind(&auto_bind);
-            }
-            if dest_endpoint.is_none() && socket.remote_endpoint().is_none() {
-                return -(SyscallErr::EDESTADDRREQ as isize);
-            }
             if total_len > crate::hal::IO_CHUNK_SIZE {
                 return -(SyscallErr::EMSGSIZE as isize);
             }
@@ -186,7 +182,8 @@ fn send_stream_chunked(
                 Err(errno) => return if done > 0 { done as isize } else { errno },
             };
 
-            NET_INTERFACE.try_poll();
+            // 非阻塞首发前只做有界 try-lock 扫描；此时没有持有用户页、socket 或 N2 锁。
+            NET_INTERFACE.poll_now();
             let sent = match socket.try_sendmsg_user(&ubuf, dest.clone(), msg_flags) {
                 Ok(n) => {
                     if n <= 0 {
@@ -202,6 +199,8 @@ fn send_stream_chunked(
                     };
                 }
             };
+            // 成功入队后的网络推进只需异步请求，不能再把 kick 当作同步 flush。
+            NET_INTERFACE.request_poll();
 
             done += sent as usize;
 

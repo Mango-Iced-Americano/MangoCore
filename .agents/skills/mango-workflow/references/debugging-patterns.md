@@ -729,7 +729,7 @@
   `Arc::strong_count()` 不能证明独占旧地址空间。只有位于用户映射/TLB 清理之后的权威
   live count 降为 1，才能唤醒 exec owner 替换 MM。
 - **等待点必须响应生命周期停止**: 普通“不可中断”等待可忽略用户信号，但不能永远阻塞
-  group exit/exec。WaitQueue 应在条件锁内识别生命周期请求，先摘除 waiter，再返回调用层
+  group exit/exec。WaitQueue 应在等待协议内识别生命周期请求，先摘除 waiter，再返回调用层
   释放 syscall 栈上的 `Arc` 并进入安全点。vfork child 已 publish 后，父线程被中止不能走
   unpublished cleanup，应返回显式 `StopCaller`。
 - **最终退出码要在 live-zero 后复读**: 普通 exit 在线程清理前读取的 group-exit 码仍可能
@@ -978,9 +978,9 @@
 
 ## WaitQueue 条件只领取内核状态，faultable 回复延后
 
-- **危险模式**: 条件闭包不一定只在无锁 fast path 执行。通用 WaitQueue 通常会在 waiter
-  登记后、仍持有队列锁时再次调用条件，用来闭合 lost-wakeup 窗口；若闭包直接执行
-  `UserPtrMut`/copyout，用户缺页、CoW 或 TLB shootdown 就会跨越等待队列锁。
+- **危险模式**: 条件闭包会在 waiter 登记前后重复执行。当前普通 WaitQueue 已在登记后释放
+  队列锁再调用 condition，但若闭包直接执行 `UserPtrMut`/copyout，重试仍可能重复消费对象，
+  用户缺页、CoW 或 TLB shootdown 也会污染底层同步路径。
 - **固定协议**: 条件闭包只在底层 owner 锁内检查并唯一领取内核对象，把拥有所有权的结果
   保存到 syscall 栈；WaitQueue 返回并完成 waiter 清理后，再执行 faultable reply。不要把
   owner guard、内部引用或只靠序号定位的结果带出锁。
@@ -996,9 +996,17 @@
 - **危险窗口**: 第二次 condition 返回 false 后，任务仍可能是 `Running`。事件生产者此时发布
   状态并调用 wake，可能得到“任务尚未睡眠”；若消费者随后无条件登记并切走，这次 wake 不会
   自动保存到未来。仅仅“在 queue 锁内多检查一次”不能覆盖 condition 与调度状态转换之间的边。
-- **固定协议**: 把事件发布为 owner 锁保护的持久状态；消费者完成 `Blocking` 登记后，在真正
-  切换前用无副作用谓词复查该状态。发现事件就撤销 waiter，不进入睡眠。不要为此增加一次通用
-  condition 调用，因为 condition 可能领取对象或产生其他副作用。
+- **固定协议**: 把事件发布为 owner 锁保护的持久状态，并用可靠的 `WaitEntry` 通知记录本轮
+  wake。普通 wait 的 condition 在队列锁外运行；checked block 只复查 token、信号、超时和
+  生命周期，不再次调用可能领取对象的通用 condition。locked wait 则在同一业务锁下完成
+  条件检查和 waiter 登记，并在 `Running -> Blocking` 桥接处释放该业务锁。
+- **边沿通知需要登记级 token**: 并非所有 wake 都有可复查的 owner 状态。通用 WaitQueue 应为
+  每轮登记建立独立 token，由第一个生产者 CAS `Waiting -> Notified`；checked block 只需复查
+  token 和通用退出原因。token 只保存本轮通知，`TaskStatus` 仍独占 CPU/runqueue 所有权，不能
+  为修 lost-wake 给调度状态机增加 `WakePending` 一类重复状态。
+- **多队列共享同一登记**: poll/epoll 一轮等待挂到多个 queue 时应共享一个 token，不能每个
+  queue 各建一份通知状态。清理先关闭 token，再逐队列分别摘除同一登记；这样既让多个 wake
+  源只能有一个赢家，也避免同时持有两把 queue 锁。
 - **返回结果不拥有事件**: Interrupted/timeout 只说明等待循环为何停止，不等于消费者已经取得
   事件。退出等待后应在 owner 锁内最后 claim 一次，再决定返回事件、`EINTR` 或 timeout；claim
   成功后才能把所有权带到锁外。
@@ -1101,3 +1109,72 @@
 - **修复**: normal boot 先 `add_initproc()`，再发布 worker。这样 PID1 首次 dispatch 先完成 normal 启动；worker 的 generation 条件仍在等待登记前及登记后重查，producer 在任一窗口发布都不会丢 wake。
 - **教训**: 含外盘的 normal boot 与 zero-drive ktest 的任务发布顺序不同；ktest 全绿不能证明 early Blocking 对 PID1 启动安全。看到 MBR 后静默时，沿下一条 task publication/首次 dispatch 排查，而不是先假设块 I/O 未完成。
 - **相关文件**: `os/src/main.rs`, `os/src/task/run_queue.rs`, `os/src/net/config.rs`, `os/src/task/manager.rs`
+
+## 物理页合法性：静态地址范围不能替代动态 allocator 所有权
+
+- **危险模式**: 初始化时用 `[skernel, ekernel)` 排除内核镜像是正确的，但把同一条件永久
+  用作“物理页能否映射给用户”的判定会漏掉后续所有权转交。linker 内嵌 initramfs 等载荷的
+  完整页复制完成后仍位于原地址，却已经登记为可复用回收页。
+- **固定协议**: 启动区间生成负责排除当时仍有 owner 的内核/固件范围；fault/uaccess 的
+  后验检查只验证整页属于固件可用 DRAM，实时所有权由页表、VMA 和 `FrameTracker` 保证。
+  若确实需要回答 allocator owner，再使用专门接口；不要把 allocator 锁塞进每页用户复制，
+  也不要把“仍位于链接范围”误当作“所有权从未转交”。
+- **定位技巧**: 当 alloc/free 测试通过，而 user fault 的 PTE 后验校验在双架构同点失败时，
+  先记录实际 PPN 并对照 recycled/reclaimed 来源；不要因为测试涉及 MMU 就先归因于 TLB。
+- **验收**: 保留修改前 RED，修正后用同一双架构映射、权限和回收用例转 GREEN；另外探测
+  运行期最后一个 usable 页，防止动态大内存仍被旧编译期上界截断。
+- **相关文件**: `os/src/mm/frame_allocator.rs`, `os/src/mm/address_space.rs`,
+  `os/src/kernel_tests/mm.rs`
+
+## 双架构 syscall 差异：先核对遗漏参数是否被显式初始化
+
+- **现象**: 同一用户程序在 LA64 正常，RV64 的 `wait4` 在 child 已被领取后返回 `EFAULT`，甚至
+  改写相邻用户栈数据；表面上很像 fork、调度或用户 copy 的架构竞态。
+- **根因**: 用户库把四参数 `wait4(pid, status, options, rusage)` 错接到三参数 wrapper。LA64
+  汇编桥会把缺省参数清零，RV64 inline asm 没有约束 `a3`，内核因而把残留寄存器当成 rusage
+  用户指针。两架构差异来自 wrapper，不来自内核 wait 语义。
+- **定位方法**: 先打印 syscall 返回值和各 copyout 目标；对照内核 dispatch 实际读取的参数数，
+  再逐架构检查 inline asm/汇编桥对未传参数的处理。不要因为故障只在 SMP RV64 出现就先归因
+  于 TLB 或调度竞态。
+- **修复**: 调用者使用与真实 ABI 参数数一致的 wrapper，并显式传零给不用的可选指针。不要
+  依赖调用约定、寄存器偶然值或另一架构桥接代码代为清零。
+- **相关文件**: `user/src/syscall.rs`, `os/src/syscall/mod.rs`,
+  `os/src/syscall/process/lifecycle.rs`
+
+## 共享 fd 的等待 owner 必须在使用点解析
+
+- **危险模式**: fork 共享 open file，但把 signalfd 的 waitqueue 存入 inode。child 的 pending
+  已属于新 sighand，却仍睡在父队列；信号正确入队也无法唤醒 child。
+- **固定协议**: open file 只保存真正共享的 mask；read/poll 在每次等待时从 current task 动态
+  解析 sighand-owned EventWaitQueue。普通 fork 新建队列，`CLONE_SIGHAND` 才共享。
+- **锁序**: pending 在 `task.inner`/`process.signal` 中提交，释放 owner 锁后通知事件队列。
+  waitqueue 只表示“需要重查”，不能复制或取代 pending 权威状态。
+- **审计边界**: 检查 blocking read、poll、epoll 和通用 splice 路径是否都经 File helper；同时
+  记录 Linux 的 epoll/fork 限制，继承的 epoll registration 不会自动改绑 child sighand。
+- **相关文件**: `os/src/fs/vfs/file.rs`, `os/src/task/signal/action.rs`,
+  `os/src/task/process.rs`, `os/src/syscall/process/signal.rs`
+
+## 跨锁域 Weak 注册表必须用强身份快照阻断 ABA
+
+- **危险模式**：注册表用裸地址作 key、保存 `Weak<T>`，walker 升级后立即丢掉强引用，
+  释放注册表锁再进入另一个 owner 锁重验。旧对象若在窗口内析构，allocator 可能把同一地址
+  分给新对象，仅比较地址或标量字段就会把旧操作误施加到新对象。
+- **固定协议**：注册表锁内升级 `Weak`，把 `Arc<T>` 本身放进不可变快照；释放注册表锁后
+  进入目标 owner，并以 `Arc::ptr_eq` 对权威表中的当前身份重验。强引用必须覆盖整个跨锁
+  窗口，不能只复制地址。完成重验后再执行 mkclean、unmap 或状态提交。
+- **适用范围**：file-VMA rmap、route directory、异步 owner 表和任何“弱索引→解锁→另一锁
+  下提交”的调用链。数值 generation 可以辅助判断变化，但不能替代对象身份。
+- **相关文件**：`os/src/fs/page_cache.rs`、`os/src/mm/vma.rs`、
+  `os/src/mm/vma_set.rs`
+
+## 静态单例中的堆对象用 Once 延迟构造，并让事件状态覆盖初始化窗口
+
+- **问题**：`WaitQueue` 等对象内部需要堆分配，不能直接放进普通 `const fn` 静态初始化；
+  为此开启全局 const-heap 或在 IRQ 首次触发时构造，都会扩大不必要的初始化与中断风险。
+- **做法**：静态控制块保存 `spin::Once<Mutex<WaitQueue>>`，只允许任务上下文首次构造。
+  初始化前到达的生产者先把权威 `pending` 置位；若 Once 尚未完成则不唤醒。worker 构造后
+  先在 WaitQueue 条件协议中重查 pending，因此早到事件不会丢失。
+- **门禁**：IRQ 路径只能写原子 pending/deferred 标志，不能调用 Once、分配或取得 WaitQueue；
+  动态测试应通过真实业务结果证明 worker 被唤醒，不要为测试在生产热路径保留 submitted/
+  completed 计数或专用 hook。
+- **相关文件**：`os/src/net/config.rs`、`os/src/kernel_tests/net_smp.rs`

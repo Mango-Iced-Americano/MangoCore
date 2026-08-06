@@ -122,7 +122,8 @@ PCB 的 `pid` 是进程整个生命周期内稳定的 TGID；线程组 leader �
 `leader_tid` 真值，而是当前满足 `task.gettid() == process.pid` 的 TCB。普通 clone
 创建进程时，两者天然相等。若非 leader 线程成功 exec：
 
-1. exec 会话先等待其它 live sibling（包括旧 leader）完成线程级退出；
+1. exec 会话先等待其它 live sibling（包括旧 leader）完成线程级清理，
+   并真正切回各自 CPU 的 idle 栈；
 2. 当前 TCB 接管 PCB 的 `pid_handle`，旧 leader 若尚未析构则接管调用者的旧 TID handle；
 3. task registry 在同一临界区从旧 TID 重键到 PID；
 4. Per-CPU current TID 和 OOM 活跃索引在 registry 解锁后同步；
@@ -235,7 +236,7 @@ late clone 线性化，且 group exit 可以覆盖临时 exec。
 
 ```text
 members.len() > live * 4 + 128
-  -> retain live weak refs
+  -> retain live 或尚未离开 current 槽的 weak refs
 ```
 
 `threads()` 返回当前 live 的强引用列表，并顺便清理失效 weak。`any_live_thread()` 用于信号、wait 唤醒和进程状态判断。
@@ -248,10 +249,12 @@ AcqRel `fetch_sub` 能观察此前 sibling 已完成的用户内存/TLB 清理�
 调试“进程为什么没有 zombie”时看 live count；调试“信号为什么找不到线程”时看
 members weak 是否仍可升级。
 
-active exec 期间，`remove_thread()` 看到 live count 降为 1 时会克隆
-`ExecState.siblings_done`，释放线程组锁后才 `complete()`。因此 owner 的确认条件是
-权威计数，而不是开始时快照为空；Completion 唤醒也不会反向嵌套 WaitQueue/runqueue
-与线程组锁。
+active exec 期间有两种不同的 ack：`remove_thread()` 消费 live token，证明用户资源
+和 TLB 清理已完成；idle 收尾在撤销 current 槽后调用
+`publish_exit_inactive()`，证明已不再使用自身内核栈。后者将
+`ExecState.pending_inactive` 降为零时，在释放线程组锁后完成 Completion。
+因此 owner 的确认条件是 `live_threads == 1 && pending_inactive == 0`，而不是
+开始时的成员快照为空。
 
 ## 8. trap context cache
 

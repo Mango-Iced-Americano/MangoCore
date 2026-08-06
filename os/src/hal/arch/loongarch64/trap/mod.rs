@@ -233,7 +233,7 @@ pub fn trap_handler() -> ! {
             if syscall_id != 139 {
                 cx.gp.a0 = result as usize;
             }
-            inner.update_process_times_leave_trap(cause)
+            inner.update_process_times_before_safe_point()
         };
         task.process.account_cpu_time(user_us, system_us);
         if _trap_start != 0 {
@@ -277,18 +277,30 @@ pub fn trap_handler() -> ! {
             crate::task::perf::record_page_fault();
             // 缺页修复与 LA64 software-dirty PTE 更新合并在同一 VM 锁
             // 持有期；helper 先解锁再完成远端 shootdown。
-            let pf_result = vm_ref.write(|vm| {
-                let result = vm.do_page_fault(addr, access);
-                if result.is_ok()
-                    && matches!(
-                        cause,
-                        Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
-                    )
-                {
-                    vm.set_user_page_dirty(addr.floor()).unwrap();
+            let pf_result = loop {
+                let outcome = vm_ref.write(|vm| {
+                    match vm.do_page_fault(addr, access) {
+                        crate::mm::FaultOutcome::Completed(pa) => {
+                            if matches!(
+                                cause,
+                                Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
+                            ) {
+                                if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
+                                    return crate::mm::FaultOutcome::Error(error);
+                                }
+                            }
+                            crate::mm::FaultOutcome::Completed(pa)
+                        }
+                        crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
+                        crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
+                    }
+                });
+                match outcome {
+                    crate::mm::FaultOutcome::Completed(_) => break Ok(()),
+                    crate::mm::FaultOutcome::Retry(wait) => wait.wait(),
+                    crate::mm::FaultOutcome::Error(error) => break Err(error),
                 }
-                result
-            });
+            };
             crate::task::perf::record_pagefault_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(_pf_start),
@@ -445,9 +457,9 @@ pub fn trap_handler() -> ! {
     }
     {
         let task = current_task().unwrap();
-        let mut inner = task.acquire_inner_lock();
-        let (user_us, system_us) = inner.update_process_times_leave_trap(cause);
-        drop(inner);
+        let (user_us, system_us) = task
+            .acquire_inner_lock()
+            .update_process_times_before_safe_point();
         task.process.account_cpu_time(user_us, system_us);
     }
     trap_return();
@@ -521,6 +533,12 @@ pub fn trap_return() -> ! {
     if user_vm.asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
+    // 安全点调度、信号处理和 ASID/MM 激活都属于 system time。只有在真正
+    // ERTN 前才开启 user 计时，避免把任务离 CPU 的区间算进 utime。
+    let (user_us, system_us) = task
+        .acquire_inner_lock()
+        .update_process_times_enter_user();
+    task.process.account_cpu_time(user_us, system_us);
     // On LA64, `strampoline` resolves to the kernel-trap stub under the
     // static link. `__restore` is already in the direct-map executable range.
     let restore_va = __restore as usize;

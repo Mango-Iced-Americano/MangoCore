@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-02
+> Coverage: 2026-04-01 to 2026-08-04
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -99,6 +99,10 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | SMP 进程级 legacy interval timer | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 itimer/fork 生命周期对照、共享域与锁序审查、双架构 8 核 setitimer LTP 和初赛门禁 | REAL/VIRTUAL/PROF 迁入 PCB，按 monotonic/线程组 CPU 时钟推进；双架构两套 libc 三种 signal 全过，初赛失败集合未扩大 |
 | SMP POSIX timer 精确 pending | 2026-08-03 | GPT/Codex, DeepSeek | Linux 6.6 预分配 sigqueue/overrun 语义对照、对象身份与双锁路径审查、双架构 8 核 focused LTP | instance/arm/event 身份分离，同 timer 合并 overrun、不同 timer 独立排队；两架构每套 libc `timer_settime01/02` 共 80/80 通过 |
 | SMP shared signal hint 原子发布 | 2026-08-03 | GPT/Codex, DeepSeek | 三 writer 交错建模、全部 queue mutation 审查、双架构 8 核 sigtimedwait gate | queue mutation 与 hint store 合入同一 signal 临界区，关闭旧值覆盖；两架构 glibc 各 11/11 通过 |
+| develop Batch 3 WaitQueue 通知 token | 2026-08-03 | GPT/Codex, DeepSeek | develop 方案迁移审查、lost-wake 线性化建模、双架构 8 核 Docker/QEMU 归纳 | 以登记级 `WaitEntry` 保存提前 wake，不扩张调度状态机；双架构 WaitQueue 5/5，初赛失败集合未扩大 |
+| develop Batch 5 signalfd 动态等待域 | 2026-08-03 | GPT/Codex, DeepSeek | Linux signalfd owner 对照、fork/锁序/原始指针审查、双架构 8 核 L4 回归与 RV64 ABI 溯源 | read/poll 动态绑定 current sighand，pending 锁外通知；修复 wait4 rusage 漏参，两架构 regression 7/7 |
+| develop Batch 6 read/pread 可写前缀 | 2026-08-03 | GPT/Codex, DeepSeek | develop 性能意图迁移、VA-backed 生命周期审查、双架构 8 核 L4 回归 | 单 VM 临界区确定可写前缀，只 fault-in 首页；实际 copy 逐页重验，两架构 regression 7/7 |
+| develop Batch 7 procfs CPU 拓扑 | 2026-08-03 | GPT/Codex, DeepSeek | Linux procfs ABI 对照、启动门禁/平台模型审查、双架构 8 核 L4 回归 | cpuinfo/stat 输出 8 个逻辑 CPU；修复 regression PID1 缺少 procfs，双架构 8/8 |
 
 ## 4. 详细使用场景
 
@@ -1188,6 +1192,303 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   exit 0、无 mutation、panic、fatal 或 timeout。并发 fork/unmap 与活跃 copy 的定向动态
   竞态为 NOT RUN；当前证据由 VM 锁域静态证明与覆盖主要调用点的初赛回归共同组成。
 
+### Case 49: 双架构运行期内存拓扑与 8 GiB 适配
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md`；DeepSeek 的 task、manifest、
+  分析和完整 Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责固件 usable-range、allocator ownership、LA64 dirty 元数据和 ABI
+  统计设计，并复核源码与原始日志；DeepSeek 先做设计/锁路径只读审查，再通过受限网关串行
+  执行 normal/2K1000 build 与双架构 8 核 8 GiB focused 门禁，不修改、提交或上传源码。
+- Problem: QEMU frame allocator、启动清零、LA64 dirty 位图和内存统计仍受编译期
+  `MEMORY_END` 限制，无法可靠消费比赛的 8 GiB；LA64 多 bank 间还有 MMIO hole，不能简单按
+  最高地址线性清零。
+- Implemented change: FDT/固件 region 与保留区贯穿无堆 usable-range 迭代器、multi-region
+  allocator、内核映射元数据和用户 ABI；LA64 dirty bitmap 按运行期最高 DRAM 建立，QEMU
+  统一支持 `QEMU_MEMORY=8G`，永久 ktest 探测旧静态上界之外的最高可用页。
+- AI adjudication: 首轮新增门禁通过但两个既有 fault-in 用例失败。DeepSeek 推测为 8 核 TLB
+  时序问题，GPT/Codex 从 `ReclaimedRegion` 生命周期证明真实根因是“永久排除整个 linker
+  内核范围”误拒绝已转交页，恢复无锁固件拓扑检查后同一双架构用例由 RED 转为 GREEN；
+  同时拒绝把 allocator 读锁留在每页 uaccess 热路径。
+- Verification: 最终受测 tracked diff SHA-256 为
+  `3bd1913ba72b0622781a59bb0bb4f6098a3ed385fc0c64184c3aa5d283ff1859`；RV64/LA64
+  `CORE_NUM=8 QEMU_MEMORY=8G KTEST=mm` 均 6/6、`dynamic_above_static=true`，分别报告
+  8189/8190 MiB。双架构 normal 与 2K1000 build 均通过；实板、DMA 与全容量压力为 NOT RUN。
+
+### Case 50: develop Batch 3 WaitQueue 通知 token 融合
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md`；模型任务和原始
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责核对当前 SMP 调度状态机、设计登记级 token、实现与最终证据裁决；
+  DeepSeek 只读审查 lost-wake 交错，并通过受限网关串行执行双架构 build、focused ktest 和
+  初赛回归，不拥有修改、commit 或 push 权限。
+- Problem: 旧 WaitQueue 在 wake 时若观察到任务仍为 Running，会把通知当作“无需唤醒”直接
+  消耗；任务随后完成 `Running -> Blocking` 并切走，边沿通知没有持久 owner 状态可供复查，
+  形成永久睡眠。develop 的总体方向正确，但不能直接套用旧单核 TaskStatus 假设。
+- Implemented change: 每轮等待注册一个 `WaitEntry`，第一个 producer 以 CAS 保存通知；
+  checked block 在登记 Blocking 后同时复查业务条件和 token。poll/epoll 多队列共享同一 entry，
+  清理时先关闭 token 再逐队列摘除。TaskStatus 不增加 WakePending 等重复状态，generic 10ms I/O
+  fallback 在 FS/Net producer 审计完成前继续保留。
+- AI adjudication: DeepSeek 首轮建议为测试公开私有 `wake_one()`，GPT/Codex 拒绝扩大生产 API，
+  改用已有公开 `wake_at_most(1)`。初赛 runner 因构建重写四个已跟踪 mke2fs 二进制报告
+  mutation；这些文件测试前干净且测试后精确恢复，功能结果与指纹告警分账记录。LA64 raw
+  305/314 的 3 分差异来自已知 `cpid` 串口交织，pipe 数据和结束标记正常，按既有口径为
+  semantic 308/314。
+- Verification: 受测代码冻结 diff SHA-256 为
+  `cfad6e72757ebc42c1a834ca7a5db9b08cfc888d4341a6cf0687aefa0300ab28`；双架构 8 核
+  kernel build 通过，WaitQueue ktest 各 5/5；初赛 RV64 312/314，LA64 semantic 308/314。
+  两 CPU 同时竞争同一多队列 entry 与 deadline 跨轮误唤醒的专项动态交错仍为 NOT RUN。
+
+### Case 51: develop Batch 5 signalfd 动态 sighand 等待域
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md`；DeepSeek 任务与完整
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 Linux 语义裁决、owner/锁序设计、实现、RV64 漏参根因定位和提交；
+  DeepSeek 只读审查 fork/CLONE_SIGHAND、VFS 等待路径及 raw pointer lifetime，并通过受限网关
+  串行执行双架构 8 核回归，不修改源码、不 commit 或 push。
+- Problem: fork 共享 signalfd open file，但 pending 与通知域属于当前线程/进程；若队列固化在
+  inode，child 会继续睡在父队列。首轮 RV64 又出现 signalfd/clone wait `EFAULT`，LA64 正常。
+- Implemented change: `Sighand` 持有 EventWaitQueue，File 根据 `ReadWaitSource` 在等待时动态
+  解析 current sighand；生产者提交 pending 并解锁后通知。用户库将 waitpid 改接四参数 wrapper，
+  显式传 `rusage=0`，不再让 RV64 未约束 a3 冒充用户指针。
+- AI adjudication: DeepSeek 提出的“exec 清空 signalfd mask”和“无条件通知偏离 Linux”不成立；
+  GPT/Codex 对照 Linux 6.6 源码确认 mask 属于 open file，signal enqueue 本来就无条件通知
+  sighand。其 `PollWaitQueue` 非 Send 文档建议被采纳。RV64 故障依据寄存器 ABI 和详细串口字段
+  定位，未误判为 TLB/vfork 竞态。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 143.427s、LA64 142.620s；
+  均 7/7、`online_mask=0xff`、signalfd 两个子场景与 clone probe PASS，退出码 0，无 panic、
+  timeout、forbidden marker 或源码变异。
+
+### Case 52: develop Batch 6 read/pread 可写前缀
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md`；DeepSeek 任务与完整
+  Docker/QEMU 日志只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 develop 差异裁决、SMP 生命周期设计、实现、首次构建失败修正和提交；
+  DeepSeek 只读审查前缀边界、锁序与 PTE 重验，并经受限网关串行执行双架构 8 核回归。
+- Problem: develop 的旧优化能减少完整 buffer 预 fault 造成的假 CoW/TLB flush，但保存物理页
+  slice，违反集成分支 B57—B59 的 VA-backed uaccess 不变量；旧两轮 nofault 探测还会重复取得
+  VM 锁和重复构造 writer。
+- Implemented change: `new_writable_prefix()` 在一次 VM 临界区内扫描已有可写 PTE，只在尚无
+  前缀时 fault-in 首页；read/pread/zero 以返回 writer 限制生产者本轮消费。writer 只保存 VA，
+  实际 copy 仍逐页重验，不跨文件 I/O 持 VM 锁。
+- AI adjudication: 采纳 DeepSeek 的页推进防御检查；不采纳其把单字段 newtype 称为 ZST 的表述，
+  也不以“并发修改 buffer 未定义”替代内核映射同步证明。首轮 RV64 因回归错误引用 LA64 条件
+  模块而编译失败，修正后以新 job 重跑，旧失败原样留档。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 142.744s、LA64 138.651s；均
+  7/7、`online_mask=0xff`、退出码 0、源码指纹稳定。两架构跨页用例均返回 first=8、second=8，
+  且 prefix/tail 内容正确；原 NULL EFAULT 后 pipe 数据保留场景继续 PASS。
+
+### Case 53: develop Batch 7 procfs CPU 拓扑
+
+- Evidence: `docs/Work_Log/2026-08-03.md`、
+  `docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 Linux 官方合同核对、实现、测试环境 RED 溯源和提交；DeepSeek 只读
+  审查 configured/online、PlatformInfo 时序、格式与测试过滤，并串行执行双架构 8 核回归。
+- Problem: 内核的 getcpu/affinity 已采用真实逻辑 CPU，但 `/proc/cpuinfo` 和 `/proc/stat` 仍
+  硬编码 cpu0；首轮永久回归又发现 regression 专用 PID1 没有挂载 normal PID1 已挂载的 procfs。
+- Implemented change: cpuinfo 按 configured CPU 生成 processor block 并读取固件 model；stat
+  按 Linux 顺序生成 aggregate + cpuN。USER_HZ 时间未实现时继续写 0，不用诊断计数伪造。
+  regression PID1 显式挂载 procfs，用户用例交叉检查两文件拓扑。
+- AI adjudication: 采纳 configured 选择，因为 AP 缺失会在用户态前 fail-stop；不把 DeepSeek
+  发现的既有动态 btime 混入本批。首轮 RV64 `ENOENT` 原样保留，LA64 未跑不记为通过，修复后
+  使用新 job 冻结重跑。
+- Verification: Docker `CORE_NUM=8` regression 严格串行，RV64 139.452s、LA64 141.699s；
+  均 8/8、`online_mask=0xff`、`processors=8 stat_cpu_rows=8`、退出码 0、源码指纹稳定。
+
+### Case 54: SMP 非 leader exec inactive ack
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b83-exec-inactive-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责 Linux `de_thread()` 顺序对照、强引用溯源、双 ack 设计、
+  实现与最终裁决；DeepSeek 通过受限 Docker runner 执行分阶段定位和双架构
+  冻结验证。
+- Problem: live token 在用户资源清理后就唤醒 exec owner，但旧 leader 可能仍在自身
+  内核栈上；安全点又把 current `Arc` 遗留在 noreturn 栈帧，导致 TCB 永久不析构。
+- Implemented change: live token 只保护 MM/TLB 资源，idle 在清空 current 后发布
+  `exit_inactive`；exec Completion 等待所有 sibling inactive。安全点在 noreturn 退出前
+  显式 drop current `Arc`。
+- AI adjudication: 不采信超时审查的未完成结论，也纠正 DeepSeek 最终报告中
+  “TID 交换发生在 `finish_switch_out()`”的错误归因；该处只发布 inactive ack。
+- Verification: RV64 8 核 SMP 34/34；LA64 normal build exit 0，8 核 SMP 34/34。
+  两架构均无 panic/timeout/fatal trap/stale-TLB marker，源码指纹稳定。
+
+### Case 55: SMP 真实 mprotect 降权与 LA64 W/D 权限
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 设计真实用户 stale-permission 反例，对照 LoongArch 官方页表/TLB
+  语义与 Linux `pte_wrprotect()` 定位根因、实现和裁决；DeepSeek 在冻结 diff 上执行
+  Docker 串行门禁并归纳 RED/GREEN 日志。
+- Problem: LA64 `mprotect(RW -> R)` 只清 page-walk W 位，仍把 D=1 装入远端 TLB；
+  一个本应 SIGSEGV 的用户 store 因而继续修改只读映射。
+- Implemented change: 底层 `revoke_write()` 统一清 W/D；永久探针先证明旧映射真实可写，
+  再在 mprotect ack 后要求远端 store 以 SIGSEGV 结束，并验证 frame canary 和精准刷新。
+- AI adjudication: DeepSeek 首轮把 33/34 RED 初步归因于 `INVTLB` 不刷新权限；GPT/Codex
+  根据官方 `INVTLB 0x5` 删除完整 ASID+VA 项的合同拒绝该推断，进一步定位到重填 PTE 的
+  D 位，并用 Linux 同架构实现交叉确认。
+- Verification: RV64 8 核 SMP 34/34；LA64 修复前 33/34 且唯一失败为写保护绕过，修复后
+  双架构 build exit 0、LA64 8 核 SMP 34/34；LA64 初赛保持 308/314 精确基线，无 mutation。
+
+### Case 56: SMP 真实并发 PTE writer
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b85-concurrent-pte-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责区分“同步原语自测”和“生产 PTE writer”覆盖范围、设计并发屏障、
+  实现与裁决；DeepSeek 严格串行执行双架构 Docker build/8 核 ktest 并检查状态残留。
+- Problem: 旧用例从 `UserTlbCommit` 起步，没有覆盖 VM 锁内 PTE 线性化、锁外 flush 交错，
+  因而不能作为多 CPU 同时修改同一 MM 不串 generation/range payload 的最终证据。
+- Implemented change: 全部 CPU 激活同一 `AddressSpace`，每核经生产 `mprotect()` 路径在独立
+  `MAP_SHARED` 页上完成 8 轮权限切换；共同完成前保持 active，并在收尾核对 generation、
+  active mask 和 full-user fallback 计数。
+- AI adjudication: 不采用模型建议的额外 repeat，因为本节点只改永久 ktest，双架构 8 核已覆盖
+  生产调用链和后续状态洁净性；一次无输出的只读审查被终止且明确排除在证据之外。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34，目标用例均为
+  `ok 25`，无 panic、timeout、fatal trap、active-MM 泄漏、generation 落后或全刷退化。
+
+### Case 57: SMP 页表可变借用边界收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b86-pte-borrow-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 审计 raw PTE 引用来源、设计双层独占边界、修复编译 RED 并裁决；
+  DeepSeek 在冻结 diff 上串行执行 Docker 构建和双架构 8 核 SMP 回归，并复核 PTE/TLB
+  语义没有变化。
+- Problem: `PhysPageNum::get_pte_array()` 是安全函数却返回 `'static mut`，双架构
+  `find_pte_refmut(&self)` 因而能从共享页表借用制造可变 PTE；当前 VM 锁虽覆盖主要调用点，
+  类型系统没有表达独占约束。
+- Implemented change: raw PTE view 改为 crate-private unsafe 只读/可写接口；只读 walker
+  独立遍历，所有 writer 与 `block_and_ret_mut*()` 改为要求 `&mut PageTable`。LA64 先复制
+  PPN 再做本地失效，使可变 PTE 借用不跨越 `self` 调用。
+- AI adjudication: 首轮因 GPT 在任务提交后删除重复注释导致冻结指纹变化，按流程判失败；
+  第二轮 LA64 编译暴露 Rust 2018 数组迭代和借用跨度问题，修复后第三轮冻结门禁通过。
+- Verification: 最终 LA64 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34，无
+  panic/timeout/fatal trap，tracked diff SHA-256 前后一致且无源码 mutation。
+
+### Case 58: SMP trap context 直映射借用收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b87-trap-context-summary.md`；DeepSeek 任务与完整日志
+  只保存在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 识别安全物理地址 API 返回 `'static` 引用的类型边界问题、实现并核对
+  trap-return owner 窗口；DeepSeek 自主审查所有调用点并串行执行四项 Docker 门禁。
+- Problem: 五个通用 direct-map helper 无法从安全函数证明任意物理内存的类型、存活期和
+  独占性；其中 `PhysPageNum::get_mut()` 只被 trap context 使用，却返回 `'static mut`。
+- Implemented change: 删除五个 helper；由 `trap_context_mut(&mut self)` 在唯一知道 TCB
+  所有权的地方建立 raw pointer，并把返回引用生命周期绑定到 `task.inner` guard。
+- AI adjudication: 接受模型关于 TCB/frame 存活、页首对齐和无残留调用者的源码结论；保留
+  `get_bytes_array/get_dwords_array` 为后续独立审计，不把跨子系统共享页所有权混入本节点。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；无
+  panic/timeout/fatal trap，四项 tracked diff 指纹一致且 `mutation_detected=false`。
+
+### Case 59: SMP 帧清零 raw pointer 边界
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b88-frame-zero-summary.md`；DeepSeek 任务与日志只保留
+  在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 识别单调用点 `'static mut [u64]` helper 并保持既有性能算法不变；
+  DeepSeek 审查 allocator 领取状态、对齐/边界和跨子系统影响，并完成四项 Docker 门禁。
+- Problem: `get_dwords_array()` 是安全通用 API，无法表达 PPN 已唯一领取，却返回可逃逸的
+  `'static mut`；其唯一调用者实际只需要清零期间的短命 raw pointer。
+- Implemented change: 删除 helper，在 `FrameTracker::new()` 局部取得 direct-map `*mut u64`；
+  保留原 8×u64 展开、尾部循环和 perf 计时位置，不改变清零内容或发布顺序。
+- AI adjudication: 不采用 `write_bytes` 简化建议，因为历史手工展开是明确的性能优化；也不把
+  跨 MM/PageCache/FS 的 `get_bytes_array()` 混入本节点。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；无新增 warning、
+  panic/timeout/fatal trap，四项 `mutation_detected=false`。
+
+### Case 60: SMP 单页帧分配锁外清零
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md`；DeepSeek 任务与日志只保留
+  在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 定义两阶段所有权与锁边界、实现并核对基线统计口径；
+  DeepSeek 执行设计/补丁只读审查和双架构 Docker 冻结门禁。
+- Problem: 普通单页分配在全局 frame allocator 写锁内清零 4 KiB，8 核并发缺页
+  会把不同 PPN 的内存带宽操作串行化。
+- Implemented change: 私有 `FrameReservation` 在锁内领取 PPN，锁外清零并发布
+  `FrameTracker`；`Option::take()` 一次移交回收责任，Drop 只回滚未消费 reservation。
+- AI adjudication: 拒绝 DeepSeek 首份会重复回收 PPN 的 Drop 示例；随后采纳其
+  `expect()` Copy 副本风险意见并改为 `take()`。perf 失败计数和计时结束点均以
+  旧源码为准，未接受无根据的口径改动。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；
+  四项冻结 diff 一致，无 panic/timeout/fatal/double-free 标记。
+
+### Case 61: SMP 时间源全局可变状态收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md`；DeepSeek 任务与日志只保留
+  在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 审计时间读取数据流、删除不可达旧抽象并选择自适应门禁；
+  DeepSeek 只读检查全仓可达性并执行双架构 Docker build。
+- Problem: `TIME_SOURCE static mut` 只有无调用者的写入入口，没有读者；其唯一
+  `MTime` 实现又硬编码 RISC-V virt 地址，构成无同步且绕过 HAL 的潜在入口。
+- Implemented change: 直接删除 registry、trait、init 和 MTime；不为死状态新增锁。
+  单调时间统一经 HAL，realtime 使用原有 `AtomicU64` offset。
+- AI adjudication: 通过全仓零读者证据选择删除而非 `Once/Mutex` 替换；因运行时
+  数据流未变，采用双架构 build + 指纹的 T1 门禁，不机械重复 QEMU 长测。
+- Verification: RV64/LA64 normal build 均 exit 0，两项冻结 diff 一致；QEMU NOT RUN
+  是明确的风险自适应决策，不是漏报通过。
+
+### Case 62: SMP Per-CPU IPI 生产诊断
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md`；DeepSeek 原始任务、
+  审查和执行日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责计数语义、内存序和生产路径裁决；DeepSeek 独立审查并通过受限
+  gateway 串行执行双架构 Docker build 与 8 核 focused ktest。
+- Problem: 既有 panic 快照只能看到 pending 和 request/ack，无法判断 IPI 负载、同类 bit
+  合并程度或硬件 doorbell 失败来自哪个发起 CPU；失败计数还分散在两个调用点。
+- Implemented change: 发送端按目标数记录逐 reason publication，接收端记录 handler 和
+  consumed bit；失败统一在 `send_ipi_mask()` 记录。全部诊断使用 Relaxed 原子，不参与
+  mailbox/ack 同步，未知诊断位不会让 hard IRQ panic。
+- AI adjudication: 拒绝新增重复的 doorbell failure 字段，也拒绝用
+  `published-consumed` 判断丢中断，因为 mailbox 的同类 reason 本来允许合并。首轮验证因
+  GPT 并行文档写入被 runner 判定 mutation 后废弃，冻结后完整重跑。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项采纳证据
+  `mutation_detected=false`，无 panic、timeout、fatal 或 IPI/TLB failure。
+
+### Case 63: SMP Per-CPU TLB shootdown 生产诊断
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md`；DeepSeek 原始设计、
+  审查和执行日志仅保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责统计口径、路径控制流、frame 生命周期和最终实现；DeepSeek
+  从另一视角逐退出路径审查，并串行执行双架构 Docker/QEMU 门禁。
+- Problem: request/ack 能证明完成协议，却不能解释哪个 CPU 制造 TLB 压力、实际选择精准
+  firmware/slot 还是 full fallback、区间大小、fanout 和同步尾延迟。
+- Implemented change: 五种互斥后端按发起 CPU 计数，并累计精准页数、尝试目标数、总/最大
+  raw ticks 与错误；local-only 不计，panic 快照按类型/成本分行输出。
+- AI adjudication: 拒绝 per-target handler 字段、ASID rollover 重复计数、trace buffer 和
+  测试 hook；保留页数和 RFENCE 端到端计时，纠正模型“可以省略”的建议。所有计数为
+  Relaxed 观察值，不进入 MMU 所有权和同步协议。
+- Verification: 双架构 normal build exit 0；RV64/LA64 8 核 SMP 均 34/34；四项冻结证据
+  mutation false，无 panic、timeout、stale TLB 或 frame 生命周期异常。
+
+### Case 64: SMP heap_trace 缓冲所有权收口
+
+- Evidence: `docs/Work_Log/2026-08-04.md`、
+  `docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md`；DeepSeek 原始任务
+  和 Docker 日志只保留在本地忽略的 `cc-codex/`。
+- AI roles: GPT/Codex 负责所有权重构、类型/BSS 不变量和最终 ELF 裁决；
+  DeepSeek 冻结只读审查并执行双架构 feature-on 8 核 Docker/QEMU。
+- Problem: 锁内 `TraceState` 只保存指向两个 `static mut` 大表的裸指针，
+  还需手写 `unsafe impl Send`；类型系统无法表达“数组只能经 guard 变更”。
+- Implemented change: `Mutex<TraceState>` 直接拥有 active/site 数组，safe indexing
+  取代 raw access，`Send` 由字段自动推导；大对象显式放入 `.bss.heap_trace`。
+- AI adjudication: DeepSeek 正确确认锁序与 const/BSS 方向，但将 LA64
+  宽泛 grep 命中的 1-byte `TRACE_ENABLED` 误判为架构差异。GPT 用精确符号、
+  fail-fast 和数值转换拒绝该结论，保留 runner 失败记录而不刷绿。
+- Verification: RV64/LA64 `EXTRA_FEATURES=heap_trace CORE_NUM=8 KTEST=smp` 均 34/34；
+  精确 ELF 复核显示两架构 `TRACE` 均为 26,869,832 bytes 且位于
+  `NOBITS .bss`；两个真实 QEMU runner 均无 mutation/panic/timeout。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -1300,6 +1601,28 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b79-interval-timer-summary.md` | SMP 进程级 legacy interval timer | 记录 TCB→PCB owner 迁移、三类时钟域、fork/exec/exit 生命周期、模型结论纠错及双架构 8 核 focused/初赛冻结证据 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b80-posix-timer-pending-summary.md` | SMP POSIX timer 精确 pending | 记录对象/装载/事件三类身份、per-timer overrun、双锁拆分、signalfd 映射、双架构 8 核 focused 冻结证据与专项 NOT RUN 边界 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/smp-b81-shared-signal-hint-summary.md` | SMP shared signal hint 原子发布 | 记录锁外 stale store 交错、writer mutex 全序与 Release/Acquire 分工、双架构 8 核构建/focused 冻结证据及精确注入 NOT RUN |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/dynamic-memory-8g-summary.md` | 双架构运行期内存拓扑与 8 GiB 适配 | 记录固件 region→allocator/映射/ABI 链路、linker 回收页 RED→GREEN、DeepSeek 初步误归因裁决及双架构 8 核 8 GiB 6/6 门禁 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch3-waitqueue-core-summary.md` | develop Batch 3 WaitQueue 通知 token | 记录登记级 token 与 TaskStatus 分工、multi-queue 唯一领取、模型建议纠正、双架构 8 核 focused/初赛证据和 producer fallback 边界 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-waitqueue-lossless-summary.md` | develop Batch 4 WaitQueue 无损通知 | 记录队列锁临界区收窄、EventWaitQueue 有损接口删除、DeepSeek 双架构构建/focused/初赛执行，以及 patchelf mutation 导致 runner partial 的人工裁决 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch4-patchelf-idempotence-summary.md` | develop Batch 4.1 工具 ELF 幂等化 | 记录 Make 转义和 ELF 动态段审查、DeepSeek 双架构 8 核初赛，以及 before/after 指纹一致的确定性验收 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch5-signalfd-summary.md` | develop Batch 5 signalfd 动态等待域 | 记录 current-sighand owner、fork/CLONE_SIGHAND、锁外通知、RV64 wait4 漏参溯源与双架构 8 核 L4 7/7 证据 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch6-uaccess-prefix-summary.md` | develop Batch 6 read/pread 可写前缀 | 记录 develop 表示差异、VA-backed 前缀协议、首轮 RV64 编译失败和双架构 8 核 L4 7/7 冻结证据 |
+| `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/develop-batch7-proc-cpu-summary.md` | develop Batch 7 procfs CPU 拓扑 | 记录 configured/online 门禁、Linux stat 格式、首轮缺少 procfs 环境失败和双架构 8 核 L4 8/8 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b82-user-remap-tlb-summary.md` | SMP 真实用户 CoW + 同 VPN remap TLB 证明 | 记录 DeepSeek 并发审查与 Docker 执行、GPT 对 remap-frame UAF 遗漏的纠正、官方 TCFG/TICLR 语义溯源、LA64 RED→GREEN 及既有 exec 超时的 partial 披露 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b83-exec-inactive-summary.md` | SMP 非 leader exec inactive ack | 记录 live/inactive 双 ack、noreturn Arc 根因、Linux `de_thread()` 对照、DeepSeek 报告纠错与双架构 8 核 34/34 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b84-mprotect-summary.md` | SMP 真实 mprotect 降权与 LA64 W/D 权限 | 记录真实远端 store RED、官方页表/TLB 与 Linux 对照、模型归因纠正、LA64 W/D 修复、双架构 focused 和初赛非回归证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b85-concurrent-pte-summary.md` | SMP 真实并发 PTE writer | 记录生产 mprotect 交错、VM 锁与锁外 shootdown 边界、DeepSeek 双架构 8 核冻结门禁和无状态残留证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b86-pte-borrow-summary.md` | SMP 页表可变借用边界收口 | 记录 raw PTE 读写拆分、`&mut PageTable` 独占合同、LA64 编译 RED→GREEN、DeepSeek 双架构 8 核冻结门禁与流程 mutation 披露 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b87-trap-context-summary.md` | SMP trap context 直映射借用收口 | 记录通用 `'static` helper 删除、TCB owner 局部 unsafe、trap-return 汇编窗口审查与 DeepSeek 双架构四项冻结门禁 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b88-frame-zero-summary.md` | SMP 帧清零 raw pointer 边界 | 记录 allocator 唯一领取窗口、局部 raw pointer、手工展开性能语义保留与 DeepSeek 双架构四项冻结门禁 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b89-frame-lock-summary.md` | SMP 单页帧分配锁外清零 | 记录 reservation 中间 owner、allocator 锁边界、双重回收建议纠正与 DeepSeek 双架构 8 核冻结门禁 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b90-time-source-summary.md` | SMP 时间源全局可变状态 | 记录无读者 registry 删除、统一 HAL 数据流、自适应 T1 门禁和 DeepSeek 双架构冻结构建 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b91-scheduler-diagnostics-summary.md` | SMP Per-CPU 调度生产诊断 | 记录真实运行迁移口径、switch/steal/rq-peak 原子快照、只读 profile 误派披露及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b92-ipi-diagnostics-summary.md` | SMP Per-CPU IPI 生产诊断 | 记录逐 reason 发布/消费口径、doorbell 失败收口、首轮 mutation 证据废弃及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b93-tlb-diagnostics-summary.md` | SMP Per-CPU TLB shootdown 生产诊断 | 记录互斥后端、精准页数/fanout/ticks、frame 所有权边界、模型建议裁决及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b94-heap-trace-owner-summary.md` | SMP heap_trace 缓冲所有权 | 记录 Mutex-owned BSS 表、自动 Send、模板/marker 失败披露、模型误判纠正及双架构 feature-on 8 核 34/34 证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b95-production-ipi-summary.md` | SMP 生产 IPI 协议收口 | 记录测试专用 PING/ROUND_TRIP 状态删除、正式 membarrier sequence/ack 三方向验证、helper kernel-stack 生命周期及 DeepSeek 双架构 8 核 34/34 冻结证据 |
+| `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b96-zombie-owner-summary.md` | SMP TCB zombie 唯一 owner | 记录 Running(cpu_id) 终态门禁、interruptible zombie 旧路径删除、错误 CPU CAS 建议纠正及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 
 ## 9. 交互记录与留痕方式
 

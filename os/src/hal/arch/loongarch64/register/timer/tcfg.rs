@@ -25,7 +25,7 @@ impl TCfg {
     /// Only when this bit is 1,
     /// the timer will perform countdown self decrement and set up the timing interrupt signal when it decrements to 0 value.
     pub fn is_enabled(&self) -> bool {
-        !self.bits.get_bit(0)
+        self.bits.get_bit(0)
     }
     /// Timer cycle mode control bit.
     /// If this bit is 1, when the timer decreases to 0,

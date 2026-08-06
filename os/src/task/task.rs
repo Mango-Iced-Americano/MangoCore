@@ -25,7 +25,6 @@ use super::{
 use crate::config::{MMAP_BASE, PAGE_SIZE};
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
-use crate::hal::TrapImpl;
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
@@ -196,6 +195,11 @@ pub struct TaskControlBlock {
     pub user_stack_allocated: AtomicBool,
     /// Whether this task is counted in its process live-thread counter.
     pub(crate) thread_live_counted: AtomicBool,
+    /// Zombie 线程是否已经离开原 CPU 的 current 槽。
+    ///
+    /// 线程级资源可以在自身内核栈上先完成清理，但非 leader exec 必须等到
+    /// 旧 leader 真正切回 idle 后才能交换 TID。该位只由 idle 收尾路径发布。
+    pub(crate) exit_inactive: AtomicBool,
     /// Whether this task contributes to ACTIVE_SECCOMP_TASKS.
     seccomp_counted: AtomicBool,
     uid_hint: AtomicUsize,
@@ -517,7 +521,16 @@ impl TaskControlBlockInner {
     /// trap context 物理页由当前 TCB 独占；返回生命周期必须绑定到 `&mut self`，
     /// 不能把底层直映区产生的引用伪装成可越过 inner guard 的 `'static mut`。
     pub fn trap_context_mut(&mut self) -> &mut TrapContext {
-        self.trap_cx_ppn.get_mut()
+        let trap_cx = self
+            .trap_cx_ppn
+            .start_addr()
+            .direct_map_ptr()
+            .cast::<TrapContext>();
+        // Safety: trap context 页跟随当前 TCB 存活，页首天然满足 TrapContext
+        // 对齐；调用者必须先取得 task.inner guard，因而这里的 `&mut self`
+        // 在返回引用存活期间独占同一 TCB 的 Rust 访问。返回生命周期由函数
+        // 签名绑定到 `&mut self`，不能像旧的通用直映射接口那样逃逸为 `'static`。
+        unsafe { &mut *trap_cx }
     }
     /// 添加信号
     pub fn add_signal(&mut self, signal: Signals) {
@@ -540,13 +553,26 @@ impl TaskControlBlockInner {
         }
         // 更新用户CPU时间
         self.rusage.ru_utime = self.rusage.ru_utime + diff;
-        self.group_user_unflushed_us = self.group_user_unflushed_us.saturating_add(diff.to_us());
+        let diff_us = diff.to_us();
+        self.group_user_unflushed_us = self.group_user_unflushed_us.saturating_add(diff_us);
+        // per-CPU 时间必须在测量发生的 CPU 上立即入账；若等 PCB 批量冲刷，
+        // 任务迁移后会把此前区间错误归到新的 CPU。
+        super::processor::account_local_cpu_time(diff_us, 0);
         self.sched_vruntime = self
             .sched_vruntime
-            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff.to_us()));
+            .saturating_add(sched_vruntime_delta_us(self.sched_nice, diff_us));
     }
-    /// 在离开陷阱时更新进程时间
-    pub fn update_process_times_leave_trap(&mut self, _trap_cause: TrapImpl) -> (usize, usize) {
+    /// 在 trap-return 安全点前结算已经完成的内核态区间。
+    ///
+    /// 这里只更新 system time，不提前开启 user time；安全点可能调度出去，
+    /// 提前切换模式会把离 CPU 时间误计为用户态时间。
+    pub fn update_process_times_before_safe_point(&mut self) -> (usize, usize) {
+        self.account_system_time_until(TimeVal::now());
+        self.take_group_cpu_delta(false)
+    }
+
+    /// 在恢复汇编前结算 trap 尾段，并从此刻开始用户态计时。
+    pub fn update_process_times_enter_user(&mut self) -> (usize, usize) {
         let now = TimeVal::now();
         self.account_system_time_until(now);
         self.clock.last_enter_u_mode = now;
@@ -571,8 +597,10 @@ impl TaskControlBlockInner {
             return;
         }
         self.rusage.ru_stime = self.rusage.ru_stime + diff;
-        self.group_system_unflushed_us =
-            self.group_system_unflushed_us.saturating_add(diff.to_us());
+        let diff_us = diff.to_us();
+        self.group_system_unflushed_us = self.group_system_unflushed_us.saturating_add(diff_us);
+        // 与用户态时间相同，系统态区间按实际执行它的 CPU 即时记账。
+        super::processor::account_local_cpu_time(0, diff_us);
         self.clock.last_enter_s_mode = now;
     }
 
@@ -620,6 +648,12 @@ impl TaskControlBlock {
     ) -> Result<(Option<SharedFutexKey>, Option<SharedFutexKey>), isize> {
         let bytes = 0u32.to_ne_bytes();
         let vm = self.process.vm();
+        // 先在 VM 锁外完成 fault retry；随后每次实际写入重新取得 VM 锁并只做
+        // nofault resolve，避免清理路径与 PageCache writeback 锁序反转。
+        for offset in 0..bytes.len() {
+            let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
+            vm.fault_in_user_va_retry(va, FaultAccess::Store)?;
+        }
         vm.write(|vm| {
             let base_va = VirtAddr::from(addr);
             let uses_shared_key = vm.futex_mapping_is_shared(base_va)?;
@@ -635,10 +669,15 @@ impl TaskControlBlock {
             };
 
             if base_va.page_offset() + bytes.len() <= PAGE_SIZE {
-                let pa = vm.fault_in_user_va(base_va, FaultAccess::Store)?;
+                let pa = vm.resolve_user_va(base_va, FaultAccess::Store)?;
                 let page_offset = pa.page_offset();
-                let page = pa.floor().get_bytes_array();
-                page[page_offset..page_offset + bytes.len()].copy_from_slice(&bytes);
+                let dst = pa.floor().start_addr().direct_map_ptr().wrapping_add(page_offset);
+                // Safety: VM 写锁固定了 PTE 和 frame 生命周期，范围检查保证写入
+                // 不跨页。这里使用 raw copy，是因为其它线程仍可能从用户态访问
+                // 同一 futex word，不能为这类共享用户内存制造 `&mut [u8]`。
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+                }
                 let after_key = if uses_shared_key {
                     let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
                     Some(SharedFutexKey::new(backing, page_offset))
@@ -650,8 +689,15 @@ impl TaskControlBlock {
 
             for (offset, byte) in bytes.iter().enumerate() {
                 let va = addr.checked_add(offset).map(VirtAddr::from).ok_or(EFAULT)?;
-                let pa = vm.fault_in_user_va(va, FaultAccess::Store)?;
-                pa.floor().get_bytes_array()[pa.page_offset()] = *byte;
+                let pa = vm.resolve_user_va(va, FaultAccess::Store)?;
+                let dst = pa
+                    .floor()
+                    .start_addr()
+                    .direct_map_ptr()
+                    .wrapping_add(pa.page_offset());
+                // Safety: VM 写锁保证物理映射在写入期间有效；逐字节路径天然
+                // 不跨页。raw pointer 避免对并发可见的用户内存声明 Rust 独占。
+                unsafe { dst.write(*byte) };
             }
             let after_key = if uses_shared_key {
                 let backing = vm.futex_shared_backing(base_va)?.ok_or(EFAULT)?;
@@ -675,9 +721,14 @@ impl TaskControlBlock {
     pub(crate) fn last_cpu(&self) -> usize {
         self.last_cpu.load(Ordering::Acquire)
     }
-    /// 在任务成为本 CPU current 前记录运行位置。
-    pub(crate) fn note_running_cpu(&self, cpu: usize) {
-        self.last_cpu.store(cpu, Ordering::Release);
+    /// 在任务成为本 CPU current 前记录运行位置，并报告是否真的跨核运行。
+    ///
+    /// 只在 `Queued/Migrating -> Running(cpu)` 的唯一 owner 路径调用，所以交换
+    /// 本身不负责争抢所有权。首次运行的 `usize::MAX` 不算迁移；queued 搬运
+    /// 也不提前计数，避免任务在真正执行前再次改 affinity 时虚增统计。
+    pub(crate) fn note_running_cpu(&self, cpu: usize) -> bool {
+        let previous = self.last_cpu.swap(cpu, Ordering::AcqRel);
+        previous != usize::MAX && previous != cpu
     }
     /// 返回任务当前允许运行的逻辑 CPU 位图。
     pub(crate) fn cpus_allowed(&self) -> usize {
@@ -984,23 +1035,23 @@ impl TaskControlBlock {
     pub fn is_zombie(&self) -> bool {
         self.task_status() == TaskStatus::Zombie
     }
-    /// 把未排队的任务推进到终态。
+    /// 把本 CPU 的 current task 推进到终态。
     ///
-    /// `Queued` 必须先由运行队列移除并变成 `Blocked`；直接从 Queued 结束会让
-    /// 队列中残留一个终态 TCB，因此这里将其视为所有权错误。
+    /// 退出只能由任务自己在安全点完成。阻塞 sibling 必须先被唤醒并重新取得
+    /// current owner；未发布的 New task 则直接释放，不经过调度终态。
     pub(crate) fn mark_zombie(&self, operation: &'static str) -> bool {
         // 终态与远程 Running affinity 必须在同一请求槽上串行化：
         // 一旦 Zombie 先发布，远程写侧只能收到 Retry，不能再安装迁移请求。
         let mut request_slot = self.remote_affinity_request.lock();
         let current = self.task_status();
+        let expected = TaskStatus::Running(crate::smp::cpu_id());
         let changed = match current {
-            TaskStatus::New | TaskStatus::Blocked | TaskStatus::Running(_) => {
-                self.require_sched_transition(current, TaskStatus::Zombie, operation);
+            status if status == expected => {
+                self.require_sched_transition(expected, TaskStatus::Zombie, operation);
                 true
             }
             TaskStatus::Zombie => false,
-            TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Blocking(_) => self
-                .fail_sched_invariant(operation, TaskStatus::Blocked, current, TaskStatus::Zombie),
+            _ => self.fail_sched_invariant(operation, expected, current, TaskStatus::Zombie),
         };
         let canceled = request_slot.take();
         drop(request_slot);
@@ -1218,7 +1269,7 @@ impl TaskControlBlock {
             INIT_NET_NAMESPACE.clone(),
             INIT_MOUNT_NAMESPACE.clone(),
             INIT_IPC_NAMESPACE.clone(),
-            Arc::new(AddressSpace::new(memory_set)),
+            AddressSpace::new(memory_set),
             Arc::new(Mutex::new(Sighand::new())),
             Arc::new(Mutex::new(FutexTable::new())),
             user_res_slot_allocator,
@@ -1238,6 +1289,7 @@ impl TaskControlBlock {
             ustack_base: ustack_bottom_from_slot(user_res_slot),
             user_stack_allocated: AtomicBool::new(true),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(0),
             euid_hint: AtomicUsize::new(0),
@@ -1336,16 +1388,16 @@ impl TaskControlBlock {
         task_control_block
     }
 
-    /// 为独立 ktest 进程创建最小化 TCB。
+    /// 为 kernel-only 进程创建最小化 TCB。
     ///
     /// # Semantics
     ///
     /// 该构造器不会解析 ELF、分配用户内存或设置 fd table。
     /// 它只建立内核执行上下文，并立即登记 TID 弱引用；调用方仍负责在加入
     /// 线程组和 runqueue 前设置精确的 `cpus_allowed`。普通入口是
-    /// `spawn_ktest_task_on()`；SMP 生命周期用例可暂不发布 sibling，
-    /// 以验证 group-exit 的最终发布门禁。
-    pub(crate) fn new_ktest_independent(
+    /// `build_kernel_task()`；需要构造未发布 sibling 的 SMP 生命周期用例也可直接
+    /// 调用本构造器，但仍必须遵守唯一一次 `New -> Queued(cpu)` 发布约束。
+    pub(crate) fn new_kernel_only(
         tid_handle: Arc<TidHandle>,
         process: Arc<ProcessControlBlock>,
         kstack: KernelStack,
@@ -1363,6 +1415,7 @@ impl TaskControlBlock {
             ustack_base: 0,
             user_stack_allocated: AtomicBool::new(false),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(0),
             euid_hint: AtomicUsize::new(0),
@@ -1755,7 +1808,7 @@ impl TaskControlBlock {
             let copied = parent_vm.write(|vm| {
                 AddressSpaceInner::from_existing_user(vm, self.user_res_slot, &parent_trap_cx)
             })?;
-            Arc::new(AddressSpace::new(copied))
+            AddressSpace::new(copied)
         };
 
         // 共享地址空间时，trap context 的虚拟地址也共享，必须复用同一个用户资源槽位分配器。
@@ -1932,6 +1985,7 @@ impl TaskControlBlock {
             },
             user_stack_allocated: AtomicBool::new(user_stack_allocated),
             thread_live_counted: AtomicBool::new(false),
+            exit_inactive: AtomicBool::new(false),
             seccomp_counted: AtomicBool::new(false),
             uid_hint: AtomicUsize::new(parent_inner.uid as usize),
             euid_hint: AtomicUsize::new(parent_inner.euid as usize),

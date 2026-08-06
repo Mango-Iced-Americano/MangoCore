@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-03
+last_update: 2026-08-06
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -38,9 +38,14 @@ TCB inner 中：
 | 方法 | 时机 |
 |------|------|
 | `update_process_times_enter_trap()` | 用户态进入内核态 |
-| `update_process_times_leave_trap()` | 内核态返回用户态 |
+| `update_process_times_before_safe_point()` | trap 主体完成后、返回用户态安全点之前结算 system time |
+| `update_process_times_enter_user()` | 信号、MM 激活等 trap 尾段完成后，在恢复汇编前开启 user time |
 | `update_process_times_schedule_out()` | 任务在内核态让出 CPU |
 | `update_process_times_schedule_in()` | 任务被调度运行 |
+
+返回路径必须分两段计时：安全点可能把任务切出并迁移到另一个
+CPU，因此不能在安全点前预先更新 `last_enter_u_mode`。否则离开 CPU 的等待时间
+会被算成 user time，还可能错记到迁移后的 CPU。
 
 `ru_maxrss` 在进程退出时根据 resident user bytes 更新；其他 rusage 字段多数保持 0。
 
@@ -78,6 +83,14 @@ impl ProcClock {
     }
 }
 ```
+
+除了线程和线程组账户，`CpuTaskState` 还在每次 trap/schedule 边界将实际
+增量立即记入当前逻辑 CPU 的 `user_time_us/system_time_us`。该路径不复用 PCB
+的微秒批量冲刷，因为批次可能跨任务迁移，无法反推每段时间实际消耗在哪个
+CPU。调度器在 idle 上下文进出处记录 `idle_time_us`，`/proc/stat` 再按
+Linux `USER_HZ=100` 转换并输出 aggregate 与 `cpu0..cpuN`。当前可靠区分
+user/system/idle；nice、iowait、irq、softirq、steal 和 guest 尚无独立账户，
+所以这些字段明确输出 0。
 
 ## 3. RLIMIT_CPU
 

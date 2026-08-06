@@ -213,7 +213,9 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 `translated_byte_buffer` 及锁外物理页 slice：`UserBuffer`/`UserIoVec` 只保存 token 与
 逻辑 VA 区间，实际 copy 每页重新取得 VM 锁并验证 PTE。流式 I/O 返回已完成前缀，固定
 格式用 `read_exact`/`write_all`；pipe 在 ring 自旋锁内只能使用已预 fault 的 nofault copy。
-预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。B60 已让 SysV semaphore
+预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。develop Batch 6 又为
+read/pread 增加可写前缀构造：只在前缀为空时 fault-in 首页，后续不可写页截断本轮生产者
+消费长度；返回对象仍只保存 VA，实际 copy 继续逐页重验。B60 已让 SysV semaphore
 `GETALL/SETVAL/SETALL` 和 POSIX `mq_open(O_CREAT)` 采用“锁内验证 → 锁外 copy → 锁内
 重验/提交”；任何 IPC registry 或队列锁内都不得进入 faultable uaccess。B61 又将普通
 `msgrcv` 的消息选择、摘取和统计更新合并到同一个 `MSG_REGISTRY` 临界区，摘取后再锁外
@@ -301,7 +303,10 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 - **TaskControlBlock** — 线程级（调度实体、内核栈、trap context）
 - **ProcessControlBlock** — 进程级（地址空间、fd table、信号、PID）
 - **信号**：`task/signal/` 子模块（action/delivery/frame/pending/wait）
-- **WaitQueue** — 支持 epoll、eventfd、IPC 等通用阻塞原语；futex 使用专用 waiter
+- **WaitQueue** — 每轮等待使用一次性 `WaitEntry` 固化早到 wake，
+  `TaskStatus` 仍是 CPU/runqueue ownership 的唯一权威；支持 epoll、eventfd、IPC
+  等通用阻塞原语，futex 使用专用 waiter。通用 I/O fallback 在 FS/Net 生产者
+  通知补齐前保留，不得仅因核心 token 完成就提前删除
 - **Completion** — 单次通知原语
 
 ### 文件系统（VFS）
@@ -314,7 +319,7 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 | FAT32 | `fs/fat32/` | 引导/EFI 分区支持 |
 | tmpfs | `fs/tmpfs/` | 无大小限制的临时内存 FS |
 | ramfs | `fs/ramfs/` | 物理页支持的内存 FS（`/dev/shm` 等） |
-| procfs | `fs/procfs/` | `/proc` 伪文件系统（含 `/proc/[pid]/status/maps/fd`） |
+| procfs | `fs/procfs/` | `/proc` 伪文件系统；CPU 拓扑按 configured 逻辑 CPU 输出 |
 | devfs | `fs/dev/` | 设备文件（null/zero/urandom/tty/pipe/pty/rtc） |
 
 **PageCache**：状态机（Loading→UpToDate↔Dirty→Writeback）；后台写回阈值约 32MB、节流阈值约 64MB，批量 256 页。`reclaim.rs` 周期性后台回收。
@@ -348,9 +353,23 @@ syscall → Socket trait → TcpSocket/UdpSocket/RawSocket/UnixSocket
 | signalfd | `syscall/process/signal.rs` | fd 方式接收信号 |
 | pidfd | `fs/pidfd.rs` | 进程 fd（open/send_signal/getfd） |
 
+signalfd 的 open file 只保存共享 mask；阻塞 read/poll 的事件队列属于当前 sighand，并由 VFS
+在每次等待时动态解析。信号生产者必须先释放 pending owner 锁，再通知该事件队列。
+
 ### HAL
 
 `hal/` 目录提供硬件抽象层，将架构相关代码（陷阱处理、页表操作、TLB 管理、控制寄存器）从架构无关代码中分离。支持多平台（rv64: QEMU/K210/fu740、la64: QEMU/2k1000）。
+
+启动信息采用两阶段只读发布：BSP 在清 BSS 前把 `RawBootInfo` 和固定容量资源表冻结到
+`.data.boot`，把双架构 FDT 字节冻结到 `sbss` 前的 `.bss.boot`；堆就绪后再以
+`spin::Once<PlatformInfo>` 发布 owned 平台描述。AP 不得重新解析或改写这些对象。
+RV64 从 `a1` 直接取得 FDT；LA64 从 `a2` 的 EFI system table 按 `EFI_FDT_GUID` 查找
+FDT，QEMU 缺失时失败，2K1000 缺失时允许静态板级回退。RV64 timer 频率来自 FDT
+`/cpus/timebase-frequency`，LA64 保持 CPUCFG 探测；两者不能用调度 `TICKS_PER_SEC`
+互相替代。MM 已以运行期固件 region 作为 QEMU 的内存拓扑来源，并让 2K1000 静态
+fallback 填入同一接口；Driver 切换动态资源前仍须保留现有板级路径，避免半迁移状态。
+早期顺序固定为“冻结入口参数 → 架构 bootstrap → 固件资源发现 → 清 BSS”；LA64
+不得在建立 DMW、异常入口和页表寄存器基线前进入资源解析。
 
 ---
 

@@ -2,14 +2,13 @@ use crate::config::PAGE_SIZE;
 use crate::fs::iov::IOVec;
 use crate::mm::{
     check_user_range, copy_from_user, copy_from_user_array, copy_to_user, copy_to_user_array,
-    AddressSpaceInner, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserPtr, UserPtrMut,
-    VirtAddr,
+    AddressSpace, FaultAccess, MapPermission, PageTableImpl, StepByOne, UserPtr, UserPtrMut, VirtAddr,
 };
 use crate::syscall::errno::*;
 use crate::task::{
     current_egid, current_euid, current_gid, current_parent_pid, current_pgid, current_pid,
-    current_sgid, current_sid, current_suid, current_task, current_tid,
-    current_uid, current_user_token, suspend_current_and_run_next, update_ready_nice, LimitPair,
+    current_sgid, current_sid, current_suid, current_task, current_tid, current_uid,
+    current_user_token, suspend_current_and_run_next, update_ready_nice, LimitPair,
     ProcessControlBlock, ProcessManager, SeccompFilterInsn, Signals, TaskControlBlock,
 };
 use crate::timer::{get_time_sec, TimeSpec};
@@ -642,9 +641,7 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> isize {
 pub fn sys_setfsuid(fsuid: usize) -> isize {
     let fsuid = match parse_optional_id(fsuid) {
         Ok(Some(fsuid)) => fsuid,
-        Ok(None) | Err(_) => {
-            return current_task().unwrap().acquire_inner_lock().fsuid as isize
-        }
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsuid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -658,9 +655,7 @@ pub fn sys_setfsuid(fsuid: usize) -> isize {
 pub fn sys_setfsgid(fsgid: usize) -> isize {
     let fsgid = match parse_optional_id(fsgid) {
         Ok(Some(fsgid)) => fsgid,
-        Ok(None) | Err(_) => {
-            return current_task().unwrap().acquire_inner_lock().fsgid as isize
-        }
+        Ok(None) | Err(_) => return current_task().unwrap().acquire_inner_lock().fsgid as isize,
     };
     let task = current_task().unwrap();
     let mut inner = task.acquire_inner_lock();
@@ -709,9 +704,11 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> isize {
             Some(len) => len,
             None => return EFAULT,
         };
-        if !task.process.vm().read(|vm| {
-            vm.contains_valid_buffer(list as usize, byte_len, MapPermission::R)
-        }) {
+        if !task
+            .process
+            .vm()
+            .read(|vm| vm.contains_valid_buffer(list as usize, byte_len, MapPermission::R))
+        {
             return EFAULT;
         }
         if size > LEGACY_NGROUPS_MAX {
@@ -969,32 +966,30 @@ fn for_process_vm_iov_chunks<F>(
     mut f: F,
 ) -> Result<(), isize>
 where
-    F: FnMut(&mut [u8]) -> Result<(), isize>,
+    F: FnMut(*mut u8, usize) -> Result<(), isize>,
 {
     let vm_ref = process.vm();
-    vm_ref.write(|vm| {
-        let mut total = 0usize;
-        for iov in iovecs {
-            if total >= cap {
-                break;
-            }
-            let len = iov.iov_len.min(cap - total);
-            append_process_vm_iov_chunks(vm, iov.iov_base, len, access, &mut f)?;
-            total += len;
+    let mut total = 0usize;
+    for iov in iovecs {
+        if total >= cap {
+            break;
         }
-        Ok(())
-    })
+        let len = iov.iov_len.min(cap - total);
+        append_process_vm_iov_chunks(&vm_ref, iov.iov_base, len, access, &mut f)?;
+        total += len;
+    }
+    Ok(())
 }
 
 fn append_process_vm_iov_chunks<F>(
-    vm: &mut AddressSpaceInner<PageTableImpl>,
+    vm: &Arc<AddressSpace<PageTableImpl>>,
     ptr: *const u8,
     len: usize,
     access: FaultAccess,
     f: &mut F,
 ) -> Result<(), isize>
 where
-    F: FnMut(&mut [u8]) -> Result<(), isize>,
+    F: FnMut(*mut u8, usize) -> Result<(), isize>,
 {
     if len == 0 {
         return Ok(());
@@ -1003,8 +998,9 @@ where
     let end = check_user_range(start, len)?;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let pa = vm.fault_in_user_va(start_va, access)?;
-        let ppn = pa.floor();
+        // 文件共享缺页可能需要在 VM 锁外等待 PageCache writeback；先完成
+        // retry，再在实际复制时重新取得 VM 锁验证 PTE，避免保存失效 PA。
+        vm.fault_in_user_va_retry(start_va, access)?;
         let mut next_vpn = start_va.floor();
         next_vpn.step();
         let mut end_va: VirtAddr = next_vpn.into();
@@ -1014,7 +1010,19 @@ where
         } else {
             end_va.page_offset()
         };
-        f(&mut ppn.get_bytes_array()[start_va.page_offset()..chunk_end])?;
+        vm.write(|inner| {
+            let pa = inner.resolve_user_va(start_va, access)?;
+            let page_offset = start_va.page_offset();
+            let chunk_len = chunk_end - page_offset;
+            let ptr = pa
+                .floor()
+                .start_addr()
+                .direct_map_ptr()
+                .wrapping_add(page_offset);
+            // VM 写锁只固定映射和 frame 生命周期；远程线程仍可能从用户态
+            // 并发访问同一内存，因此只把 raw pointer 交给复制闭包。
+            f(ptr, chunk_len)
+        })?;
         start = end_va.into();
     }
     Ok(())
@@ -1027,9 +1035,13 @@ fn copy_process_vm_iovecs_to_slice(
     dst: &mut [u8],
 ) -> Result<(), isize> {
     let mut copied = 0usize;
-    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |chunk| {
-        let end = copied + chunk.len();
-        dst[copied..end].copy_from_slice(chunk);
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Load, |src, chunk_len| {
+        let end = copied + chunk_len;
+        // Safety: chunk 的物理映射由调用层 VM 锁固定；`end <= cap <= dst.len()`，
+        // 且 scratch 目标与远程用户页不重叠。
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.cast_const(), dst.as_mut_ptr().add(copied), chunk_len)
+        };
         copied = end;
         Ok(())
     })
@@ -1042,9 +1054,11 @@ fn copy_slice_to_process_vm_iovecs(
     cap: usize,
 ) -> Result<(), isize> {
     let mut copied = 0usize;
-    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |chunk| {
-        let end = copied + chunk.len();
-        chunk.copy_from_slice(&src[copied..end]);
+    for_process_vm_iov_chunks(process, iovecs, cap, FaultAccess::Store, |dst, chunk_len| {
+        let end = copied + chunk_len;
+        // Safety: chunk 的物理映射由调用层 VM 锁固定；`end <= cap <= src.len()`，
+        // scratch 源与远程用户页不重叠。
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(copied), dst, chunk_len) };
         copied = end;
         Ok(())
     })
@@ -1736,7 +1750,7 @@ pub fn sys_sysinfo(info: *mut Sysinfo) -> isize {
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_5_MIN,
                 procs as usize * LINUX_SYSINFO_LOADS_SCALE / SEC_15_MIN,
             ],
-            totalram: crate::config::USABLE_MEMORY_SIZE,
+            totalram: crate::mm::total_memory_kbytes().saturating_mul(1024),
             freeram: crate::mm::unallocated_frames() * PAGE_SIZE,
             sharedram: UNIMPLEMENT,
             bufferram: UNIMPLEMENT,
@@ -2206,9 +2220,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> is
     // 先取得 Arc 和原子 mask，再访问调用者地址空间；这里不持 registry、
     // task 或 runqueue 锁，也不会把锁跨越可能缺页的用户拷贝。
     let allowed = task.cpus_allowed();
-    match UserPtrMut::<usize>::from_addr(mask as usize)
-        .write(current_user_token(), &allowed)
-    {
+    match UserPtrMut::<usize>::from_addr(mask as usize).write(current_user_token(), &allowed) {
         Ok(()) => mask_bytes as isize,
         Err(errno) => errno,
     }

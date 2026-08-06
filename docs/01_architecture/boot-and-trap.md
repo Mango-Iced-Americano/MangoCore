@@ -3,14 +3,17 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-01
+last_updated: 2026-08-03
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
   - "os/src/smp.rs"
+  - "os/src/hal/boot/mod.rs"
+  - "os/src/hal/firmware/mod.rs"
   - "os/src/hal/arch/riscv/entry.asm"
   - "os/src/hal/arch/loongarch64/boot.rs"
 code_paths:
+  - "os/src/hal/platform/"
   - "os/src/hal/arch/riscv/trap/"
   - "os/src/hal/arch/loongarch64/trap/"
 ---
@@ -29,7 +32,9 @@ firmware / QEMU
   → rust_main(hardware_id, boot_arg)
   → register_cpu_entry() + install_cpu_local()
      ├─ logical CPU0 → bsp_main()
-     │  → BSS / MM / machine / random 全局初始化
+     │  → 冻结 BootInfo → CPU-local bootstrap
+     │  → 冻结 FDT / 早期资源（.data.boot + .bss.boot）
+     │  → BSS → MM → PlatformInfo → machine / random 全局初始化
      │  → bring_up_secondary_cpus()
      │  → initramfs → /init → /sbin/init (PID1) → test-runner
      │  → scheduler
@@ -69,6 +74,26 @@ sibling 在自己的 CPU 完成旧用户映射/TLB 清理后 ack；只有 live c
 owner 一人时才替换地址空间。
 
 ## 启动栈与 BSS 边界
+
+BSP 在 `mem_clear()` 前完成两项不能延期的工作：`boot::init_bsp()` 用
+`spin::Once<RawBootInfo>` 冻结固件寄存器，`firmware::discover_early_resources()`
+把固定容量资源表写入 `.data.boot`，并把双架构 FDT 字节复制到 `sbss` 前的
+`.bss.boot`。FDT 原地址可能被后续内存初始化覆盖或回收，因此只保存指针并在
+`mm::init()` 后解析是不成立的。
+
+两项操作之间必须先执行 `bootstrap_init()`：入口参数冻结不依赖架构状态，必须最早
+完成；固件资源解析涉及更复杂的 Rust 内存访问，LA64 必须先建立 DMW、异常入口和页表
+寄存器基线。该顺序同时保证 RV64 直接复制 `a1` 中的 FDT，也允许 LA64 从 `a2`
+的 EFI system table 解析 FDT 后再复制。
+
+LA64 QEMU 和 2K1000 U-Boot 的入口都把 EFI system table 放在 `a2`。QEMU 入口保留
+该寄存器；2K1000 在退出 U-Boot DMW 环境后把其低 40 位物理地址交给 Rust。EFI 表内
+的嵌套指针仍由 Rust 逐项去除 DMW 段号。QEMU 必须提供 `EFI_FDT_GUID`；2K1000 可在
+合法 FDT 缺失时退回静态板级内存描述。
+
+堆就绪后，`platform::init_platform()` 才把早期快照转换为含 `String/Vec` 的 owned
+`PlatformInfo`。该对象在启动 AP 前通过 `spin::Once` 完整发布；AP 不解析固件数据、
+不写平台状态，只读取 BSP 已发布的快照。
 
 RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入口在
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`
@@ -124,16 +149,18 @@ online 只证明 CPU-local 启动完成，不等于可以访问调度器。B19 �
 早期 IPI 能工作只说明恒等映射的 text/data/idle stack 可访问，不能证明高虚拟地址
 kernel stack 已可用。
 
-运行期 PING IPI 使用另一组 Release/Acquire 关系：
+运行期 IPI mailbox 使用另一组 Release/Acquire 关系：
 
 1. 发送方用 Release 把 reason 合并进目标 `PerCpu.pending_ipi`；
 2. 广播时先发布全部目标 mailbox，再开始逐个触发 SBI 或 IOCSR doorbell；
 3. 接收方先清硬件电平源，再用 Acquire `swap(0)` 消费 mailbox；
-4. handler 完成后以 Release 增加 ack，等待方用 Acquire 观察完成。
+4. 需要完成语义的生产协议通过独立 sequence/ack 或 fixed slot 确认，
+   `RESCHEDULE` 等提示类 reason 只保留幂等状态。
 
-mailbox 表示“待处理原因集合”，不是可累计的事件队列。当前 PING 测试由
-CPU0 串行发送，同一目标收到 ack 后才复用 PING bit；后续需要累计语义的
-shootdown/STOP 会使用独立 sequence 或 slot，不能把事件次数塞进 reason bit。
+mailbox 表示“待处理原因集合”，不是可累计的事件队列。B95 删除早期启动阶段
+只供 ktest 使用的 PING/ROUND_TRIP reason 和 Per-CPU ack 字段；focused test
+改为直接验证生产 `MEMORY_BARRIER` 的 request/ack。TLB shootdown、membarrier
+和 STOP 各自使用独立 sequence、slot 或终态 ack，不能把事件次数塞进 reason bit。
 发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
 已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
 
@@ -200,7 +227,8 @@ LA64 通过固定 per-CPU slot 传递 ASID/range 并执行 `invtlb 0x5`。B51 �
 CPU detach；B52 已把双架构精准后端扩展到最多 64 页的连续区间，更大跨度仍全刷。
 B53 规定软件 range handler 在硬件失效后、slot ack 前推进目标 CPU 的 observed
 generation，避免本次 IPI 返回用户态时再由激活路径全刷。真实用户 CoW 探针在静默 timer
-窗口内验证了这一顺序，而不只观察 request/ack 计数器。
+窗口内验证了这一顺序，而不只观察 request/ack 计数器。B82 在同一窗口继续执行正式
+`munmap + MAP_FIXED_NOREPLACE`，证明远端用户 load 不会在同一 VPN 重映射后继续读取旧 PPN。
 
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入
@@ -209,18 +237,23 @@ Rust 后由 `current_trap_task()` 克隆本 CPU current，并在锁外校验状�
 每次返回用户态仍由执行返回的 CPU 重写 trap context 中的 `tp/$r21` 锚点并激活该
 MM 的页表根与 ASID。
 
-AP→BSP 往返把“中断内确认”和“发送回复”分成两个阶段：
+B45 将 Rust 可变访问统一收口到
+`TaskControlBlockInner::trap_context_mut(&mut self)`；B87 进一步删除物理地址层能从安全
+函数返回 `'static` 引用的五个通用 helper。现在只有 TCB owner 在持有 `task.inner` guard
+时，才会从 trap frame 物理页的直映 raw pointer 建立 `&mut TrapContext`，其生命周期绑定
+到 `&mut self`。trap return 释放 guard 后只把既有 frame 地址交给不返回的恢复汇编；
+frame 地址、布局和双架构 ABI 均未改变。
 
-1. AP hard-IRQ handler 只以 Release 发布 `round_trip_reply_pending`；
-2. AP 返回 idle stack，在全局中断关闭时以 Acquire 消费 deferred work；
-3. idle 路径调用普通 `send_ipi()`，向 CPU0 发布回复并触发 doorbell；
-4. CPU0 共用用户/内核 trap 的 IPI fast path，以 Release 增加 reply ack；
-5. 发起方以 Acquire 观察 ack 后，才复用同一 reason bit 发起下一轮。
+AP→BSP 方向由绑定 AP 的 kernel-only helper 调用生产
+`synchronize_memory(bit(CPU0))` 覆盖。AP 先发布 CPU0 的 request，再触发
+doorbell，并在不持普通锁时等待 ack；CPU0 在受控 IRQ-on 窗口进入共用的
+用户/内核 IPI fast path，执行完整屏障后 Release 发布 ack。该链路直接证明
+正式 membarrier mailbox，而不再维护“请求 AP 回送测试 IPI”的第二套协议。
 
 AP 的等待协议是“关闭全局中断—重查 deferred work—执行一次架构
 `wfi`/`idle 0`—恢复原中断状态”。本地 IPI line 始终保持 enabled，因此
 doorbell 在重查之后到达时会保持 pending 并唤醒 CPU；不会出现检查为空后
-永久睡眠的 lost wakeup。发送回复可能失败的诊断也只更新 per-CPU 原子
+永久睡眠的 lost wakeup。doorbell 失败诊断只更新 per-CPU 原子
 计数，不把日志、锁或分配带回 hard IRQ。
 
 STOP 复用 reason mailbox 传递终态请求，但使用独立的 `stopped` ack 表达
@@ -280,13 +313,21 @@ RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上�
 LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
 诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
 vector 1，再消费 mailbox，避免陈旧 BADV 产生误诊，也避免在尚未多核安全的
-console 路径中打印。timer fast path 同样先于 BADV 诊断，并只清 TICLR、
-发布当前 CPU 的 deferred 状态。
+console 路径中打印。timer fast path 同样先于 BADV 诊断；它先清 `TCFG.En` 停止倒计时，
+再写 TICLR 清除 level-triggered pending，最后只发布当前 CPU 的 deferred 状态。
 
 两个架构的 IPI handler 只执行原子操作和有界的本地 TLB 失效：不分配内存、不获取
 普通锁、不打印，也不直接切换任务。CPU0 已打开 RV64 SSIE 或 LA64 ECFG.IPI，
 用户态和内核态 trap 共用同一 fast path；B39 后 AP 同时打开 IPI 与本地 timer，
 external interrupt 继续关闭。AP 的 timer 只发布本地调度工作，不执行全局 callback。
+
+B92 为这条生产路径增加了逐 CPU 诊断：发送端在 mailbox 发布后按目标 CPU 数累计各类
+reason，接收端分别累计 hard handler 进入次数和实际从 mailbox 消费的 reason bit，硬件
+doorbell 失败则统一在 `send_ipi_mask()` 记到发起 CPU。计数全部使用 `Relaxed`，不参与
+mailbox/ack 的正确性同步。由于同一个 reason 在接收前可合并为一个 bit，`published` 大于
+`consumed` 是允许的，不能把两者差值直接解释成“丢 IPI”；应结合 request/ack、失败计数和
+目标 CPU 状态判断。
+
 AP 的回复 doorbell 和不可返回 STOP 都在返回 idle
 stack 后执行，而不在 handler 内递归触发跨核操作或遗弃 trap frame。
 `RESCHEDULE` handler 只设置本地提示；真正 fetch/context switch 发生在 AP idle，或
@@ -344,8 +385,8 @@ pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打
 
 每个在线 CPU 的用户/内核 timer trap 共用同一 hard-IRQ fast path：
 
-1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 清除 level-triggered
-   TICLR，非周期 TCFG 保持停止；
+1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
+   再写 TICLR 清除 level-triggered pending；
 2. 当前 `PerCpu.timer_irq_count` 只做无锁诊断计数；
 3. 以 Release 发布 `timer_pending=true` 后立即返回被中断现场。
 
@@ -394,9 +435,9 @@ make ktest ARCH=la64 PROFILE=normal CORE_NUM=2 KTEST=smp
 
 双架构构建必须串行。focused SMP 测试不仅检查 QEMU 退出码，还要检查
 configured CPU 数、online/idle mask、独立 CPU-local 指针、测试 PASS 和无
-panic。Phase 2 的 IPI 用例要求 CPU0 既能单播 PING，也能在统一的一秒期限
-内向全部 online AP 广播并逐项观察对应 ack；四核 AP→BSP 用例还要让三个
-AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。RISC-V
+panic。Phase 2 的 IPI 用例通过生产 `MEMORY_BARRIER` sequence/ack 验证
+CPU0→单个 AP、CPU0→全部 AP 和 AP→CPU0 三个方向；多核 AP→BSP 用例让每个
+AP 各完成 64 轮正式同步，并在每轮 ack 后才推进下一序号。RISC-V
 应保留一次物理启动 hart 不等于 0 的映射证据。deferred timer 用例连续
 执行两轮真实内核 timer IRQ，分别断言 hard IRQ 不推进 deferred 计数、
 不切换当前任务，以及安全点恰好消费一批并成功重编程下一轮。STOP 属于
@@ -404,7 +445,7 @@ AP 各完成 64 轮顺序请求/回复，并在每轮 ack 后才复用 reason。
 以及生产 shutdown 再次调用协议时走幂等快路径。
 B14 还必须在窗口内真实 yield：新任务首次从 idle 切入时观测
 IRQ-off，原任务恢复后观测 IRQ-on，并在恢复后完成一次真实
-AP→BSP IPI reply。
+AP→BSP membarrier IPI/ack。
 B29 要求双架构 8 核日志实际出现 `smp::user_task_migrates_on_yield`，并验证
 CPU0 起跑、yield 后 CPU1 续跑、CPU0 wait/reap、退出后的 current/runqueue/zombie 与
 TCB 强引用都已收口；

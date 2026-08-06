@@ -101,7 +101,9 @@ fn state(cpu: usize) -> &'static super::processor::CpuTaskState {
 }
 
 fn add_running(cpu: usize) {
-    state(cpu).nr_running.fetch_add(1, Ordering::Relaxed);
+    let cpu_state = state(cpu);
+    let len = cpu_state.nr_running.fetch_add(1, Ordering::Relaxed) + 1;
+    cpu_state.record_run_queue_len(len);
 }
 
 fn sub_running(cpu: usize, count: usize) {
@@ -203,7 +205,9 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     );
     // 从这一刻起任务已由本 CPU current 路径唯一拥有。后续 Running ->
     // Blocking -> Blocked 的 AcqRel 状态链会把该提示发布给远程唤醒方。
-    task.note_running_cpu(cpu);
+    if task.note_running_cpu(cpu) {
+        state(cpu).record_migration();
+    }
     Some(task)
 }
 
@@ -280,7 +284,10 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         TaskStatus::Running(cpu),
         "claim stolen task",
     );
-    task.note_running_cpu(cpu);
+    if task.note_running_cpu(cpu) {
+        state(cpu).record_migration();
+    }
+    state(cpu).record_steal();
     Some(task)
 }
 

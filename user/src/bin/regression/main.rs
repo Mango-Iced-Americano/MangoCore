@@ -14,6 +14,8 @@ mod regression_timer_realtime_jump;
 mod regression_rename_long_name;
 mod regression_lwext4_truncate_hole;
 mod regression_clone_vm_second_slot;
+mod regression_proc_cpu;
+mod regression_signalfd;
 
 use user_lib::println;
 
@@ -21,7 +23,7 @@ use user_lib::println;
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0u32;
     let mut failed = 0u32;
-    let total = 6u32;
+    let total = 8u32;
 
     println!("TAP version 13");
     println!("1..{}", total);
@@ -51,10 +53,20 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if r == 0 { passed += 1; println!("ok 5 lwext4_truncate_hole"); }
     else { failed += 1; println!("not ok 5 lwext4_truncate_hole"); }
 
-    // Test 6: vfork CLONE_VM second user-resource slot
+    // Test 6: signalfd blocking read and fork-inherited descriptor
+    let r = regression_signalfd::run();
+    if r == 0 { passed += 1; println!("ok 6 signalfd"); }
+    else { failed += 1; println!("not ok 6 signalfd"); }
+
+    // Test 7: configured SMP topology is visible through procfs.
+    let r = regression_proc_cpu::run();
+    if r == 0 { passed += 1; println!("ok 7 proc_cpu"); }
+    else { failed += 1; println!("not ok 7 proc_cpu"); }
+
+    // Test 8: vfork may share the caller's VM; keep this destructive probe last.
     let r = regression_clone_vm_second_slot::run();
-    if r == 0 { passed += 1; println!("ok 6 clone_vm_second_slot"); }
-    else { failed += 1; println!("not ok 6 clone_vm_second_slot"); }
+    if r == 0 { passed += 1; println!("ok 8 clone_vm_second_slot"); }
+    else { failed += 1; println!("not ok 8 clone_vm_second_slot"); }
 
     println!("# results: {} passed, {} failed, {} total", passed, failed, total);
 

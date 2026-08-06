@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-03
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -50,8 +50,22 @@ os/src/hal/
 │       ├── time.rs
 │       ├── tlb.rs
 │       └── trap/
+├── boot/
+│   └── mod.rs
+├── firmware/
+│   ├── mod.rs
+│   ├── efi.rs
+│   ├── fdt.rs
+│   └── static_provider.rs
+├── device/
+│   ├── mod.rs
+│   └── manager.rs
 ├── configs/
 └── platform/
+    ├── mod.rs
+    ├── info.rs
+    ├── riscv/
+    └── loongarch64/
 ```
 
 `configs/` 存放平台配置 toml，`platform/` 存放板级常量；实际内核代码通过架构后端 re-export 使用这些常量。
@@ -66,6 +80,10 @@ os/src/hal/
 | 配置 | `config` | 架构配置模块 |
 | 栈 | `kstack_alloc`, `KernelStack`, `trap_cx_bottom_from_tid`, `ustack_bottom_from_tid` | 内核栈和用户栈/trap context 地址计算 |
 | 启动 | `bootstrap_init`, `machine_init` | 早期机器初始化和运行期机器初始化 |
+| 启动快照 | `boot::{init_bsp, boot_info}` | BSP 在清 BSS 前冻结硬件 CPU ID、协议入口指针与镜像地址，AP 只读 |
+| 固件发现 | `firmware::*` | 双架构共享预堆 FDT 快照和资源解析；2K1000 允许静态内存回退 |
+| 平台模型 | `platform::{init_platform, platform_info}` | 堆就绪后发布一次 owned、不可变的平台与设备描述 |
+| 设备查询 | `device::DeviceManager` | 按 compatible、设备类别和 MMIO 资源只读查询平台设备 |
 | 用户 ABI | `user_hwcap` | 生成当前架构可安全暴露给 ELF `AT_HWCAP` 的能力位 |
 | console | `console_write_bytes`, `panic_console_write`, `console_getchar` | 正常批量输出、panic 无锁输出和字符输入 |
 | 中断 | `local_irq_save`, `local_irq_restore` | 保存/恢复本地中断状态 |
@@ -82,6 +100,10 @@ os/src/hal/
 
 ```rust
 pub mod arch;
+pub mod boot;
+pub mod device;
+pub mod firmware;
+pub mod platform;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
@@ -120,7 +142,50 @@ pub const MAX_RW_COUNT: usize =
 
 这组导出构成 HAL 对上层的稳定命名面。MM 层通过 `PageTableImpl` 和 `tlb_invalidate` 操作页表；task 层通过 `KernelStack`、`TrapContext`、`__switch`、`trap_return` 完成调度与返回用户态；syscall/trap 层通过 `get_bad_addr()`、`get_exception_cause()`、`program_timer_delta()` 接入异常和时钟。`IO_CHUNK_SIZE` 用于限制 I/O bounce buffer 的单块大小；`MAX_RW_COUNT` 对齐 Linux 可见的单次读写上限。
 
-## 4. 架构选择
+时间子系统不再维护第二套可变时钟源注册表。B90 删除了从未有读者的
+`TIME_SOURCE static mut`、`TimeSource/init_time_source()` 和硬编码 RISC-V MTIME 实现。
+架构无关层现在唯一从 HAL `get_time()/get_clock_freq()` 取得单调计数和频率；
+realtime 只在 `timer.rs` 保存原子 `BOOT_TIME_OFFSET_NS`。RV64 的频率来自已冻结
+FDT，LA64 来自 CPUCFG/原子 `CLOCK_FREQ`，不存在 AP 并发覆盖 trait object 指针的路径。
+
+## 4. 固件与平台的两阶段初始化
+
+平台发现被明确拆成两个生命周期，不把可分配对象带进清 BSS 之前的脆弱阶段：
+
+| 阶段 | 入口 | 可分配 | 发布内容 |
+|------|------|--------|----------|
+| 固件快照 | `boot::init_bsp()`、`firmware::discover_early_resources()` | 否 | `.data.boot` 中的入口/资源元数据，以及 `sbss` 前 `.bss.boot` 中的双架构有界 FDT 字节快照 |
+| 平台模型 | `platform::init_platform()` | 是 | `spin::Once<PlatformInfo>`，包含 model、cmdline、设备、console 与 PCI host 描述 |
+
+固定启动次序为 `boot::init_bsp()` → `bootstrap_init()` →
+`firmware::discover_early_resources()` → `mem_clear()`。入口寄存器最先冻结；LA64 在资源
+发现前先建立 DMW、异常入口和页表寄存器基线；RV64 FDT 仍在清 BSS 前完成复制。
+
+RV64 的 FDT 地址来自 SBI 标准入口 `a1`。解析器先验证协议、四字节对齐、magic 和
+有界 `totalsize`，完整复制后才发布长度；后续解析只读副本，不再依赖固件原地址。
+`/cpus/timebase-frequency` 同时成为 RV64 `get_clock_freq()` 的真实来源，缺失时启动
+明确失败，避免 timer 与 SMP timeout 在错误频率域运行。
+
+LoongArch 使用其固件 ABI：QEMU direct boot 与 2K1000 U-Boot 都在 `a2` 传 EFI system
+table，入口将它规范成 `rust_main` 的第二参数。早期 EFI 解析器先去除 DMW 段号，再用
+system table 签名、可信 DRAM 范围、对齐和最多 32 个 configuration table 条目约束读取，
+最后按 `EFI_FDT_GUID` 取得 FDT。system table 内的 configuration table/FDT 嵌套指针也
+必须分别规范化，不能只处理最外层 `a2`。
+
+LA64 QEMU 将 FDT 作为必需启动合同：缺失或非法时明确失败；2K1000 的部分已部署 U-Boot
+不会安装有效 FDT 表项，因此该板在 EFI/FDT 不可用时退回经过实板验证的双内存 bank 和
+固件保留区。若 2K1000 提供合法 FDT，则优先走与 QEMU/RV64 相同的解析路径。LA64 timer
+频率仍来自 CPUCFG，不要求 RISC-V 专属的 `/cpus/timebase-frequency`。
+
+FDT 原始字节位于 `.bss.boot`，每个双架构 linker script 都显式把该输入节放在 `sbss`
+之前；它既不会被 `mem_clear()` 覆盖，也不会以 2 MiB 零填充扩大 objcopy 二进制。
+
+MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame allocator、
+内核 RAM 映射、LA64 identity dirty 元数据以及用户可见内存统计。QEMU 的运行期 FDT
+因此是内存容量权威来源；2K1000 无合法 FDT 时仍通过同一接口读取静态 fallback。
+动态 early-MMIO 映射以及 FS/Net/Driver 的设备资源迁移仍属于后续共享子系统批次。
+
+## 5. 架构选择
 
 `hal/arch/mod.rs` 使用 feature 选择后端：
 
@@ -131,9 +196,9 @@ pub const MAX_RW_COUNT: usize =
 
 两套后端都导出同名的 `bootstrap_init()`、`machine_init()`、`trap_handler()`、`trap_return()`、`PageTableImpl`、`TrapContext`、`KernelStack` 等接口。架构无关层只依赖这些统一名字。
 
-## 5. RISC-V 后端
+## 6. RISC-V 后端
 
-### 5.1 模块地图
+### 6.1 模块地图
 
 | 模块 | 作用 |
 |------|------|
@@ -145,7 +210,7 @@ pub const MAX_RW_COUNT: usize =
 | `time.rs` | `get_time()`、`get_clock_freq()`、`program_timer_delta()` |
 | `trap/` | trap context、汇编入口、syscall/缺页/timer 分发 |
 
-### 5.2 初始化
+### 6.2 初始化
 
 `hal/arch/riscv/mod.rs` 中：
 
@@ -164,7 +229,7 @@ rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 IPI，并在多核配置
 RFENCE；缺失或探测失败时明确打印软件 IPI fallback。CPU0 和 AP 都由
 `task::timer_cpu_init()` 先写未来 deadline，再通过 HAL 开放本地 timer source。
 
-### 5.3 Trap 路径
+### 6.3 Trap 路径
 
 RISC-V trap 后端负责：
 
@@ -178,9 +243,9 @@ RISC-V trap 后端负责：
 
 `trap_return()` 调用 `do_signal()` 后设置用户 trap entry 为 trampoline，跳转到 `__restore`，传入 trap context 虚拟地址和用户页表 token，并执行 `fence.i`。
 
-## 6. LoongArch64 后端
+## 7. LoongArch64 后端
 
-### 6.1 模块地图
+### 7.1 模块地图
 
 | 模块 | 作用 |
 |------|------|
@@ -193,7 +258,7 @@ RISC-V trap 后端负责：
 | `trap/` | trap context、异常分发、非对齐访存模拟、返回用户态 |
 | `acpi.rs`, `boot.rs`, `sbi.rs` | la64 平台相关辅助 |
 
-### 6.2 `bootstrap_init()`
+### 7.2 `bootstrap_init()`
 
 la64 的早期初始化较重：
 
@@ -211,7 +276,7 @@ la64 的早期初始化较重：
 
 这些配置发生在 `main.rs::mem_clear()` 之前，因此文档把它归入“架构早期初始化”。
 
-#### 6.2.1 ELF `AT_HWCAP`
+#### 7.2.1 ELF `AT_HWCAP`
 
 `AddressSpace` 构造用户栈时通过 HAL 的 `user_hwcap()` 填写 `AT_HWCAP`，不能在架构无关代码中写死同一个数字。RISC-V 返回 Linux ISA 字母位图 `0x112d`（IMAFDC）；LoongArch 按 CPUCFG1/2 映射 CPUCFG、LAM、UAL、FPU、LSX、CRC32、COMPLEX、CRYPTO、LVZ、PTW 和 LSPW。
 
@@ -223,7 +288,7 @@ HWCAP 表示“用户态可安全使用”的能力，不只是裸硬件能力�
 路径恢复。因此 CPUCFG2 报告 LSX 且这条上下文链完整时，才可打开 `EUEN.SXE` 并发布
 `HWCAP_LSX`。LASX 和 LBT 仍未进入上下文，对应 EUEN/HWCAP 继续关闭。
 
-### 6.3 `machine_init()`
+### 7.3 `machine_init()`
 
 la64 `machine_init()` 做运行期配置：
 
@@ -247,7 +312,7 @@ dirty 位图补充状态。该表使用 `AtomicUsize` word：置位采用 `fetch
 这些操作只保证 dirty bit 本身无数据竞争；映射的创建、撤销和生命周期仍由
 `KERNEL_SPACE` 锁管理，所以无需用 dirty 原子发布页表内容。
 
-### 6.4 Trap 路径
+### 7.4 Trap 路径
 
 la64 trap 后端覆盖：
 
@@ -263,7 +328,7 @@ la64 trap 后端覆盖：
 
 `trap_return()` 调用 `do_signal()`，设置 exception entry 为 `strampoline`，配置 `pplv=3` 与 `pie=true`，把 trap context、用户页表 token 和 ASID 交给恢复汇编。
 
-## 7. HAL 与上层的接口契约
+## 8. HAL 与上层的接口契约
 
 | 契约 | 依据 | 影响 |
 |------|------|------|
@@ -277,7 +342,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 
 读 HAL 相关 bug 时，应先确认失败发生在契约哪一侧：如果 `sys_read` 参数已经错，问题在 trap ABI；如果参数正确但文件语义错，问题在 syscall/fs；如果 `mprotect` 后仍可写，问题可能在页表/TLB；如果 signal handler 没进，先看 `trap_return()` 是否执行 `do_signal()`，再看 signal 模块是否有 pending。
 
-## 8. 调试入口
+## 9. 调试入口
 
 | 问题 | 首选文件 | 断点/检查点 |
 |------|----------|-------------|
@@ -287,7 +352,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | la64 dirty bit 问题 | `hal/arch/loongarch64/trap/mod.rs`, `laflex.rs` | page modify 成功后的 `set_dirty_bit()` |
 | TLB 陈旧 | `hal/arch/riscv/sv39.rs`, `hal/arch/loongarch64/tlb.rs` | invalidate 调用点 |
 
-## 9. 测试映射
+## 10. 测试映射
 
 | 测试目标 | 覆盖接口 | 推荐验证 |
 |----------|----------|----------|
@@ -297,11 +362,15 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | 缺页处理 | trap + MM | mmap、fork、exec、page fault 用例 |
 | timer interrupt | HAL time + task timer | nanosleep、futex timeout、timer 系统调用 |
 
-## 10. 源文件索引
+## 11. 源文件索引
 
 | 路径 | 内容 |
 |------|------|
 | `os/src/hal/mod.rs` | 公共导出、`IO_CHUNK_SIZE`、`MAX_RW_COUNT` |
+| `os/src/hal/boot/mod.rs` | BSP 固件入口快照与启动协议 |
+| `os/src/hal/firmware/` | 预堆 FDT/静态资源发现与 FDT 保留快照 |
+| `os/src/hal/platform/` | post-heap 不可变平台模型与板级常量 |
+| `os/src/hal/device/manager.rs` | 平台设备只读查询接口 |
 | `os/src/hal/arch/mod.rs` | feature 选择和后端 re-export |
 | `os/src/hal/arch/riscv/mod.rs` | rv64 后端模块、类型别名、初始化 |
 | `os/src/hal/arch/riscv/sv39.rs` | SV39 页表和 `sfence.vma` |
@@ -310,4 +379,3 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/arch/loongarch64/laflex.rs` | la64 页表实现 |
 | `os/src/hal/arch/loongarch64/tlb.rs` | la64 ASID/TLB |
 | `os/src/hal/arch/loongarch64/trap/mod.rs` | la64 trap/syscall/page fault/timer/unaligned access |
-| `os/src/hal/platform/` | 板级常量 |

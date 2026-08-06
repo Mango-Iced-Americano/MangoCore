@@ -2,7 +2,7 @@
 title: "统一 CI 与 L5 评分"
 category: testing
 status: stable
-last_update: 2026-07-25
+last_update: 2026-08-03
 code_paths:
   - ".github/workflows/ci.yml"
   - "scripts/score_test.py"
@@ -12,41 +12,43 @@ code_paths:
 
 # 统一 CI 与 L5 评分
 
-`.github/workflows/ci.yml` 是 `develop` 与 `main` 唯一的 CI 定义：两分支 push、目标为两分支的 PR 和手动 dispatch 都运行同一条路径。手动 dispatch 的 `qemu_timeout` 直接成为 `QEMU_TIMEOUT`；默认值为 7200 秒。
+`.github/workflows/ci.yml` 是统一 CI 定义：任意分支的 push、PR 和手动 dispatch 都运行同一条路径。手动 dispatch 的 `qemu_timeout` 直接成为 `QEMU_TIMEOUT`；默认值为 7200 秒。
 
 ## 执行顺序与失败处理
 
-CI 采用 5 层顺序流水线，每层在独立的 Docker 容器中运行，使用 `docker compose up -d` / `docker compose exec` / `docker compose down` 模式：
+CI 先执行工具链合同，随后各测试 job 可以独立运行；同一个 job 内始终按照 RV64 → LA64 串行执行，避免共享工具链和生成状态竞态。所有构建和测试都使用 `docker compose up -d` / `docker compose exec` / `docker compose down` 模式：
 
 | 层 | Job | 命令 | 超时 |
 |----|-----|------|------|
-| 0 | `toolchain-contracts` | 工具链验收合约（不变） | 5 min |
-| 1 | `clippy` | `cargo clippy --features "board_rvqemu block_virt" -- -D warnings` | 15 min |
-| 2 | `cargo-test` | `cargo test --features "board_rvqemu block_virt"` | 15 min |
-| 3 | `ktest` | `make -C os rv64-ktest`（内核自检，无磁盘） | 15 min |
-| 4 | `regression` | `make test ARCH=rv64 PROFILE=regression`（initramfs 仅） | 15 min |
-| 5 | `comp` | `timeout 7200s make -f make/rv64.mk comp`（11 组，mask=0xFDF） | 350 min |
+| 0 | `toolchain-contracts` | Make/Rustup/source-purity 合同；失败会被记录，但不阻止其余 job 提供诊断 | 5 min |
+| 1 | `clippy` | 双架构 board/block feature，RV64 → LA64 | 20 min |
+| 2 | `cargo-test` | host `mango-kernel-core` 单元测试，两次架构配置串行执行 | 20 min |
+| 3 | `ktest` | `rv64-ktest` → `la64-ktest` | 30 min |
+| 4 | `regression` | 双架构 regression QEMU | 30 min |
+| 5a | `comp-rv` | RV64 比赛镜像，mask=`0xFDF` | 350 min |
+| 5b | `comp-la` | LA64 比赛镜像，mask=`0xFDF` | 350 min |
 
-每层通过 `needs:` 保证顺序：前一层的测试全部通过后，下一层才启动。仅构建 RV64 架构（LA64 不在 CI 中运行，以加速反馈周期）。
+`clippy`、`cargo-test`、`ktest`、`regression`、`comp-rv` 和 `comp-la` 都只依赖 `toolchain-contracts`，彼此没有串行依赖。这里的“层”表示验证深度，不表示所有 job 在 GitHub runner 上依次排队。
 
 ### 各层详情
 
-**Layer 1 (clippy)：** 运行 cargo clippy 的静态分析，`-D warnings` 将任何 warning 提升为 error。无 QEMU 依赖，纯 host-side 检查。
+**Layer 1 (clippy)：** 在 Docker 内运行双架构 cargo clippy。SMP 分支在 HAL v2 融合前仍使用 `board_rvqemu`/`board_laqemu` feature；不能提前使用 develop 的 `boot_la_qemu` 名称。
 
-**Layer 2 (cargo test)：** 运行 `mango-kernel-core` 的纯逻辑单元测试（L1 测试集），在 host 上执行，无需 QEMU。
+**Layer 2 (cargo test)：** 在 Docker 内以 host target 运行 `mango-kernel-core` 的纯逻辑单元测试，无需 QEMU。
 
 **Layer 3 (ktest)：** 构建内核并启动 QEMU 执行内核自检（L3 测试集），使用 initramfs 而非磁盘，测试完成后 shutdown。输出 TAP 格式测试结果。
 
 **Layer 4 (regression)：** 构建内核（regression profile），启动 QEMU 执行用户态回归测试（L4 测试集），使用 initramfs 而非磁盘。检测串口输出中的 `[L4 REGRESSION RESULT: PASS]` 字样。
 
-**Layer 5 (comp)：** 完整的竞赛场景——
-1. 下载/还原缓存官方测试镜像 `sdcard-rv.img`
-2. 注入 `os_test.conf`（mask=0xFDF，排除 unixbench/cpython）
-3. 构建内核及用户程序
-4. 运行 `make -f make/rv64.mk comp`，QEMU 完成 11 组测试后 shutdown
-5. comp 目标直接根据测试结果返回退出码（CI 由此判断通过/失败）
+**Layer 5 (comp)：** RV64 与 LA64 分为两个独立 job，分别执行完整竞赛场景——
 
-> ⚠️ 不同于旧版 CI，comp 层不再运行 `python3 scripts/run_full_test.py --serial`，也不生成评分 JSON 或上传 artifact。测试通过与否完全由 `make comp` 的退出码决定。
+1. 下载/还原缓存官方测试镜像 `sdcard-rv.img`
+2. 注入 `os_test_ci.conf`（mask=0xFDF，排除 unixbench/cpython）
+3. 构建内核及用户程序
+4. 运行相应架构的 `derived-comp`，QEMU 完成测试后 shutdown
+5. 保存原始串口日志，在容器内生成评分 JSON，并以 `--table` 打印人类可读的 pass/total 表格
+
+CI 当前没有上传评分 artifact；JSON 位于 job 容器的 `/tmp`，表格进入 Actions 日志。`Score` 步骤用于汇总展示，QEMU/`derived-comp` 的退出状态仍是运行阶段的主要门禁。
 
 ## 选择的测试组与掩码
 
@@ -66,13 +68,15 @@ CI 采用 5 层顺序流水线，每层在独立的 Docker 容器中运行，使
 
 分段并运行同一批 `judge_*.py`。列表型 judge 输出中每项 `score/pass > 0` 视为一个通过项；对象型输出直接使用 `pass` 与 `all`。未出现、空或不可解析的组记为 0/0，必然不能通过。
 
-对每个架构有 22 个等权的 `(group, libc)` 变体。变体通过率为 `pass / (pass + fail)`，总分为：
+对每个架构最多有 22 个等权的 `(group, libc)` 变体。变体通过率为 `pass / (pass + fail)`。judge 列表中 `all=0` 的占位项不进入统计；显示分数只平均实际产生测试数据的变体：
 
 ```text
-score = 100 / 22 × Σ variant_pass_rate
+R = { variant | variant_total > 0 }
+score = 0                              if R is empty
+score = 100 / |R| × Σ rate(variant)    otherwise
 ```
 
-这避免 LTP 的大量断言数压过其余组，同时 JSON 仍保留每个变体的实际 pass/fail 数。basic 与 busybox 的每个 libc 变体必须 `fail == 0` 且至少执行一个测试；其余九组的每个 libc 变体必须至少执行一个测试且通过率不低于 90%。任一架构的任一变体不满足门槛即令该架构 JSON 的 `passed` 为 `false`，CI 因此失败。
+这避免 LTP 的大量断言数压过其余组，也避免无数据占位项扭曲展示分数。缺失变体虽然不进入显示分数的分母，但仍会使 `passed=false`，不能借此绕过门禁。basic 与 busybox 的每个 libc 变体必须 `fail == 0` 且至少执行一个测试；其余九组的每个 libc 变体必须至少执行一个测试且通过率不低于 90%。JSON 保留每个变体的实际 pass/fail 数；传入 `--table` 时 stdout 改为简洁表格，JSON 文件仍照常生成。
 
 输出形状为：
 

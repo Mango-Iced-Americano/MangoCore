@@ -70,7 +70,7 @@ trap 问题要区分入口 ABI、领域处理和返回用户态三段：
 |------|------|----------|
 | console poll | `hal::console_getchar()` | Ctrl+C、Ctrl+T、TTY 输入 |
 | timeout wake | `do_wake_expired()` | nanosleep、futex timeout、poll/select timeout |
-| network poll | `NET_INTERFACE.try_poll()` | socket connect/accept/send/recv 进展 |
+| network poll | `NET_INTERFACE.request_poll()` / `poll_now()` | 阻塞路径由 CPU0 worker 推进；非阻塞路径做一次有界扫描 |
 | FS reclaim | `fs::reclaim::maybe_reclaim_fs_caches()` | PageCache 压力、写回/回收 |
 | zombie drain | `take_zombie_tasks(64)` | fork/exit 压力下内核栈释放 |
 | shared futex compact | `compact_shared_futex()` | shared futex 表失效 waiter 清理 |

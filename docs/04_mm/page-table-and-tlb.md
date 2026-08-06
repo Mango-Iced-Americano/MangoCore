@@ -3,7 +3,7 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-04
 tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp, membarrier]
 ---
 
@@ -48,6 +48,12 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | `take_frames()` | 移出页表自身持有的页表页，交给 TLB retirement 延迟释放 |
 
 trait 的存在把 VMA 管理、缺页策略和具体 PTE 编码解耦。
+
+B86 又把 trait 下方的借用边界收紧：`PhysPageNum` 的原始 PTE 视图仅在 crate 内以
+`unsafe` 暴露，并明确拆成只读 `get_pte_array()` 与可写 `get_pte_array_mut()`。架构页表的
+只读 walk 只能得到 `&PTE`；所有 PTE writer，包括 `block_and_ret_mut*()`，都必须先取得
+`&mut PageTable`。`AddressSpace` 的 VM 锁仍负责跨 CPU 动态同步，而 Rust 独占借用负责阻止
+同一个页表对象从共享引用制造可变 PTE；两层约束缺一不可。
 
 ## 3. 访问类型
 
@@ -207,6 +213,14 @@ observed generation，最后才 ack。否则 IPI 返回用户态时的 generatio
 区间内的稀疏修改会多失效中间少量页面；跨度超过 64 页仍全刷，以限制 hard-IRQ handler
 的最坏工作量。
 
+B93 在发起 CPU 增加始终可用的远端 shootdown 诊断，但不改变上述提交链。每轮跨核同步
+只归入一种后端：kernel-global 全刷、原生 user 全刷、RV64 firmware 精准区间、软件
+slot/IPI 精准区间，或 slot 被占用后的 range→full fallback。另累计真正进入精准后端的
+区间页数、尝试覆盖的远端 CPU 数，以及从后端选择到同步结束的总/最大 raw timer ticks。
+本地-only flush、无 live target 和参数校验失败不算 shootdown；doorbell 单点失败由 IPI
+诊断统计，只有最终同步返回错误才增加 TLB failure。全部计数属于 Relaxed best-effort
+快照，不参与 request/ack、generation、ASID 或 frame 退休同步，也不在 hard IRQ 中计时。
+
 B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
 释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
 
@@ -322,8 +336,16 @@ cached CPU 集合替换为调度器维护的 active mask，并用零目标 gener
 detach。B52 将 `FlushRange::Page` 泛化为最多 64 页的半开 `Range`，RV64 直接把
 start/size/ASID 交给 SBI RFENCE，双架构固件 fallback 使用固定区间 slot。B53 让 CPU1
 用户探针先填充旧 PPN 翻译，再由 CPU0 通过真实私有 CoW 替换 PTE；timer 静默窗口内只有
-精准 handler 能使后续普通用户 load 读到新页 canary，双架构 8 核两轮均通过。默认亲和性、
-通用用户迁移以及 `mprotect/munmap` 权限/有效位的扩展压力仍未完成。
+精准 handler 能使后续普通用户 load 读到新页 canary。B82 在同一窗口继续通过正式
+`munmap + MAP_FIXED_NOREPLACE` 替换同一 VPN，要求用户 load 再读到第三个物理页 canary，
+并确认两次单页修改都未退化为全用户刷新。B84 又在 mprotect 返回并收齐 ack 后放行远端
+store，要求它以 SIGSEGV 结束。该门禁发现 LA64 只清页表遍历使用的 W 位、未清真正进入
+TLB 的 D 位；底层 `revoke_write()` 改为同步清 W/D 后双架构通过。默认亲和性、通用用户
+迁移仍受共享子系统门禁约束。B85 把原先直接调用同步原语的并发用例替换为 8 CPU
+真实 `AddressSpace::write(mprotect)`：VM 锁内 PTE 写串行，解锁后的多代 `TlbFlush`
+交错执行，并验证全部 CPU observed、active mask 清零和无全刷退化。B86 不改变 PTE 位或
+失效协议，只把页表底层的“共享 `PageTable` 借用可产生可变 PTE”收口为只读/可写 raw view
+分离，并让双架构所有 writer 通过 `&mut PageTable` 表达独占权。
 
 ## 13. 调试核对点
 

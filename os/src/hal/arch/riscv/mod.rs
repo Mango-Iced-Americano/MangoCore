@@ -67,6 +67,9 @@ pub fn kernel_tlb_invalidate() {
     sv39::tlb_invalidate();
 }
 
+/// RV64 恒等映射具有真实叶子 PTE，dirty 位直接保存在 PTE 中。
+pub fn init_kernel_mapping_metadata() {}
+
 /// 清除当前 hart 上可能属于任意用户地址空间的翻译。
 ///
 /// 全 MM 同步和 ASID rollover 仍需要无操作数 `sfence.vma`；它也会清除 global
@@ -82,9 +85,7 @@ pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
 
 /// 清除当前 hart 上指定 MM 的有界用户页区间。
 pub fn user_tlb_invalidate_range(asid: u16, range: crate::mm::VPNRange) {
-    debug_assert!(
-        range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES
-    );
+    debug_assert!(range.get_end().0 - range.get_start().0 <= crate::smp::MAX_USER_TLB_RANGE_PAGES);
     for vpn in range {
         user_tlb_invalidate_page(asid, vpn);
     }

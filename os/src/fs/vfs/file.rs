@@ -21,10 +21,12 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 use super::event::EventWaitQueue;
-use super::{FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata};
+use super::{
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata, ReadWaitSource,
+};
 use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
-use crate::task::{register_writable_inode, unregister_writable_inode, WaitQueue};
+use crate::task::{current_task, register_writable_inode, unregister_writable_inode, WaitQueue};
 
 // ── Globally-unique open file id counter ────────────────────────────────
 
@@ -701,53 +703,94 @@ impl fmt::Debug for File {
     }
 }
 
+/// 等待队列既可能内嵌于 inode，也可能由当前 sighand 动态提供。
+enum PollQueueBacking {
+    /// 原始指针只访问 inode 内部稳定字段，Arc 固定其生命周期。
+    Inode {
+        _inode: Arc<dyn IndexNode>,
+        queue: *const Mutex<WaitQueue>,
+    },
+    /// signalfd 的队列随当前 sighand 解析，直接持有 Arc，不使用空指针占位。
+    Sighand(Arc<EventWaitQueue>),
+}
+
 /// 用于 poll/epoll 等待的轻量句柄。
-///
-/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
-/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
+/// 该句柄只活在当前 syscall 的登记/清理区间，刻意不实现 Send/Sync。
 pub struct PollWaitQueue {
-    _inode: Arc<dyn IndexNode>,
-    queue: *const Mutex<WaitQueue>,
+    backing: PollQueueBacking,
 }
 
 impl PollWaitQueue {
+    fn from_inode(inode: Arc<dyn IndexNode>, queue: &Mutex<WaitQueue>) -> Self {
+        Self {
+            backing: PollQueueBacking::Inode {
+                _inode: inode,
+                queue: queue as *const Mutex<WaitQueue>,
+            },
+        }
+    }
+
+    fn from_sighand(queue: Arc<EventWaitQueue>) -> Self {
+        Self {
+            backing: PollQueueBacking::Sighand(queue),
+        }
+    }
+
     pub fn queue(&self) -> &Mutex<WaitQueue> {
-        // `PollWaitQueue` keeps the inode Arc alive, so the queue reference
-        // returned by `IndexNode` remains valid for this poll wait cycle.
-        // Safety: `self._inode` is an `Arc` that guarantees the `IndexNode`
-        // is alive. The `queue` pointer was obtained from that inode and is
-        // stable for the lifetime of the `Arc`.
-        unsafe { &*self.queue }
+        match &self.backing {
+            PollQueueBacking::Inode { queue, .. } => {
+                // Safety: 同一变体持有 inode Arc，queue 指向该 inode 的稳定字段。
+                unsafe { &**queue }
+            }
+            PollQueueBacking::Sighand(queue) => queue.wait_queue(),
+        }
     }
 }
 
-/// 用于 epoll / eventfd / signalfd / pidfd 的轻量句柄。
-///
-/// 持有 `_inode: Arc<dyn IndexNode>` 以保证 inode 在等待期间存活，
-/// `queue` 原始指针随该 `Arc` 的生命周期保持有效。
-/// 实现 `Send + Sync`：`Arc` 提供线程安全的引用计数，`queue` 指向的
-/// `EventWaitQueue` 由 inode 内部管理，生命周期与 `Arc` 绑定。
 #[derive(Clone)]
-pub struct EventQueueHandle {
-    _inode: Arc<dyn IndexNode>,
-    queue: *const EventWaitQueue,
+enum EventQueueBacking {
+    Inode {
+        _inode: Arc<dyn IndexNode>,
+        queue: *const EventWaitQueue,
+    },
+    Sighand(Arc<EventWaitQueue>),
 }
 
-// Safety: `EventQueueHandle` holds an `Arc<dyn IndexNode>` which ensures the
-// inode (and thus its `EventWaitQueue`) stays alive. The raw `queue` pointer
-// is only used to obtain a shared reference (via `&*self.queue`) whose lifetime
-// is bounded by the enclosing function scope. No mutation is performed through
-// the pointer. Therefore `Send` and `Sync` are safe to implement.
+/// 用于 epoll / eventfd / signalfd / pidfd 的轻量句柄。
+#[derive(Clone)]
+pub struct EventQueueHandle {
+    backing: EventQueueBacking,
+}
+
+// Safety: Inode 变体的 Arc 固定原始指针生命周期，Sighand 变体直接持有线程安全 Arc；
+// 两种变体都只通过共享引用访问 EventWaitQueue。
 unsafe impl Send for EventQueueHandle {}
 unsafe impl Sync for EventQueueHandle {}
 
 impl EventQueueHandle {
+    fn from_inode(inode: Arc<dyn IndexNode>, queue: &EventWaitQueue) -> Self {
+        Self {
+            backing: EventQueueBacking::Inode {
+                _inode: inode,
+                queue: queue as *const EventWaitQueue,
+            },
+        }
+    }
+
+    fn from_sighand(queue: Arc<EventWaitQueue>) -> Self {
+        Self {
+            backing: EventQueueBacking::Sighand(queue),
+        }
+    }
+
     pub fn queue(&self) -> &EventWaitQueue {
-        // `EventQueueHandle` keeps the inode Arc alive, so the queue reference
-        // returned by `IndexNode` remains valid for this poll/epoll cycle.
-        // Safety: same invariant as `PollWaitQueue` — `_inode` is an `Arc`
-        // guaranteeing the `EventWaitQueue` is alive and the pointer is stable.
-        unsafe { &*self.queue }
+        match &self.backing {
+            EventQueueBacking::Inode { queue, .. } => {
+                // Safety: 同一变体持有 inode Arc，queue 指向该 inode 的稳定字段。
+                unsafe { &**queue }
+            }
+            EventQueueBacking::Sighand(queue) => queue,
+        }
     }
 }
 
@@ -1534,47 +1577,54 @@ impl File {
     }
 
     pub fn read_wait_queue(&self) -> Option<PollWaitQueue> {
-        if let Some(queue) = self.inode.read_event_queue() {
-            return Some(PollWaitQueue {
-                _inode: self.inode.clone(),
-                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
-            });
+        if let Some(queue) = self.current_read_events() {
+            return Some(PollWaitQueue::from_sighand(queue));
         }
-        let queue = self.inode.read_wait_queue()? as *const Mutex<WaitQueue>;
-        Some(PollWaitQueue {
-            _inode: self.inode.clone(),
-            queue,
-        })
+        if let Some(queue) = self.inode.read_event_queue() {
+            return Some(PollWaitQueue::from_inode(self.inode.clone(), queue.wait_queue()));
+        }
+        Some(PollWaitQueue::from_inode(
+            self.inode.clone(),
+            self.inode.read_wait_queue()?,
+        ))
     }
 
     pub fn write_wait_queue(&self) -> Option<PollWaitQueue> {
         if let Some(queue) = self.inode.write_event_queue() {
-            return Some(PollWaitQueue {
-                _inode: self.inode.clone(),
-                queue: queue.wait_queue() as *const Mutex<WaitQueue>,
-            });
+            return Some(PollWaitQueue::from_inode(self.inode.clone(), queue.wait_queue()));
         }
-        let queue = self.inode.write_wait_queue()? as *const Mutex<WaitQueue>;
-        Some(PollWaitQueue {
-            _inode: self.inode.clone(),
-            queue,
-        })
+        Some(PollWaitQueue::from_inode(
+            self.inode.clone(),
+            self.inode.write_wait_queue()?,
+        ))
     }
 
     pub fn read_event_queue(&self) -> Option<EventQueueHandle> {
-        let queue = self.inode.read_event_queue()? as *const EventWaitQueue;
-        Some(EventQueueHandle {
-            _inode: self.inode.clone(),
-            queue,
-        })
+        if let Some(queue) = self.current_read_events() {
+            return Some(EventQueueHandle::from_sighand(queue));
+        }
+        Some(EventQueueHandle::from_inode(
+            self.inode.clone(),
+            self.inode.read_event_queue()?,
+        ))
     }
 
     pub fn write_event_queue(&self) -> Option<EventQueueHandle> {
-        let queue = self.inode.write_event_queue()? as *const EventWaitQueue;
-        Some(EventQueueHandle {
-            _inode: self.inode.clone(),
-            queue,
-        })
+        Some(EventQueueHandle::from_inode(
+            self.inode.clone(),
+            self.inode.write_event_queue()?,
+        ))
+    }
+
+    /// Linux 在 signalfd read/poll 时使用 current->sighand 的等待队列。
+    /// File/inode 可由 fork 共享，因此不能把某个进程的队列固化进 SignalFd。
+    fn current_read_events(&self) -> Option<Arc<EventWaitQueue>> {
+        match self.inode.read_wait_source() {
+            ReadWaitSource::Inode => None,
+            ReadWaitSource::CurrentSighand => {
+                current_task().map(|task| task.process.signalfd_events())
+            }
+        }
     }
 
     // ── 属性访问 ───────────────────────────────────────────────────
@@ -1742,11 +1792,15 @@ impl File {
                 // pread directly into each frame, avoiding a monolithic heap Vec
                 let mut offset = 0;
                 for tracker in &trackers {
-                    let dst = tracker.ppn.get_bytes_array();
                     let chunk = (size - offset).min(PAGE_SIZE);
-                    let n = self
-                        .pread(offset, &mut dst[..chunk])
-                        .expect("map_to_kernel_space: pread failed");
+                    // Safety: trackers 是本闭包刚分配、尚未插入内核页表的私有
+                    // frame 集合；本次 pread 独占目标页内容。
+                    let n = unsafe {
+                        tracker.ppn.with_bytes_mut(|dst| {
+                            self.pread(offset, &mut dst[..chunk])
+                                .expect("map_to_kernel_space: pread failed")
+                        })
+                    };
                     if n != chunk {
                         log::warn!(
                         "[map_to_kernel_space] pread at offset {} returned {} bytes, expected {}",

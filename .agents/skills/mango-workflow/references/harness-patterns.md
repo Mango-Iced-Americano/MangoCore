@@ -321,14 +321,21 @@ diag=1
 
 ## 网络栈
 
-### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
-- **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
-- **修复**: 
-  1. `NET_INTERFACE.try_poll()` 必须在 WaitQueue 闭包外部调用（pre-poll）
-  2. 使用无条件监听扫描（`wake_tcp_accept_waiters()`）在每次 poll 后唤醒 accept waiters，不依赖 smoltcp 的 poll 返回值
-  3. WaitQueue 闭包内只做纯状态检查（accept），不做任何会触发唤醒的操作
-- **教训**: 所有 WaitQueue condition 闭包必须是无副作用的纯检查函数；任何可能触发唤醒操作（poll、dispatch、notification）都必须在闭包外部执行
-- **相关文件**: `os/src/net/syscall/accept.rs`, `os/src/net/config.rs`, `os/src/net/socket/inet/stream/mod.rs`
+### WaitQueue 队列锁重入与有损通知（accept 永久阻塞）
+- **历史根因**: 旧版 `WaitQueue::wait_until_interruptible()` 在持有队列锁时再次执行
+  condition；若 condition 内的 `NET_INTERFACE.poll()` 同步通知同一个队列，通知路径只能用
+  `notify_events_all_if_unlocked` 避免自锁，并会在锁冲突时静默丢弃 wake。TCP accept 因而可能
+  错过首个 SYN 后永久睡眠。
+- **最终修复**: 每轮等待先在短临界区登记携带 `WaitEntry` token 的 waiter，再释放队列锁执行
+  condition。生产者一律使用可靠通知，先把本轮 token 原子置为 notified，再尝试唤醒已经进入
+  Blocking 的任务；消费者在切换前通过 checked block 复查 token，闭合“通知先于阻塞”的窗口。
+- **性能边界**: accept 的 pre-poll 和纯 accept 检查仍可作为减少重复 poll 的性能策略，但不再是
+  WaitQueue 的正确性约束。普通 wait condition 可以推进生产者；需要业务锁保护原子条件的路径
+  则使用 locked wait，并遵守该业务锁自身的不可重入约束。
+- **验证**: 永久 ktest `condition_can_notify_same_queue` 在登记后的第二次 condition 检查中通知
+  同一队列，证明不会自锁，且通知 token 能阻止任务漏睡。
+- **相关文件**: `os/src/task/manager.rs`, `os/src/fs/vfs/event.rs`,
+  `os/src/kernel_tests/waitqueue.rs`, `os/src/net/socket/inet/stream/mod.rs`
 
 ## 错误码对齐（Linux 语义）
 
@@ -530,6 +537,20 @@ diag=1
 - **教训**: `mutation_detected=false` 只证明其 manifest 覆盖的文件未变，不能证明整个测试输入
   冻结。验收前必须同时检查生产源码指纹、runner 输入指纹、原始退出码和真实用例集合。
 - **相关文件**: `cc-codex/bin/cc-agent-test.py`, `cc-codex/protocol/test-recipes.json`
+
+## ELF/产物门禁必须精确命中并 fail-fast
+
+- **现象**: QEMU 本身通过，产物脚本也打印 PASS marker，但数值明显不合理，
+  例如要求 25 MiB 大符号却报告 `size=1`。
+- **根因**: 宽泛 grep 命中了同前缀的另一符号；中间 `test` 失败后脚本没有
+  `set -e`，后续无条件 `echo PASS` 又将整体退出码覆盖为 0。`readelf` 的 size
+  还可能是 `0x...`，直接交给 `test -ge` 会解析失败。
+- **修复**: 使用能排除同前缀符号的精确模式；脚本从入口开启
+  `set -euo pipefail`；对十六进制 size 先用 Bash arithmetic `$((value))` 转为整数；
+  PASS marker 必须是所有断言之后的最后一步。
+- **教训**: marker 存在不等于它之前的断言真的执行成功。模型对“架构差异”的
+  自然语言解释不能覆盖显然违反数量级的原始数据。
+- **相关文件**: `cc-codex/protocol/test-recipes.json`, ELF/readelf 产物验收脚本
 
 ## libc waitid 用例不覆盖 raw 第五参数
 
@@ -764,14 +785,16 @@ diag=1
   pip build isolation 会直接 `execve` Python ELF。动态可执行文件的 `PT_INTERP` 必须固化到
   稳定的 P4 `current` loader，并由 artifact manifest、安装器和板端激活前全 ELF 复核共同门禁。
   `patchelf --set-interpreter` 对已绑定 ELF 未必字节幂等；打包脚本必须先读现值、仅在不同时
-  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。
+  改写，否则仅重复打包就可能改变 ELF 布局和 artifact hash。测试准备若操作 tracked ELF，
+  还要同时核对 interpreter、RPATH 内容和 `DT_RPATH`/`DT_RUNPATH` 类型；确定性 runner 应把
+  source-before/source-after 不一致视为失败，不能因 QEMU 功能用例通过而忽略污染。
 - **环境与 console 闭包**: 除 PATH/库路径外还应清除 `PYTHONPATH/PYTHONHOME/PYTHONSTARTUP`、
   `LD_PRELOAD/LD_AUDIT` 等继承注入。console entry 要解析最终路径并限制在新状态树内；若历史
   安装产生 shell shim + `.real`，应由统一 wrapper 直接解释 `.real`，不可重新信任旧 shebang。
 - **完整性成本分层**: 每次启动只检查 manifest/activation/artifact 身份，发布新 release 前用
   新 runtime 对 manifest 中全部 native ELF 做一次实物重哈希。这样可写 P4 release 既不会在
   每个 Python 进程上支付 94 ELF 哈希成本，也不能把被替换的 ELF 原子激活为 canonical runtime。
-- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`
+- **相关文件**: `user/tools/cpython/python3-wrapper-persist.sh`, `user/tools/cpython/python-entry-wrapper.sh`, `user/src/bin/initproc.rs`, `scripts/deploy_cpython_runtime.py`, `scripts/board/verify_persist_python.sh`, `os/make/tools.mk`
 
 ## 复杂度缺陷用“实际遍历步数”闭环，不只拟合 wall 曲线
 
@@ -1152,3 +1175,86 @@ Trace 输出显示每个 syscall 的 id、6 个参数、时间戳（µs），ret
   应保持 O(n)，orphan chain 的 n 是同时存在的 zero-link open inode 数，不是全盘 inode 数。
 - **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、
   `dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、`dependency/lwext4_rust/src/blockdev.rs`
+
+## 阻塞回归应隔离结果通道，并把破坏性探针放在最后
+
+- **问题**: signalfd 阻塞测试若只依赖 child exit status，会把信号唤醒、wait4 状态编码和用户
+  copyout 混成一个结论；前置 vfork/CLONE_VM 探针还可能共享调用者地址空间，失败后污染后续
+  用例，使根因判断失真。
+- **做法**: 用专用 result pipe 传递 child 的业务结果，`wait4` 只负责生命周期回收；不需要状态
+  内容时传 NULL。用 ready pipe + 有意延迟证明 consumer 已进入阻塞窗口，再由 watchdog 提供
+  有界失败。可能破坏父地址空间的探针固定为 suite 最后一项。
+- **判定**: 同时记录 read count、事件字段、elapsed、send 结果、result byte 和 reap 结果。
+  不能用“QEMU 没挂”或 child 已退出代替业务 marker。
+- **相关文件**: `user/src/bin/regression/regression_signalfd.rs`,
+  `user/src/bin/regression/main.rs`
+
+## 生产者 I/O 的可写前缀证明不能变成物理页缓存
+
+- **问题**：read/pread 若在文件对象产生数据后才发现后续用户页不可写，会让文件偏移、pipe
+  head 等生产者状态超前；若为避免该问题而预 fault 完整输出区间，又会为 EOF/短读之后的页面
+  制造无意义 lazy allocation、CoW 和 TLB shootdown。
+- **做法**：在同一 VM 临界区扫描当前已有可写 PTE；只有前缀为空时 fault-in 首页，后续首个
+  不可写页截断本轮生产者最大消费长度。锁外执行文件 I/O，实际 copy 时逐页重新验证映射。
+  临界区只能带出 VA 描述符和长度，不能带出 PTE、PA、direct-map pointer 或用户页 slice。
+- **门禁**：永久跨页用例把第一页末尾设为可写、第二页设为只读，向 pipe 写入跨边界 payload
+  后关闭 writer。第一次 read 必须只返回可写前缀，第二次必须读到未消费尾部；关闭 writer 可把
+  过量消费确定性转化为 EOF，避免失败用例挂死。
+- **教训**：构造期 proof 是瞬时容量上界，不是 pin，也不能替代使用点校验。性能优化迁移时应
+  迁移“减少副作用”的意图，而不是照搬与当前 SMP 地址空间生命周期冲突的数据表示。
+- **相关文件**：`os/src/mm/uaccess.rs`、`os/src/syscall/fs/common.rs`、
+  `user/src/bin/regression/regression_usercopy_pipe.rs`
+
+## 用户态 pseudo-fs 回归必须由专用 PID1 显式挂载
+
+- **问题**：normal PID1 会挂载 `/proc`、`/sys` 等 pseudo-fs，但精简 regression initramfs
+  往往使用另一套 PID1。直接加入 `/proc` 用户回归会得到 `ENOENT`，容易被误判成 proc 节点或
+  open syscall 故障。
+- **做法**：在 regression PID1 启动被测进程前创建 mountpoint 并挂载测试依赖的 pseudo-fs，
+  输出 mount 结果。不要让单个用例通过内核私有函数绕过 VFS，也不要默认 normal init 的副作用
+  自动存在于测试 profile。
+- **门禁**：先保留首轮 `ENOENT` 作为环境 RED；修复后日志必须同时出现 mount success、目标
+  ABI 业务字段、suite PASS 和稳定源码指纹。挂载失败不能由“其余用例通过”掩盖。
+- **相关文件**：`user/src/bin/regression_init.rs`、`user/src/bin/regression/`
+
+## Agent 验证能力由执行 profile 决定，不能由自然语言任务扩权
+
+- **问题**：把“请运行 Docker 构建/QEMU”写进只读审查任务，不会让模型获得测试能力；
+  `read-only-review` 仍只有 Read/Glob/Grep。模型即使静态判断补丁可提交，也必须把真实命令
+  标为 NOT RUN，不能用文字结论替代退出码。
+- **做法**：源码审查使用 `cc-job.py`；需要模型自主选择并归纳 Docker 测试时使用
+  `cc-agent-test.py` 的 `agent-docker-validation`，只开放受限 gateway。里程碑矩阵把每个必跑
+  recipe 显式列为 `--require-recipe`，并令 `min-runs == max-runs == 必跑项数`。
+- **门禁**：最终 PASS 必须核对父 job 状态、每个 child job ID、recipe、真实 exit、suite
+  计数、forbidden marker 和 before/after 源码指纹。误派的只读结果保留为 NOT RUN 流程证据，
+  不能覆盖后续正确 profile 的实测结果。
+- **相关文件**：`cc-codex/bin/cc-job.py`、`cc-codex/bin/cc-agent-test.py`、
+  `cc-codex/bin/cc-agent-tool.py`、`cc-codex/protocol/test-recipes.json`
+
+## 并发诊断必须记录实际后端，且不能反向参与正确性协议
+
+- **问题**：只在上层记录“请求精准刷新”会把 firmware/slot/full fallback 混成一个值；把
+  mailbox publication 与 consumed bit 强求相等，又会把合法的同类位合并误判成丢中断。
+  更危险的是，为了读取诊断而增加 Acquire/Release、handler 计时、普通锁或 panic，使观察
+  设施本身改变被观察的 IPI/TLB 时序。
+- **做法**：在真正做出 backend 选择、且已经脱离业务锁的发起侧记录互斥分类；目标侧复用
+  既有 request/ack 判断完成度。计数器统一 Relaxed，只累计操作数、范围/fanout 和 raw timer
+  delta，不持有资源引用。失败诊断必须发生在原有 fail-stop 之前，但不得改变资源泄漏/退休
+  顺序；同类 mailbox 位可合并时明确说明 publication-consumption 差值不是正确性断言。
+- **门禁**：逐个审计成功、固件错误、doorbell 错误、timeout、stopped、local-only 和无目标
+  退出路径，证明每个真实远端操作恰好记一次且本地操作不冒充 shootdown。动态回归复用真实
+  并发路径，不为计数器加入会改变生产状态的测试 hook；冻结指纹与协议 marker 仍是验收事实。
+- **相关文件**：`os/src/smp.rs`、`os/src/mm/tlb.rs`、`os/src/panic_diag.rs`
+
+## 并发测试优先复用生产 sequence/ack，避免为测试扩张生产状态
+
+- **问题**：bring-up 阶段常用 PING、回包 pending 或测试 ack 快速证明 doorbell；如果功能
+  协议已经具备正式 request/ack，这些字段继续留在 `PerCpu` 和 hard handler 中，就会形成
+  第二套生命周期、增加 reason 编号与 idle 分支，并且测试只证明探针而没有证明生产路径。
+- **做法**：在生产协议稳定后，把 focused test 迁移到真实的 mailbox、sequence、ack 和超时
+  入口；测试所需的轮数、结果和 helper 状态只放在 test module。跨 CPU helper 发布结果后，
+  还要等待其离开 current 槽再释放 TCB，不能把 `Zombie` 发布误当成已经切离 kernel stack。
+- **门禁**：删除测试 reason 前先全仓证明没有生产调用方和汇编/硬件 ABI 依赖；动态测试至少
+  覆盖 BSP→AP 单播、BSP→AP 广播和 AP→BSP，并从日志确认目标用例实际执行。验证通过后删除
+  旧 handler/idle 分支和 Per-CPU 字段，不保留“以后可能调试”的双轨协议。
+- **相关文件**：`os/src/smp.rs`、`os/src/kernel_tests/smp.rs`

@@ -49,20 +49,19 @@ pub use completion::Completion;
 pub use context::TaskContext;
 pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
+pub use manager::{
+    add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task, kernel_timer_queue_len,
+    procs_count, publish_task, remove_zombie_tasks_by_pid, run_deferred_timer_work,
+    run_task_safe_point, send_signal_to_interruptible, sleep_interruptible, task_manager_counts,
+    timer_cpu_init, timer_interrupt_handler, update_ready_nice, wait_with_timeout,
+    wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
+};
+use manager::{fetch_task, finish_switch_out};
 pub(crate) use manager::{
     publish_task_on, request_sibling_exit, set_remote_affinity, try_publish_task,
     try_publish_task_on,
 };
 pub(crate) use processor::zombie_queue_count_fast;
-pub use manager::{
-    add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task,
-    kernel_timer_queue_len, procs_count, publish_task, remove_zombie_tasks_by_pid,
-    run_deferred_timer_work, run_task_safe_point,
-    send_signal_to_interruptible, sleep_interruptible, take_one_interruptible_zombie,
-    task_manager_counts, timer_interrupt_handler, timer_cpu_init, update_ready_nice,
-    wait_with_timeout, wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
-};
-use manager::{fetch_task, finish_switch_out};
 // pub use pid::RecycleAllocator;
 pub use ipc_namespace::{IpcNamespace, INIT_IPC_NAMESPACE};
 pub use mount_namespace::{MountNamespace, INIT_MOUNT_NAMESPACE};
@@ -127,10 +126,8 @@ fn prepare_current_switch(task: &Arc<TaskControlBlock>) -> *mut TaskContext {
     let mut inner = task.acquire_inner_lock();
     let task_cx_ptr = &mut inner.task_cx as *mut TaskContext;
     let (user_us, system_us) = inner.update_process_times_schedule_out();
-    task.sched_vruntime_hint.store(
-        inner.sched_vruntime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    task.sched_vruntime_hint
+        .store(inner.sched_vruntime, core::sync::atomic::Ordering::Relaxed);
     drop(inner);
     task.process.account_cpu_time(user_us, system_us);
     task_cx_ptr
@@ -248,12 +245,12 @@ fn finish_current_exit(task: Arc<TaskControlBlock>, exit_code: u32) -> ! {
             // live token 已经归零后，不再有其它线程能新发起 group exit；此处
             // Acquire 复读才决定 wait 可见的进程退出码。remove_thread() 的
             // AcqRel 退出链保证我们也能观察 sibling 先前发布的统一退出码。
-            let process_exit_code = task
-                .process
-                .group_exit_code()
-                .unwrap_or(thread_exit_code);
+            let process_exit_code = task.process.group_exit_code().unwrap_or(thread_exit_code);
             crate::syscall::fs::release_fcntl_locks_for_pid(task.pid());
             crate::syscall::shm_detach_process(task.pid());
+            // auto-reap 在 current 切回 idle 前运行：这里只会提前摘取已经
+            // 位于 local_zombies 的 sibling；current TCB 随后由 owner CPU
+            // 的 finish_switch_out() 入队并在 idle 栈上回收。
             task.process.finish_exit(&task, process_exit_code);
         }
         // noreturn schedule 不会析构当前 Rust 栈；本地 clone 必须提前释放。
@@ -343,11 +340,10 @@ pub fn add_initproc() {
 
 // ── ktest multi-task harness ────────────────────────────────────────
 
-/// Build a kernel-only PCB for a ktest task without loading `/init`.
+/// 构造不加载 `/init` 的 kernel-only 进程容器。
 ///
-/// The root VFS and devfs are initialized before ktest enters this path.  The
-/// PCB therefore has a valid root cwd but an empty descriptor table and bare
-/// address space; ktest tasks never enter userspace and do not need tty fds.
+/// ktest 与常驻内核 worker 共用这条构造路径：保留有效根目录，但不创建用户
+/// 地址空间、TTY fd 或 ELF 上下文。`comm` 只用于诊断，不参与任务身份判定。
 fn new_kernel_process(
     tid_handle: Arc<TidHandle>,
     parent: Option<Weak<ProcessControlBlock>>,
@@ -358,7 +354,7 @@ fn new_kernel_process(
         root_inode,
         fs::vfs::FileFlags::O_RDONLY | fs::vfs::FileFlags::O_DIRECTORY,
     )
-    .expect("ktest root VFS must be initialized before task creation");
+    .expect("kernel task root VFS must be initialized before task creation");
     let pid = tid_handle.0;
 
     Arc::new(ProcessControlBlock::new(
@@ -381,9 +377,7 @@ fn new_kernel_process(
         INIT_NET_NAMESPACE.clone(),
         INIT_MOUNT_NAMESPACE.clone(),
         INIT_IPC_NAMESPACE.clone(),
-        Arc::new(AddressSpace::new(
-            AddressSpaceInner::<PageTableImpl>::new_bare(),
-        )),
+        AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare()),
         Arc::new(spin::Mutex::new(Sighand::new())),
         Arc::new(spin::Mutex::new(threads::FutexTable::new())),
         Arc::new(spin::Mutex::new(pid::RecycleAllocator::new())),
@@ -391,12 +385,11 @@ fn new_kernel_process(
     ))
 }
 
-/// Trampoline for ktest kernel tasks.
+/// 所有 kernel-only 任务的统一入口。
 ///
-/// Called via `TaskContext.ra` when the scheduler first switches to a
-/// ktest-spawned task. It invokes the stored function, then exits the
-/// task without process-level cleanup.
-extern "C" fn ktest_trampoline() -> ! {
+/// 调度器第一次切入任务时从 TCB 取得独占的入口函数；入口返回后只回收当前
+/// kernel-only 线程，不执行用户进程级清理。
+extern "C" fn kernel_task_trampoline() -> ! {
     // 入口属于当前 TCB，不再通过全局“下一任务函数”传递；多个 CPU 首次
     // 切入不同 kernel-only 任务时不会互相覆盖 trampoline 参数。
     let f = current_task()
@@ -406,15 +399,34 @@ extern "C" fn ktest_trampoline() -> ! {
     zombify_current_and_run_next();
 }
 
-/// Spawn a minimal kernel task for ktest mode only.
+/// 在 ktest 模式创建最小内核任务。
 ///
-/// The task has a bare kernel stack, kernel-only PCB, no user memory, and no
-/// file descriptors.  It never touches `INITPROC` or parses an init ELF.
-/// It runs `f()` and then calls [`zombify_current_and_run_next`].
-///
+/// 任务具有独立内核栈和 kernel-only PCB，不解析用户 ELF，也不创建用户地址空间
+/// 或文件描述符。入口函数返回后由统一 trampoline 转为 Zombie。
 /// 调用前必须完成 VFS 与任务 registry 的全局初始化。
 pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
     spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, f)
+}
+
+/// 构造尚未发布的 kernel-only 任务。
+///
+/// affinity 必须在 `New` 状态设置，随后统一通过 `publish_task()` 完成唯一一次
+/// `New -> Queued(cpu)`；这样测试任务和常驻 worker 都不会绕过调度状态机。
+fn build_kernel_task(
+    cpu: usize,
+    comm: &str,
+    parent: Option<Weak<ProcessControlBlock>>,
+    f: fn(),
+) -> Arc<TaskControlBlock> {
+    assert!(cpu < crate::smp::configured_cpu_count());
+    let tid_handle = tid_alloc();
+    let kstack = crate::hal::kstack_alloc();
+    let task_cx = TaskContext::goto_address(kernel_task_trampoline as usize, kstack.get_top());
+    let pcb = new_kernel_process(tid_handle.clone(), parent, comm);
+    let tcb = TaskControlBlock::new_kernel_only(tid_handle, pcb, kstack, task_cx, f);
+    tcb.set_initial_cpus_allowed(1usize << cpu);
+    registry::register_process(&tcb.process);
+    tcb
 }
 
 /// 在指定 CPU 创建一个 kernel-only ktest 任务。
@@ -427,21 +439,7 @@ pub fn spawn_ktest_task(f: fn()) -> Arc<TaskControlBlock> {
 /// 调度原语和已明确加锁的 registry；不得在 AP 上进入 console、网络、文件系统、
 /// 设备或用户 MM 路径。
 pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> {
-    assert!(cpu < crate::smp::configured_cpu_count());
-    let tid_handle = tid_alloc();
-    let kstack = crate::hal::kstack_alloc();
-    let kstack_top = kstack.get_top();
-    let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack_top);
-    let pcb = new_kernel_process(
-        tid_handle.clone(),
-        Some(Arc::downgrade(&KTEST_REAPER)),
-        "[ktest]",
-    );
-    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
-    // TCB 已按 TID 登记，但尚未加入线程组或 runqueue，创建者仍独占 New 状态；
-    // 从此任务的首次入队和阻塞唤醒都只能选择调用方指定的 CPU。
-    tcb.set_initial_cpus_allowed(1usize << cpu);
-    registry::register_process(&tcb.process);
+    let tcb = build_kernel_task(cpu, "[ktest]", Some(Arc::downgrade(&KTEST_REAPER)), f);
     let handle = tcb.clone();
     // 单 bit mask 保证仍精确到达指定 CPU，同时让所有 AP focused 用例
     // 覆盖普通任务使用的 affinity-aware 初始放置入口。
@@ -449,18 +447,12 @@ pub(crate) fn spawn_ktest_task_on(cpu: usize, f: fn()) -> Arc<TaskControlBlock> 
     handle
 }
 
-/// 创建由普通启动路径拥有的 CPU0 kernel worker。
+/// 在 CPU0 创建一个运行至 shutdown 的内核 worker。
 ///
-/// worker 不属于 ktest reaper；它在创建期固定 affinity，运行至整机 shutdown。
-/// 其 WaitQueue 必须对 thread-group stop 返回 `Interrupted`，从而可安全退栈。
-pub fn spawn_kernel_worker(f: fn()) -> Arc<TaskControlBlock> {
-    let tid_handle = tid_alloc();
-    let kstack = crate::hal::kstack_alloc();
-    let task_cx = TaskContext::goto_address(ktest_trampoline as usize, kstack.get_top());
-    let pcb = new_kernel_process(tid_handle.clone(), None, "[net-poll]");
-    let tcb = TaskControlBlock::new_ktest_independent(tid_handle, pcb, kstack, task_cx, f);
-    tcb.set_initial_cpus_allowed(1usize << crate::smp::BOOT_CPU_ID);
-    registry::register_process(&tcb.process);
+/// worker 使用独立 PCB，避免被 ktest reaper 当成临时测试子任务；它第一次运行
+/// 后应进入自己的 WaitQueue，空闲时不占用调度时间片。
+pub fn spawn_kernel_worker(comm: &str, f: fn()) -> Arc<TaskControlBlock> {
+    let tcb = build_kernel_task(crate::smp::BOOT_CPU_ID, comm, None, f);
     let handle = tcb.clone();
     publish_task(tcb);
     handle

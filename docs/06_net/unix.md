@@ -205,6 +205,6 @@ pub fn make_unix_socket_pair(
 
 ## 设计决策
 
-- **简化优先**: 相比 DragonOS 的原子 RingBuffer + RwSem，本模块使用 Mutex<VecDeque> 加锁，写冲突都在 Mutex 内序列化。单核场景下性能差异可忽略。
+- **简化优先**: 相比 DragonOS 的原子 RingBuffer + RwSem，本模块使用 `Mutex<VecDeque>`，并发读写由队列锁串行化；该模型可跨 CPU 使用，但高竞争下的扩展性弱于无锁 RingBuffer。
 - **弱引用注册表**: PATH_TABLE 和 ABSTRACT_TABLE 存储 Weak 引用而非 Arc，避免循环引用导致内存泄漏。socket 的 Drop 实现负责从表中清理自身。
 - **不依赖 smoltcp**: Unix 套接字完全在内核中实现，不走 smoltcp 协议栈。polling 仅通过等待队列和 epoll 事件通知完成。

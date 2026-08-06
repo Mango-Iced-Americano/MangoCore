@@ -125,6 +125,7 @@ pub enum TaskStatus {
     Running(usize),
     Blocking(usize),
     Blocked,
+    Migrating,
     Zombie,
 }
 ```
@@ -137,7 +138,8 @@ pub enum TaskStatus {
 | `Queued(cpu)` | CPU `cpu` 的 runqueue 所有；B15 阶段 `cpu` 恒为 CPU0 |
 | `Running(cpu)` | CPU `cpu` 的 current slot 所有；B15 阶段 `cpu` 恒为 CPU0 |
 | `Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行 |
-| `Blocked` | 已切离 CPU，在 interruptible registry 中等待唤醒；也可作为出队后的退出过渡态 |
+| `Blocked` | 已切离 CPU，在 interruptible registry 中等待唤醒 |
+| `Migrating` | queued task 已离开源队列、尚未进入目标队列的单-owner 窗口 |
 | `Zombie` | 已执行线程级退出，等待切栈后 drop 或进程级 wait 回收 |
 
 `sched_state` 把状态 tag 与 CPU owner 编码在一个 `AtomicUsize` 中，并通过
@@ -148,22 +150,22 @@ Acquire 读取、AcqRel CAS 迁移。`task.inner` 不再保存第二份状态。
 
 ```
 New --publish--> Queued(cpu) --fetch--> Running(cpu)
+Queued(cpu) --move--> Migrating --publish--> Queued(other_cpu)
 Running(cpu) --yield + switch complete--> Queued(cpu)
 Running(cpu) --begin sleep--> Blocking(cpu)
 Blocking(cpu) --early wake--> Running(cpu)
 Blocking(cpu) --switch complete--> Blocked
 Blocked --wake--> Queued(cpu)
 Running(cpu) --exit--> Zombie --switch complete--> zombie queue
-New / Blocked --external cleanup--> Zombie
 ```
 
 发布、fetch 和 yield 后重入队由 owner CPU 的 RunQueue 在一个锁域内同时提交状态 CAS
 与容器变更；阻塞登记仍由 `TaskManager` registry 管理。idle 在切栈后提交
 `Blocking -> Blocked`；早到 wake 只恢复 `Blocking -> Running`，晚到 wake 按
 `TASK_MANAGER -> CPU0 RunQueue` 执行 `Blocked -> Queued(CPU0)`。重复 wake 因 CAS
-失败而不会重复入队。排队任务退出前必须先从 owner runqueue 移除并转成
-`Blocked`；直接 `Queued -> Zombie` 会留下悬挂队列节点，因此按所有权错误
-fail-stop。
+失败而不会重复入队。退出只能由任务自己在 owner CPU 的安全点提交
+`Running(cpu) -> Zombie`；阻塞 sibling 先被唤醒，排队 sibling 先被 fetch。
+`New/Queued/Blocking/Blocked/Migrating -> Zombie` 都是所有权错误并 fail-stop。
 
 ## 5. initproc 创建
 

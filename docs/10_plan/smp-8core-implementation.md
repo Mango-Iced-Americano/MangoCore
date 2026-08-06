@@ -3,7 +3,7 @@ title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-02
+last_updated: 2026-08-04
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -84,17 +84,20 @@ related_docs:
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
-| panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入 |
-| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45 已删除可逃逸的全局 trap-context 可变引用；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；共享子系统审计完成前不解除默认限制 |
-| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
+| panic 诊断 | B56 让 heap/frame/current/task/active-MM 全部使用 `try_*` 降级，并输出 8 CPU 的 current、队列、active MM、IPI、timer、TLB/barrier best-effort 快照；B91 再加入每 CPU switch、实际 migration、成功 steal 与 runqueue peak；B92 补齐 IPI handler、doorbell 失败及逐 reason 发布/消费计数；B93 按发起 CPU 输出 TLB 后端、精准页数、远端 fanout、同步总/最大 ticks 和失败数 | IRQ/preempt depth 尚无权威状态；持 allocator 锁主动 panic 未用生产 hook 动态注入；同类 mailbox bit 可合并，IPI 发布/消费差值不是丢中断判据 |
+| current task | current/idle 与不可变诊断快照已拆到 Per-CPU；B33 已验证同一 TCB 从 CPU0 current 经远端 IPI 安全点交给 CPU1；B39 又验证 CPU1 无 syscall 用户循环可被本地 tick 切出；B40/B41 已完成永久 group-exit 与临时 exec 的 owner 自清理、live ack 和 MM 替换门禁；B42 已隔离 exec 的跨 PCB 共享资源；B43 已完成非 leader exec 的 PID/TID 身份接管与派生索引同步；B45/B87 已删除可逃逸的 trap-context 与物理地址 `'static` 引用，本批又删除最后一个安全整页 `&'static mut [u8]` 入口：未发布私有页只在 unsafe scoped closure 中建立短命 slice，可被用户或 MAP_SHARED 并发访问的页仅做 VM 锁内 raw copy；B46—B48 已让 signal frame 恢复、投递及三个 signal 状态 syscall 都不跨 faultable uaccess 持有 task/sighand 锁 | 普通用户任务默认仍固定 CPU0；默认限制待最终共享子系统门禁后解除 |
+| 调度 | Per-CPU current/idle/RunQueue、AP 精简循环、显式目标发布和受控迁移已完成；B31 用 per-thread `cpus_allowed` 约束三条 owner 交接，B33—B38 完成安全点、运行期 affinity 与负载选点；B49 加入单 victim work stealing，B50 让每个 CPU 在自身 idle 栈回收退出 TCB；B91 为每核 owner 补齐 switch/migration/steal/rq-peak 生产诊断 | 默认全核 mask 与多 thief/多写者压力验证尚未完成；共享子系统审计前普通用户任务仍固定 CPU0 |
 | 阻塞任务 | interruptible_queue 同时承担枚举、清理、统计和唤醒辅助 | 与 per-CPU runqueue 职责重叠，旧重复唤醒扫描依赖全局队列 |
-| timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
-| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53 又用 CPU1 持续用户 load + CPU0 真实 CoW PPN 替换证明精准 handler 生效，并让软件 handler 在 ack 前发布 observed，避免 trap-return 重复全刷；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | `mprotect/munmap` 权限/有效位压力与通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
-| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态由对应负责人处理 |
-| 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端和真实 CoW stale-translation 已有 focused 证据；仍需权限/有效位与高并发压力 |
+| timer | B39 已改为每 CPU 独立 100 Hz 绝对 deadline；CPU0 独占全局 timer/timeout/timerfd/net poll，AP 只推进本地 quantum；AP 插入更早全局 timer 时用 `TIMER_REPROGRAM` 请求 CPU0 重编程；B90 删除无读者的 `TIME_SOURCE static mut` 和硬编码 MTIME 旁路，单调时钟统一经 HAL，realtime offset 为原子状态 | 全局 callback 仍只能在 CPU0 安全点执行；文件系统 reclaim 等后续 housekeeping 尚未全部并入同一 owner 边界 |
+| MM/TLB | `AddressSpace` 统一 VM 锁与 `TlbContext`；`UserMapper/MmuGather` 锁内记录，`TlbFlush` 锁外完成 generation、失效同步和 frame 退休；双架构均使用 MM-owned versioned ASID；B52 已把最多 64 页的连续区间接到 RV64 `sfence.vma va, asid`/SBI RFENCE FID 2 和 LA64 固定 ASID/range slot；B53/B82 用 CPU1 真实用户 load 证明 CoW 与同 VPN remap 精准失效；B84 再用远端 store fault 证明 `mprotect(RW -> R)`，并修正 LA64 撤销写权限必须同步清 W/D；B85 由全部 8 CPU 经真实 mprotect 交错执行锁外 flush，验证多代 generation、固定槽和 active mask 收尾；B86 删除 `&PageTable -> &mut PTE` 通道，raw PTE 视图按读写拆分且 writer 必须持可变页表借用；B51 由调度器维护精确 active MM 驻留，PRIVATE_EXPEDITED 复用同一 mask | 通用用户迁移未完成；默认全核开放仍受共享子系统门禁约束 |
+| MM 共享状态 | B54 将 LoongArch 恒等映射 dirty 表改为原子位图，并把 slab 的 unsafe trait 授权收窄到经全局堆锁证明的 `SlabAllocator: Send`；B57/B58 删除 fixed-size 引用与字符串/sockaddr 绕过路径；B59 删除 `translated_byte_buffer`，让 `UserBuffer`/iovec 只保存 VA 区间并在实际 copy 时重验 PTE；B60—B63 已收口 IPC registry uaccess、消息领取和 SysV ID 生命周期；B64 用专用 `FutexWaiter` 修复 requeue 身份，B65 再以 backing `Arc` 身份和队列级 pin 排除 shared futex raw PPN 复用的错误命中；B66 以锁外 fault-in + table 锁内 VM try-read 完成最后比较与 waiter 原子发布；B67 删除绕过 pin 的强制匿名页换出并让临时 pin 的候选可再次回收；B68 将 CMP source 比较与 wake/requeue 放进同一 table 临界区，并让 shared 两端在锁内 nofault 重验；B86—B88 依次收口 PTE、trap context 与 frame-zero 的安全 `'static mut` 通道；B89 再用短命 `FrameReservation` 把单页 PPN 元数据领取与 4 KiB 清零拆分，全局 allocator 写锁不再覆盖普通单页清零和 `Arc` 构造；B94 让 heap_trace 的锁状态直接拥有两张 BSS 表，删除裸指针发布与手写 `Send`；本批将剩余整页 byte view 收口为不可逃逸的 unsafe scoped view/raw copy，并让 filemap 私有页按“先填充、后发布 PTE”顺序建映 | 文件 truncate 后的 futex backing false-negative、精确 WAIT/CMP_REQUEUE 动态竞态和 Retry/内存压力仍需验证；其它共享子系统的 unsafe/static 状态仍按责任边界持续审计 |
+| 架构 ASID | `TlbContext` 原子保存软件 epoch/硬件 ASID；同一 MM 跨线程/CPU 共享，耗尽时全 CPU flush/ack 后换代；RV64 启动探测 ASIDLEN，LA64 读取 ASIDBITS；最多 64 页使用定向区间失效，更大跨度全刷 | ASID rollover、区间后端、真实 CoW、同 VPN unmap/remap、mprotect 降权与 8 发起者并发 PTE 写均有 focused 证据 |
 | 网络/驱动 | ROUTING_BUF、DMA reservation 等全局状态 | 并发覆盖或错误匹配请求 |
 | lwext4 | Send/Sync 依赖单核和 C 全局表 | 多核并发进入 C 状态导致数据竞争 |
-| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0 |
+| ABI | B30 已让 getcpu 返回当前连续逻辑 CPU；B31 内核 TCB 已持有真实 `cpus_allowed`；B32 raw `sched_getaffinity` 已按 TID 返回该 mask；B34 的 `sched_setaffinity` 已支持 current TID，B35/B36 支持非 current 的稳定 Blocked/Queued TID，B38 支持远程 Running/Blocking TID；B44 已实现 GLOBAL 与 MM-owned PRIVATE_EXPEDITED membarrier；develop Batch 7 已让 `/proc/cpuinfo` 与 `/proc/stat` 输出完整 configured CPU 拓扑；本批实现了每 CPU user/system/idle 微秒账户及 `USER_HZ=100` 转换，aggregate 由各 `cpuN` 显示 tick 求和 | 默认全核 affinity 尚未开放；普通任务当前仍为 bit0；nice/iowait/irq/softirq/steal/guest 尚无独立时间账户，`ctxt/intr` 仍是简化值 |
+
+B83 补充了表中 exec 收尾的关键边界：用户资源清理的 live ack 与撤销
+CPU current 槽的 inactive ack 已分离，旧 leader 真正切回 idle 后才允许身份交换。
 
 ### 2.2 总体结构
 
@@ -221,8 +224,8 @@ Queued(source)
 7. current_task() 返回克隆的 Arc，删除 current-task 裸指针和伪造的 static 引用；
 8. pid/tid 等不可变 per-CPU hint 可作为快路径；parent pid、pgid/sid、credentials、
    user token 等可变 hint 必须有集中更新/失效协议，否则读取权威对象；
-9. interruptible_queue 不得成为第二套 runnable queue；其信号枚举、OOM、zombie 清理和
-   统计职责迁入任务 registry、WaitQueue 或专用 registry 后，才能退役或降为非运行实体索引。
+9. interruptible_queue 不得成为第二套 runnable 或 zombie queue；它只登记
+   `Blocking/Blocked` 等待者，终态 TCB 只能进入 owner CPU 的 `local_zombies`。
 
 ### 2.6 MM/TLB 协议
 
@@ -298,7 +301,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   <code>pull_policy: missing</code> 不会自动刷新已存在的同名 tag，必须以 digest
   和重建后的容器为准；
 - 建立 <code>KTEST=smp</code> RED 用例：在线 CPU 数、独立栈、per-CPU 隔离、
-  IPI ping-pong、任务唯一运行和 TLB 失效；
+  生产 IPI sequence/ack、任务唯一运行和 TLB 失效；
 - 冻结实施基线：记录 commit、分支、dirty status、双架构 1 核日志和成绩；从该 commit
   创建专用 SMP branch/worktree，后续批次不得直接堆叠在持续变化的 develop 上；
 - 默认开发核数为 CORE_NUM=2；是否补 CORE_NUM=1 由本工作包是否可能破坏单核退化路径决定。
@@ -438,14 +441,14 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 
 #### 退出条件
 
-- 双架构 IPI 单播、广播、交叉发送和 10,000 次 ping-pong 无丢失；
+- 双架构生产 IPI 单播、广播、交叉发送和 10,000 次 sequence/ack 无丢失；
 - park CPU 收到 mailbox/IPI 后必定恢复检查，IPI-only 与 timer-enabled 两个子阶段证据分开；
 - 内核态收到 timer/IPI 不 panic，也不会从中断中直接 context switch。
 
-#### 当前进度（SMP-P2-B09/B10/B11/B12/B13/B14）
+#### 当前进度（SMP-P2-B09/B10/B11/B12/B13/B14/B95）
 
-- `PerCpu` 已增加原子的 `pending_ipi` 和 PING ack。`IpiReason` 明确
-  表示可合并的幂等 reason bit，而不是事件计数；发送方以 Release 发布，
+- `PerCpu` 已增加原子的 `pending_ipi`。`IpiReason` 明确表示可合并的幂等
+  reason bit，而不是事件计数；发送方以 Release 发布，
   接收方以 Acquire `swap(0)` 消费；handler 不分配、不打印、不持普通锁，
   也不调度；
 - 通用 `send_ipi_mask()` 已支持一次向多个 online AP 发布同一个 reason。
@@ -477,13 +480,11 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 - B12 已在 CPU0 启用 RV64 SSIE，以及 LA64 QEMU 的 IOCSR/ECFG IPI line；
   用户态和内核态 trap 共用同一个无锁 fast path，AP→BSP 不再依赖只存在
   于 BSP→AP 方向的假设；
-- AP 收到往返请求时，hard IRQ 只原子发布 reply pending；真正的回复
-  doorbell 延后到 AP idle stack。idle loop 在全局中断关闭后先重查
-  deferred work，再执行一次 `wfi`/`idle 0`，本地 IPI line 保持 enabled，
-  从协议上消除 check→wait 窗口中的 lost wakeup；
-- B12 的双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7。每个架构的三个 AP
-  各完成 64 轮顺序请求/回复，共覆盖 192 次 AP→BSP doorbell；源码验证
-  前后指纹一致；
+- B12 曾通过测试专用往返 reason 验证 AP→BSP doorbell 和 idle lost-wakeup
+  窗口：hard IRQ 只发布 deferred reply，AP 返回 idle stack 后再发送回复；
+  双架构 `CORE_NUM=4 KTEST=smp` 均通过 7/7，每个架构的三个 AP 各完成
+  64 轮顺序请求/回复。B95 已用正式 `MEMORY_BARRIER` sequence/ack 协议
+  取代该临时协议，生产代码不再保留测试专用 reply 状态；
 - B13 已实现 CPU0 发起的终态 STOP/ack：hard IRQ 只发布 stop request，
   AP 返回独立 idle stack 后先关闭全局中断和本地 IPI source，再发布
   stopped ack 并永久执行 `wfi`/`idle 0`。CPU0 有界等待全部目标，重复调用
@@ -503,13 +504,19 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   panic 入口也在任何诊断前立即关中断；
 - B14 的双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 17/17 PASS。
   新测试在窗口内 yield，证明 idle→新任务为 IRQ-off、原任务恢复
-  为 IRQ-on，然后完成真实 AP→BSP IPI reply；
+  为 IRQ-on，然后完成真实 AP→BSP `MEMORY_BARRIER` 请求与 ack；
+- B95 已删除 `PING`、`ROUND_TRIP_REQUEST/REPLY` 及其 PerCpu ack/pending
+  字段和 AP idle 回复分支。focused ktest 现在直接覆盖生产
+  `MEMORY_BARRIER` 的 BSP→AP 单播、BSP→全部 AP 广播和 AP→BSP 方向；
+  AP→BSP 仍为每个 AP 64 轮，并在回收测试任务前同时确认任务进入
+  `Zombie` 且目标 CPU 已清空 current 槽。双架构 8 核均为 34/34 PASS，
+  三个方向的正式用例均在日志中实际执行；
 - B33 已让运行中用户任务在 trap-return 安全点消费 RESCHEDULE；handler 仍只置位，
-  与 timer 请求合并后最多调度一次。通用交叉发送、并发 reason 和 10,000 次 ping-pong
+  与 timer 请求合并后最多调度一次。通用交叉发送、并发 reason 和 10,000 次生产 sequence/ack
   仍未完成，Phase 2 状态保持 `partial`。
 
 Phase 2 结束后设置一次人工 go/no-go 检查点：只有 trap 保存恢复、IPI 幂等、STOP 和 deferred
-timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”不能替代内核中断安全证明。
+timer 均有双架构证据，才进入调度状态迁移；“能完成请求/应答”不能替代内核中断安全证明。
 
 ### Phase 2.5：单核状态迁移 API 与本地 TLB batch
 
@@ -537,7 +544,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - interruptible_queue 不参与 runnable 唯一性判定，保留的 registry 职责有清晰 owner；
 - 已发布 PTE 修改均通过 local MmuGather，双架构单核 MM 回归不下降。
 
-#### 当前进度（SMP-P2.5-B15 至 B59）
+#### 当前进度（SMP-P2.5-B15 至 B96）
 
 - B15 已删除 `TaskControlBlockInner.task_status`，用单个原子字编码调度所有权；B36 在原六态上
   增加仅用于 queued 搬队短窗口的 `Migrating`，不再保留兼容投影
@@ -545,16 +552,22 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - publish、fetch、yield、block、wake、timeout、signal 和 exit 已统一经 CAS
   迁移。B18 后 runnable 成员关系由 owner CPU 的 RunQueue 持有，
   B50 后 zombie Arc 也改由 owner CPU 的本地回收队列持有；`TASK_MANAGER`
-  只保留 interruptible/timer registry，重复 wake 不会重复入队；
+  只保留 interruptible/timer registry，重复 wake 不会重复入队；B96 又删除
+  interruptible zombie 扫描和按 pid 兜底，终态不再有第二个候选容器；
 - `Processor.current` 保留到真实 context switch 返回 idle 后才清空；idle 的
   `finish_switch_out()` 统一提交 yield、阻塞和本地 zombie 交接。`Blocking(cpu)` 只表达
   “已经登记睡眠但尚未切离 CPU”的必要窗口，早到 wake 恢复 `Running(cpu)` 且不入队；
-- `Queued` 任务退出前必须先从运行队列移除并转为 `Blocked`。可能造成任务丢失、
-  双重 owner 或悬挂队列节点的错误在所有构建中 fail-stop；只有重复 wake 属于
-  可恢复竞争；
+- 退出只允许 owner CPU 提交 `Running(cpu) -> Zombie`。Blocked sibling 必须先 wake，
+  Queued sibling 必须先 fetch；任何 `New/Queued/Blocking/Blocked/Migrating -> Zombie`
+  都可能造成任务丢失、双重 owner 或悬挂节点，因此在所有构建中 fail-stop；
 - `scheduler_state_has_unique_owner` 只通过生产 API 覆盖提前取消阻塞、完整
   Completion 睡眠/唤醒、publish/fetch/yield/zombie 和重复 wake；冻结只读审查
   未发现并发缺陷；
+- B96 的调用图审查证明 TCB `mark_zombie()` 只有 current exit 和 ktest trampoline
+  两个入口，均处于本 CPU `Running`。实现据此删除 interruptible registry 的 zombie
+  摘取、计数和周期扫描，并显式拒绝错误 CPU 或非 Running 状态进入终态；双架构
+  `CORE_NUM=8 KTEST=smp KREPEAT=1` 均为 34/34 PASS，group-exit、exec sibling stop
+  和 owner-local 回收均实际执行；
 - 双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS，且
   `scheduler_state_has_unique_owner` 两轮通过、terminal STOP 仅最后执行；双架构
   normal build 退出 0，RV64 WaitQueue 为 4/4 PASS。详细命令、用时和证据边界见
@@ -579,6 +592,24 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   防止 IPI 返回路径再做一次全用户补刷。CPU1 用户探针先填充旧 PPN 翻译，CPU0 经正式
   CoW/PTE/MmuGather/TlbFlush 替换物理页；timer 静默窗口内后续普通 load 必须读到新页
   canary。双架构 `CORE_NUM=8 KTEST=smp KREPEAT=2` 均为 67/67；
+- B82 复用同一真实用户驻留窗口，在 CoW 之后通过正式 `munmap` 与
+  `MAP_FIXED_NOREPLACE` 把同一 VPN 指向第三个物理页。CPU1 必须依次读到 CoW 与 remap
+  canary，且 full-user request 不得增长。首轮由此暴露 LA64 仅写 `TICLR` 不能停止尚未
+  到期的倒计时；按架构 `TCFG.En` 语义改为先停计数再清 pending 后，双架构 8 核定向用例
+  均通过；
+- B84 在同一探针中先以真实用户 store 证明 PTE 原本可写，再由 CPU0 执行
+  `mprotect(RW -> R)`；`AddressSpace::write()` 收齐精准 shootdown ack 后，CPU1 第二次
+  store 必须以 SIGSEGV 结束且 frame canary 不变。首轮 LA64 RED 证明页表 W 位虽已清除，
+  TLB D 位仍保持可写；对照官方页表遍历/TLB 位定义和 Linux `pte_wrprotect()` 后，将
+  `LAFlexPageTableEntry::revoke_write()` 收敛为同时清 W/D，最终双架构 8 核 focused 通过；
+- B85 把旧的多发起者直接同步用例升级为生产 PTE writer：8 个 CPU 共享一个 MM，在各自
+  的常驻匿名共享页上交替执行 8 轮 mprotect。地址空间锁只覆盖 PTE/VMA 修改，各代
+  `TlbFlush` 解锁后交错发送不同 VPN payload；writer 在全员完成前保持 active，并在开中断
+  barrier 后本地 deactivate。双架构 8 核均 34/34，最终 generation、active mask、精准请求
+  和后续用例无污染检查均通过；
+- B86 把物理页 PTE 视图收窄为 crate-private unsafe 读/写接口：只读 walk 不再借道可变
+  walker，写侧和 `block_and_ret_mut*()` 必须取得 `&mut PageTable`。外层 VM 锁继续提供
+  跨 CPU 线性化，Rust 借用在更低层阻止共享页表引用制造可变 PTE；PTE 位与 TLB 协议未变；
 - B54 开始 Phase 5 的 MM/HAL 共享状态审计：LoongArch 恒等映射 dirty side table 改用
   原子 bitset，防止同 word 的并发置位/清位丢更新；slab 删除内部 page/list/cache 和顶层
   allocator 的过宽 `Sync`，只保留全局堆 `Mutex` 类型边界真正要求的
@@ -727,6 +758,37 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   读取。mutex 提供 writer 全序，内存序负责无锁发布；只改成 Release 而保留锁外 store 不算
   修复。POSIX timer discard/finalize 仍在 signal 解锁后执行。双架构 8 核 build 与 glibc
   `sigtimedwait01` 各 11/11 通过，`online_mask=0xff`；三 CPU stale-store 精确注入仍为 NOT RUN；
+- develop 融合 Batch 3 在集成工作树引入每轮等待独立的 `WaitEntry` 通知 token：wake 不再因
+  任务尚处于 Running 而丢弃边沿通知，checked block 在 `Blocking` 登记后复查 token 并可撤销
+  睡眠；poll/epoll 多队列共享同一 entry，以 CAS 唯一领取且逐队列清理，不扩张 `TaskStatus`
+  状态机。双架构 8 核 build 与 WaitQueue ktest 均 5/5；初赛保持 RV64 312/314、LA64
+  semantic 308/314。FS/Net/Driver producer 全面通知尚未由本负责人验收，generic 10ms I/O
+  fallback 因此继续作为过渡保护，不能在本批提前删除；
+- develop 融合 Batch 4 将普通 WaitQueue 的队列锁临界区收窄为“登记/摘除 waiter”，登记后的
+  条件检查在锁外执行；EventWaitQueue 删除会静默丢 wake 的 `*_if_unlocked` 接口，TCP、RAW、
+  packet 与 PTY 生产者切换为可靠通知。双架构 8 核 `KTEST=waitqueue KREPEAT=20` 均为
+  120/120；初赛四组功能标记完整且无 panic，但测试工具对受版本控制二进制的非幂等
+  `patchelf` 仍需独立修复。generic fallback 暂时保留，待 splice 等剩余生产者完成迁移后删除；
+- develop 融合 Batch 4.1 将工具 ELF 准备改为幂等操作：仅当 interpreter、RPATH 值或
+  `DT_RPATH` 类型不符合合同时才执行 `patchelf`。双架构 8 核初赛均 exit 0、marker 完整且
+  `mutation_detected=false`，关闭了 Batch 4 的测试证据污染；
+- develop 融合 Batch 5 将 signalfd 的等待 owner 从共享 inode 改为当前 sighand：普通 fork
+  创建独立事件队列，`CLONE_SIGHAND` 共享，VFS read/poll 按当前任务动态解析；线程 private
+  和进程 shared pending 都在 owner 锁外通知，fork 继承的 File 不再睡在父队列。同步修复用户态
+  `waitpid` 对四参数 `wait4` 的错误三参数封装，显式将 rusage 置零。双架构 8 核 L4 regression
+  均 7/7，signalfd 延迟阻塞 read、child 继承 fd 和 RV64 `clone_vm_second_slot` 全部通过，
+  `online_mask=0xff` 且源码指纹稳定；
+- develop 融合 Batch 6 迁移 writable-prefix uaccess 的性能意图，但没有照搬 develop 中保存
+  物理页 slice 的旧表示。`new_writable_prefix()` 在一次 VM 临界区内扫描已有可写 PTE，仅在
+  前缀为空时 fault-in 首页，随后以 VA-backed writer 限定 read/pread 本轮可消费长度；实际
+  copy 继续逐页重验。双架构 8 核 L4 regression 均 7/7，跨页只读边界场景两次 read 分别返回
+  8/8 字节，证明后半 pipe 数据未被提前消费，`online_mask=0xff` 且源码指纹稳定；
+- develop 融合 Batch 7 让 procfs 与逻辑 CPU 命名空间一致：`/proc/cpuinfo` 为每个 configured
+  CPU 输出 processor block 并使用固件 model，`/proc/stat` 依次输出 aggregate 与
+  `cpu0..cpuN`。Batch 7 当时的时间字段保持 0，不用异量纲诊断计数冒充 USER_HZ；
+  本批已用真实 per-CPU user/system/idle 账户替代该占位值。regression 专用 PID1
+  补挂 procfs，永久用户用例从两个文件交叉核对拓扑；双架构 8 核 L4 均 8/8，processor 与
+  cpuN 行数均为 8，`online_mask=0xff` 且源码指纹稳定；
 - unmap、CoW/回滚、OOM/swap、exec 和 zombie 清理都先撤销 PTE，再通过
   `UserMapper::retire_frame()` 把旧 `FrameTracker` 交给本轮唯一 `MmuGather`；
   `TlbFlush::execute()` 完成 flush/ack 后才释放。存在远端观察者且退休队列 OOM 时
@@ -858,8 +920,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B41 在同一线程组锁内增加可恢复的 `ExecSession`，临时拒绝 concurrent exec 和
   late `CLONE_THREAD` 发布；owner 只请求 sibling 在各自 CPU 安全点退出，不再从
   远端 runqueue 摘除或代清资源。`remove_thread()` 在用户映射撤销和 TLB ack 后
-  递减 live count，计数降为 1 才完成 Completion，owner 随后安装新 trap context/MM
-  并重新开门。永久 group exit 可覆盖临时 exec；WaitQueue/Completion/vfork 等待
+  递减 live count。B83 后 Completion 还需等待每个 sibling 在 idle 收尾发布 inactive ack，
+  owner 随后安装新 trap context/MM 并重新开门。永久 group exit 可覆盖临时
+  exec；WaitQueue/Completion/vfork 等待
   会因生命周期停止请求安全退栈。双架构 8 核 focused 均为 27/27；初赛保持
   RV64 312/314、LA64 308/314，clone/fork/exec/exit/wait 项均满分。
 - B42 在 live count 收缩为 1 后统一调用 `reset_exec_resources()`。fd table 与
@@ -874,6 +937,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   hint、OOM active tracker、`exit_signal` 与 thread quota 随后更新。旧 leader 的迟到
   Drop 只能条件删除仍指向自身的条目，不会误删新 leader。双架构 8 核 focused 均为
   29/29；初赛保持 RV64 312/314、LA64 308/314。
+- B83 对 B41/B43 的 exec 收尾进行生命周期收口：live token 仅表示
+  clear-child-tid、用户映射和 TLB 清理已完成；每个 sibling 只在切回 idle、
+  撤销 current 槽后发布独立 inactive ack。`ExecSession` 等待后者全部收齐，
+  再安装新 MM 和交换非 leader TID。同时修复安全点进入 noreturn 退出前
+  遗留 current `Arc` 的强引用泄漏。该顺序与 Linux v6.6 `de_thread()` 等待旧
+  leader inactive 后再交换 PID 的原则一致。双架构 8 核 focused 均为 34/34。
 - B44 删除 TCB 上的兼容注册字段，把 PRIVATE_EXPEDITED 注册状态放入共享
   `AddressSpace`。GLOBAL 面向全部 online CPU；PRIVATE 当时在 VM 锁内冻结历史
   cached CPU mask，解锁后执行独立的 full-fence IPI/request/ack。B51 已将目标改为
@@ -884,6 +953,21 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   返回 `&'static mut TrapContext` 的 current helper。clone/init 显式缩短 guard，
   LA64 未对齐模拟改为锁内快照、锁外用户访存、锁内校验提交，不新增 wrapper 或状态机。
   双架构 8 核 focused 均为 30/30；初赛保持 RV64 312/314、LA64 308/314。
+- B87 删除 `PhysAddr` 上四个无人使用却可安全返回 `'static` 引用的通用 helper，以及只为
+  trap context 服务的 `PhysPageNum::get_mut()`。raw pointer 解引用下沉到
+  `trap_context_mut(&mut self)`，由 frame 存活、页首对齐和 `task.inner` guard 独占共同
+  证明安全；双架构 normal build 与 8 核 SMP 34/34 均通过，frame 地址和恢复 ABI 未改变。
+- 本批继续删除 `PhysPageNum::get_bytes_array() -> &'static mut [u8]`。未发布且由
+  frame/VMA 构造路径独占的页使用 unsafe `with_bytes[_mut]()` scoped closure，
+  用户映射、MAP_SHARED 和 `process_vm_*` 等可能存在并发访问的页则只在 VM/
+  owner 临界区做 raw copy，不伪造 Rust 独占引用。filemap 私有 fault 和带初始数据的
+  VMA push 同时改为先填充未发布 frame、再安装 PTE，失败只回滚无 PTE frame。
+  双架构 8 核 CPU-time QEMU gate 与 normal build 均在冻结源码上通过。
+- B89 使用只在 frame allocator 内部存在的 `FrameReservation`，在写锁内唯一领取
+  PPN 后立即释放锁，再在锁外按 recycled/fresh+zero_init 语义清零并构造
+  `Arc<FrameTracker>`。`Option::take()` 把回收责任一次移交给 tracker，Drop 只回滚
+  未消费 reservation。双架构 normal build 与 8 核 SMP 34/34 均通过；连续帧和
+  显式 uninit 路径未混入本批所有权变更。
 - B46 把 `sys_sigreturn()` 改为锁内快照 SP、锁外读取完整用户 frame、锁内一次提交，
   用户缺页和 MM/TLB 同步不再跨 `task.inner`。双架构 `TrapContext` 用
   `machine_context()`/`set_machine_context()` 字段复制替代前缀布局强转；LA64 仍保持
@@ -919,6 +1003,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   B49 在本地 fetch 失败后启用 work stealing，复用现有 `Migrating` owner 窗口，不增加
   调度状态；B50 删除 `TASK_MANAGER` 中的全局 zombie 队列，让退出 CPU 在切回
   idle 栈后把最后调度 Arc 交给本地队列，并由同一 CPU 在下轮 dispatch 前析构；
+  B96 删除残留的 interruptible zombie 兼容扫描，并把相应 profile 阶段改名为
+  `taskq_stats`，CPU0 不再每 64 tick 为不存在的终态 owner 获取 `TASK_MANAGER`；
 - 每 CPU 使用本地 Processor、RunQueue、idle context 和 zombie 回收队列。B21 的固定
   内核栈退休队列继续只处理映射/slot 生命周期：TCB Drop 只登记退休，CPU0
   idle 安全点再做全核 kernel-TLB shootdown 和 frame/slot 归还；
@@ -959,9 +1045,16 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - B39 focused 用真实 CPU1 用户死循环证明：没有 syscall、yield、数据 load/store 和远程
   `RESCHEDULE` 的帮助，本地 timer 仍能在返回用户态安全点切出该任务并运行后继 helper。
   双架构 8 核均为 25/25，初赛失败集合没有扩大；
+- 本批在 `CpuTaskState` 内建立 user/system/idle 微秒账户。用户与系统时间在每次
+  trap/schedule 边界立即归属当前 CPU，不借用可能跨迁移累积的 PCB 批量尾数。
+  trap return 拆为安全点前结算 system 与恢复汇编前开启 user 两段，防止安全点
+  切走/迁移的时间误计为 user。idle 区间在本地 idle 栈进出处更新，远程读取以
+  sequence 快照合并已结算值和当前未闭合区间；`/proc/stat` 按 `USER_HZ=100`
+  输出 aggregate 与 `cpu0..cpuN`。双架构 8 核 CPU-time gate 均 PASS。
 - B50 已落实 zombie TCB 在退出 CPU 的 idle 栈上回收；任务仍使用自身
   内核栈时不会释放最后一个调度 Arc。按 pid 的 reap 跨 CPU 逐队扫描，不同时
-  持有两个队列锁，Arc 析构发生在所有容器锁之外；
+  持有两个队列锁，Arc 析构发生在所有容器锁之外；B96 进一步要求只有本 CPU
+  current 能标记终态，未发布 New task 直接 drop，阻塞 sibling 则先唤醒再自退出；
 - B51 让 `CpuTaskState.active_user_vm` 固定当前 CPU 的精确旧 MM。idle 栈在改变
   current owner 前执行 `leave_user_vm()`，trap-return 通过 `switch_user_vm()` 重新进入；
   槽锁不跨 VM 锁、ASID rollover 或 IPI 等待。该边界同时服务 TLB target 与
@@ -1024,7 +1117,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
   - 使用同一 IPI/ack 基础设施和完整内存屏障；
 - RISC-V 非零 ASID 的 trap 入口/返回不再固定执行全量 `sfence.vma`；B53 已通过 timer
   静默、FIFO restore helper、full request 不变和 handler observed 四项联合条件，证明
-  CPU1 真实用户 load 在 CoW 后离开旧 PPN，而不是被其它 trap 全刷掩盖；
+  CPU1 真实用户 load 在 CoW 后离开旧 PPN，而不是被其它 trap 全刷掩盖；B82 又在不进入
+  syscall/fault 的情况下证明同一 VPN 经 `munmap` 重映射后不会继续读取已退休 PPN；
 - TLB 用例同时校验 shootdown sequence/ack 和 ack 前 frame 不复用；LoongArch 作为不被
   trap 自动全刷掩盖的强暴露平台，必须单独保留证据；
 - 完成 MM 专项测试后，才允许受控用户测试任务跨 CPU 运行。该测试必须是 hermetic 的
@@ -1129,8 +1223,10 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 
 - B55 已补齐 Phase 0.5 当时只写入文档、未真正跨 CPU 串行化的 console irq-safe 锁和
   panic raw fallback；后续共享子系统只能复用该边界，不能再直接写 UART；
-- TIME_SOURCE、CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、
-  受锁对象或 per-CPU 状态；
+- B90 删除无读者且无同步的 `TIME_SOURCE`、trait 注册入口和 RISC-V
+  MTIME 旁路；生产时间读取统一经 HAL，`BOOT_TIME_OFFSET_NS` 保持原子；
+- CLOCK_FREQ、timer 计数、LoongArch DIRTY、UART 和诊断缓冲改为原子、受锁对象
+  或 per-CPU 状态；
 - VirtIO 队列在 v1 中继续单队列串行化；DMA reservation 改为 per-CPU，
   防止不同 CPU 的同步请求互相覆盖；
 - smoltcp 保持单实例：
@@ -1143,14 +1239,20 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 - 审计 PageCache、VFS、FAT、frame allocator、heap/slab、futex、WaitQueue、
   signal、epoll/eventfd 和 pidfd；
 - 删除所有仅以“当前单核”为安全依据的 unsafe Send/Sync；确需保留时必须写明真实共享所有权、锁和中断约束；
-  - B54 已完成 LoongArch dirty side table 与 slab unsafe trait 收口；堆后备区、heap_trace
-    缓冲和 Per-CPU 静态栈保留 `static mut`，但分别由启动期唯一移交、全局锁和 CPU 独占槽
-    证明，不以“看见关键字”作为机械删除依据；
+  - B54 已完成 LoongArch dirty side table 与 slab unsafe trait 收口；B94 进一步让
+    `TRACE: Mutex<TraceState>` 直接拥有 heap_trace 两张定长表，删除两个
+    `static mut`、裸指针发布和手写 `unsafe impl Send`；堆后备区和 Per-CPU 静态栈
+    继续分别由启动期唯一移交与 CPU 独占槽证明，不以“看见关键字”作为机械删除依据；
   - B57 已删除 fixed-size `translated_ref*`，并把标量/数组的实际 copy 纳入逐页 VM 锁；
   - B58 已收口字符串、sockaddr 与若干 fixed ABI 的原始物理视图绕过路径；
   - B59 已删除 `translated_byte_buffer()` 并把 `UserBuffer`/iovec 原子替换为 VA-backed
     区间与 partial/exact 复制语义；所有实际访问逐页在 VM 锁内重验，pipe 的自旋锁内
     例外只能使用受限 nofault helper；
+  - B86—B88 又把 raw PTE、trap context 和 frame-zero 的可变引用分别绑定到
+    `&mut PageTable`、`&mut TaskControlBlockInner` 与 allocator 唯一领取窗口；不顺带修改
+    跨 MM/PageCache/FS 的整页 byte view；
+  - B89 进一步把普通单页的 4 KiB 清零与 `Arc` 构造移出全局 frame
+    allocator 写锁；锁内只保留 PPN 元数据领取，不扩张到连续帧和 Driver DMA 路径；
 - FS、Net、Driver 的全面 SMP 并发审计由对应负责人后续实施；当前主线不重复展开，
   仅保留跨模块接口必须满足的锁序与所有权约束；
 - exit_group、多线程 exec 和致命信号采用跨核停止协议：
@@ -1158,8 +1260,8 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
     sibling 投递 SIGKILL、wake 与 reschedule，并由各 owner 在安全点退出；
   - live token 在用户资源/TLB 清理后发布 ack，最后一个 ack 释放进程共享资源；
   - 永久退出无需发起者同步等待；B41 已为多线程 exec 建立临时
-    `ExecSession + Completion`，发起者等 live count 收缩为 1 后才替换 MM，
-    完成后重新开放 clone；
+    `ExecSession + Completion`；B83 要求发起者等 live count 收缩为 1，并收齐
+    sibling idle inactive ack 后才替换 MM，完成后重新开放 clone；
   - B42 已在上述 ack 后隔离仍跨 PCB 共享的 fd table/sighand，并换新 private
     futex table；exec 不再通过原地 close/reset/clear 污染其它 PCB；
   - B43 已让非 leader exec owner 接管进程 PID/TGID，并同步 task registry、
@@ -1185,11 +1287,14 @@ timer 均有双架构证据，才进入调度状态迁移；“能 ping-pong”�
 #### 实施内容
 
 - 增加 per-CPU 诊断计数：
-  - context switch、migration、steal；
-  - runqueue 长度峰值；
-  - 各类 IPI 收发与 ack；
-  - TLB shootdown 数量、范围和等待时间；
-  - timer interrupt、reschedule；
+  - B91 已完成 context switch、实际 migration、成功 steal 和 runqueue 长度峰值；
+  - B92 已完成 IPI handler、硬件 doorbell 失败和各 reason 的发布/消费次数；既有 request/ack
+    继续表达协议完成状态，不用可合并的 mailbox 消费次数代替；
+  - B93 已完成互斥后端口径的 TLB shootdown 轮数、精准页数、远端目标数、同步总/最大
+    raw ticks 和错误数；本地-only flush 不冒充 shootdown；
+  - B39 的 per-CPU `timer_irq_count`/`timer_deferred_count` 与既有 `reschedule_count` 已覆盖
+    timer hard IRQ、deferred 批次和安全点消费；B92 的逐 reason publication/consumption
+    又补齐 RESCHEDULE IPI 的发起/接收侧口径；
 - Phase 2.5/3 已用于正确性门禁的无效状态转换和重复入队断言继续保留；Phase 6 只补充
   汇总、导出和低开销 release 计数，不能把首次发现竞态的能力拖到稳定化阶段；
 - panic 已输出所有 CPU 的 current TID、runqueue、active MM 和 pending IPI；IRQ/preempt
@@ -1226,7 +1331,7 @@ focused test，也不因纯文档收尾重复运行。
 | 类别 | 场景 |
 |---|---|
 | 启动 | online mask、独立 boot/idle stack、per-CPU register |
-| IPI | 单播、广播、ping-pong、并发 reason、STOP |
+| IPI | 单播、广播、生产 sequence/ack、并发 reason、STOP |
 | 调度 | 唯一运行、重复 wake、远程 enqueue、steal、affinity、迁移 |
 | 同步 | futex、WaitQueue、Completion、eventfd、signal |
 | MM | unmap、mprotect、CoW、MAP_SHARED、exec、kernel mapping |

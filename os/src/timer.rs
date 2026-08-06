@@ -457,22 +457,12 @@ pub enum TimeRange {
 
 use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-pub trait TimeSource {
-    fn uptime(&self) -> u64;
-}
-
 const DEFAULT_BOOT_TIME_OFFSET: u64 = 1_798_761_600; // 2027-01-01 00:00:00 UTC
 
+// 硬件计数器统一由 HAL 的 get_time()/get_clock_freq() 提供；这里只保存
+// 可并发调整的 realtime offset，不再发布可变的全局时钟源指针。
 static BOOT_TIME_OFFSET_NS: AtomicU64 =
     AtomicU64::new(DEFAULT_BOOT_TIME_OFFSET * NSEC_PER_SEC as u64);
-
-static mut TIME_SOURCE: Option<&'static dyn TimeSource> = None;
-
-pub fn init_time_source(ts: &'static dyn TimeSource) {
-    unsafe {
-        TIME_SOURCE = Some(ts);
-    }
-}
 
 pub fn init_time_from_cmdline(cmdline: &str) {
     if let Some(ts) = parse_cmdline_boot_time(cmdline) {
@@ -523,16 +513,4 @@ fn parse_cmdline_boot_time(cmdline: &str) -> Option<u64> {
         }
     }
     None
-}
-
-// ── MTime (RISC-V virt machine) ──
-
-const MTIME: *const u64 = 0x0200_BFF8 as *const u64;
-
-pub struct MTime;
-
-impl TimeSource for MTime {
-    fn uptime(&self) -> u64 {
-        unsafe { core::ptr::read_volatile(MTIME) / 100_0000 }
-    }
 }

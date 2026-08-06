@@ -145,11 +145,11 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
-/// Listening-only TCP sockets — used for unconditional accept scan after every poll cycle.
+/// Listening-only TCP sockets, scanned after every completed stack poll.
 pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 
 /// Number of tasks currently blocking in accept(). When zero, the
-/// unconditional accept scan in poll_once() is skipped entirely.
+/// listener scan is skipped entirely.
 pub static ACCEPT_WAITER_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
@@ -407,6 +407,17 @@ pub trait Socket: Send + Sync {
         &self,
         _reservation: crate::net::socket::inet::common::port::PortReservation,
     ) {
+    }
+    /// 在不持有 PortRegistry 时快照 auto-bind 所需的端点。
+    ///
+    /// 返回 `None` 表示 socket 已绑定或不参与 INET 自动绑定；返回的端点必须是
+    /// 内核所有值，调用者随后通过 `PortManager::bind_port()` 完成事务提交。
+    fn auto_bind_endpoint(
+        &self,
+        _peer: Option<&Endpoint>,
+        _purpose: crate::net::socket::inet::common::port::AutoBindPurpose,
+    ) -> Result<Option<Endpoint>, SyscallErr> {
+        Ok(None)
     }
     fn listen(&self) -> SyscallRet;
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
@@ -1072,10 +1083,12 @@ pub fn wake_raw_waiters() {
         // query the socket and cover every handler rather than only lo.
         if socket.recv_ready() {
             if let Some(wq) = socket.recv_event_queue() {
-                wq.notify_events_at_most_if_unlocked(
-                    EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM,
-                    1,
-                );
+                wq.notify_events_at_most(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM, 1);
+            }
+        }
+        if socket.send_ready() {
+            if let Some(wq) = socket.send_event_queue() {
+                wq.notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
             }
         }
     }

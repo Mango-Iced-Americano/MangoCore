@@ -35,10 +35,24 @@ fn prepare_regression_etc() {
     write_etc_file("/etc/protocols\0", b"ip 0 IP\ntcp 6 TCP\nudp 17 UDP\n");
 }
 
+fn prepare_regression_procfs() {
+    let _ = sys_mkdirat(AT_FDCWD, "/proc\0", 0o755);
+    let result = mount(
+        "none\0".as_ptr(),
+        "/proc\0".as_ptr(),
+        "proc\0".as_ptr(),
+        0,
+        0,
+    );
+    println!("[regression_init] procfs mount result={}", result);
+}
+
 #[no_mangle]
 fn main(_argc: usize, _argv: &[&str]) -> i32 {
     println!("[regression_init] starting regression suite");
     prepare_regression_etc();
+    // regression 使用独立 PID1，不经过普通 init 的 pseudo-fs 挂载流程。
+    prepare_regression_procfs();
 
     let pid = fork();
     if pid == 0 {

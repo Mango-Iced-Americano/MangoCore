@@ -44,20 +44,40 @@ struct PerCpu {
     user_tlb_request: AtomicUsize,
     /// 本 CPU 完成全用户 TLB 失效后发布的对应确认序号。
     user_tlb_ack: AtomicUsize,
+    /// 本 CPU 发起的 kernel-global 全量远端 shootdown 轮数。
+    tlb_kernel_full: AtomicUsize,
+    /// 本 CPU 原本就要求全用户失效的远端 shootdown 轮数。
+    tlb_user_full: AtomicUsize,
+    /// 本 CPU 选择架构固件执行用户精准远端 shootdown 的轮数。
+    tlb_user_range_firmware: AtomicUsize,
+    /// 本 CPU 选择固定槽和 IPI 执行用户精准远端 shootdown 的轮数。
+    tlb_user_range_ipi: AtomicUsize,
+    /// 精准请求因本 CPU 的固定槽被占用而退化为全刷的轮数。
+    tlb_user_range_fallback: AtomicUsize,
+    /// 上述两类精准 shootdown 请求覆盖的总页数。
+    tlb_user_range_pages: AtomicUsize,
+    /// 本 CPU 所有远端 TLB 同步尝试覆盖的目标 CPU 数量总和。
+    tlb_remote_targets: AtomicUsize,
+    /// 本 CPU 远端 TLB 同步从选择后端到确认完成的累计原始 ticks。
+    tlb_sync_ticks_total: AtomicUsize,
+    /// 本 CPU 单轮远端 TLB 同步耗时的最大原始 ticks。
+    tlb_sync_ticks_max: AtomicUsize,
+    /// 本 CPU 收到错误返回的 TLB 同步轮数；doorbell 单点失败由 IPI 诊断统计。
+    tlb_sync_failures: AtomicUsize,
     /// 本 CPU 必须执行的 membarrier 完整内存屏障序号。
     memory_barrier_request: AtomicUsize,
     /// 本 CPU 执行完整内存屏障后发布的对应确认序号。
     memory_barrier_ack: AtomicUsize,
     /// 尚未处理的 IPI 原因位图；发送方 Release 合并，目标 CPU Acquire 消费。
     pending_ipi: AtomicU32,
-    /// 本 CPU 已处理的测试 PING 次数，供发送方确认 mailbox/doorbell/trap 闭环。
-    ipi_ping_ack: AtomicUsize,
-    /// 收到 round-trip 请求后，由 AP idle 上下文发送回复；IRQ handler 不发门铃。
-    round_trip_reply_pending: AtomicBool,
-    /// CPU0 已在本地 trap 中处理的 round-trip 回复序号。
-    round_trip_reply_ack: AtomicUsize,
-    /// 本 CPU 在 idle deferred 路径发送 IPI 失败的次数。
+    /// 本 CPU 提交硬件 doorbell 失败的累计次数。
     ipi_send_failures: AtomicUsize,
+    /// 本 CPU 进入 IPI hard handler 的次数；冗余 doorbell 也会计入。
+    ipi_interrupts: AtomicUsize,
+    /// 本 CPU 向目标 mailbox 发布各 reason 的次数，广播按目标数累计。
+    ipi_reasons_published: [AtomicUsize; IPI_REASON_COUNT],
+    /// 本 CPU 从 mailbox 实际消费各 reason bit 的次数；同类发布可被合并。
+    ipi_reasons_consumed: [AtomicUsize; IPI_REASON_COUNT],
     /// hard IRQ 已收到 STOP；真正停止必须延后到 AP 独立 idle stack。
     stop_requested: AtomicBool,
     /// 本 CPU 已承诺不再访问共享内核状态，供 CPU0 等待停机完成。
@@ -88,13 +108,23 @@ impl PerCpu {
             kernel_tlb_ack: AtomicUsize::new(0),
             user_tlb_request: AtomicUsize::new(0),
             user_tlb_ack: AtomicUsize::new(0),
+            tlb_kernel_full: AtomicUsize::new(0),
+            tlb_user_full: AtomicUsize::new(0),
+            tlb_user_range_firmware: AtomicUsize::new(0),
+            tlb_user_range_ipi: AtomicUsize::new(0),
+            tlb_user_range_fallback: AtomicUsize::new(0),
+            tlb_user_range_pages: AtomicUsize::new(0),
+            tlb_remote_targets: AtomicUsize::new(0),
+            tlb_sync_ticks_total: AtomicUsize::new(0),
+            tlb_sync_ticks_max: AtomicUsize::new(0),
+            tlb_sync_failures: AtomicUsize::new(0),
             memory_barrier_request: AtomicUsize::new(0),
             memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
-            ipi_ping_ack: AtomicUsize::new(0),
-            round_trip_reply_pending: AtomicBool::new(false),
-            round_trip_reply_ack: AtomicUsize::new(0),
             ipi_send_failures: AtomicUsize::new(0),
+            ipi_interrupts: AtomicUsize::new(0),
+            ipi_reasons_published: [const { AtomicUsize::new(0) }; IPI_REASON_COUNT],
+            ipi_reasons_consumed: [const { AtomicUsize::new(0) }; IPI_REASON_COUNT],
             stop_requested: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             timer_pending: AtomicBool::new(false),
@@ -124,8 +154,22 @@ pub(crate) struct CpuDiagnostics {
     pub(crate) kernel_tlb_ack: usize,
     pub(crate) user_tlb_request: usize,
     pub(crate) user_tlb_ack: usize,
+    pub(crate) tlb_kernel_full: usize,
+    pub(crate) tlb_user_full: usize,
+    pub(crate) tlb_user_range_firmware: usize,
+    pub(crate) tlb_user_range_ipi: usize,
+    pub(crate) tlb_user_range_fallback: usize,
+    pub(crate) tlb_user_range_pages: usize,
+    pub(crate) tlb_remote_targets: usize,
+    pub(crate) tlb_sync_ticks_total: usize,
+    pub(crate) tlb_sync_ticks_max: usize,
+    pub(crate) tlb_sync_failures: usize,
     pub(crate) memory_barrier_request: usize,
     pub(crate) memory_barrier_ack: usize,
+    pub(crate) ipi_interrupts: usize,
+    pub(crate) ipi_send_failures: usize,
+    pub(crate) ipi_reasons_published: [usize; IPI_REASON_COUNT],
+    pub(crate) ipi_reasons_consumed: [usize; IPI_REASON_COUNT],
     pub(crate) task: crate::task::processor::CpuTaskDiagnostics,
 }
 
@@ -239,29 +283,47 @@ static USER_TLB_RANGE_SLOTS: [UserTlbRangeSlot; MAX_CPUS] =
 pub struct IpiReason(u32);
 
 impl IpiReason {
-    /// 只用于证明 mailbox、doorbell、trap 和 ack 闭环。
-    pub const PING: Self = Self(1 << 0);
-    /// CPU0 请求 AP 在退出 hard IRQ 后回送一个真实 IPI。
-    const ROUND_TRIP_REQUEST: Self = Self(1 << 1);
-    /// AP idle 上下文向 CPU0 发布的 round-trip 回复。
-    const ROUND_TRIP_REPLY: Self = Self(1 << 2);
     /// 请求 AP 在退出 hard IRQ 后停止，不再访问任何共享内核状态。
-    const STOP: Self = Self(1 << 3);
+    const STOP: Self = Self(1 << 0);
     /// 目标 runqueue 已加入任务；handler 只发布 need-resched。
-    const RESCHEDULE: Self = Self(1 << 4);
+    const RESCHEDULE: Self = Self(1 << 1);
     /// BSP 已修改共享内核页表；目标必须刷新本地 TLB 后发布 ack。
-    const KERNEL_TLB_SYNC: Self = Self(1 << 5);
+    const KERNEL_TLB_SYNC: Self = Self(1 << 2);
     /// 某个用户 MM 的 PTE 已修改；目标必须清除本核全部用户翻译后 ack。
-    const USER_TLB_SYNC: Self = Self(1 << 6);
+    const USER_TLB_SYNC: Self = Self(1 << 3);
     /// 固定槽中已发布目标 MM 的 ASID/VPN 区间；目标精确失效后 ack。
-    const USER_TLB_RANGE_SYNC: Self = Self(1 << 7);
+    const USER_TLB_RANGE_SYNC: Self = Self(1 << 4);
     /// 全局 timer 队列出现更早 deadline；CPU0 在安全点重编程本地 timer。
-    const TIMER_REPROGRAM: Self = Self(1 << 8);
+    const TIMER_REPROGRAM: Self = Self(1 << 5);
     /// 目标 CPU 必须执行完整内存屏障后发布 ack。
-    const MEMORY_BARRIER: Self = Self(1 << 9);
+    const MEMORY_BARRIER: Self = Self(1 << 6);
 
     const fn bits(self) -> u32 {
         self.0
+    }
+}
+
+const IPI_REASON_COUNT: usize = IpiReason::MEMORY_BARRIER.bits().trailing_zeros() as usize + 1;
+
+pub(crate) const IPI_REASON_NAMES: [&str; IPI_REASON_COUNT] = [
+    "stop",
+    "reschedule",
+    "kernel-tlb",
+    "user-tlb",
+    "user-tlb-range",
+    "timer-reprogram",
+    "membarrier",
+];
+
+/// 记录一份 mailbox 位图中的已知 reason；诊断不能因异常位破坏 IPI 处理。
+fn record_ipi_reasons(counters: &[AtomicUsize; IPI_REASON_COUNT], reasons: u32, count: usize) {
+    // 只扫描已有名字的低位，既保持 hard IRQ 工作量固定，也让未来新增 reason
+    // 即使漏补诊断映射也只少计一次，而不会把生产 IPI 路径变成 panic 点。
+    let mut reasons = reasons & ((1u32 << IPI_REASON_COUNT) - 1);
+    while reasons != 0 {
+        let index = reasons.trailing_zeros() as usize;
+        counters[index].fetch_add(count, Ordering::Relaxed);
+        reasons &= reasons - 1;
     }
 }
 
@@ -331,6 +393,63 @@ pub(crate) enum UserTlbSyncError {
         acknowledged: usize,
         send_error: Option<isize>,
     },
+}
+
+/// 一轮远端 TLB 同步最终选择的实际执行后端。
+///
+/// 五个分支互斥，避免把“原生全刷”和“精准请求退化为全刷”混在同一计数里。
+#[derive(Clone, Copy)]
+enum TlbShootdownKind {
+    KernelFull,
+    UserFull,
+    UserRangeFirmware { pages: usize },
+    UserRangeIpi { pages: usize },
+    UserRangeFallback,
+}
+
+/// 在发起 CPU 记录一轮远端 TLB 同步的最终结果。
+///
+/// 该函数只更新 Relaxed 诊断值，不参与 request/ack、generation 或 frame 退休同步。
+fn record_tlb_shootdown(
+    kind: TlbShootdownKind,
+    remote_targets: usize,
+    started_at: usize,
+    failed: bool,
+) {
+    debug_assert_ne!(remote_targets, 0);
+    let local = &PER_CPUS[self::cpu_id()];
+    match kind {
+        TlbShootdownKind::KernelFull => &local.tlb_kernel_full,
+        TlbShootdownKind::UserFull => &local.tlb_user_full,
+        TlbShootdownKind::UserRangeFirmware { pages } => {
+            local
+                .tlb_user_range_pages
+                .fetch_add(pages, Ordering::Relaxed);
+            &local.tlb_user_range_firmware
+        }
+        TlbShootdownKind::UserRangeIpi { pages } => {
+            local
+                .tlb_user_range_pages
+                .fetch_add(pages, Ordering::Relaxed);
+            &local.tlb_user_range_ipi
+        }
+        TlbShootdownKind::UserRangeFallback => &local.tlb_user_range_fallback,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+
+    local
+        .tlb_remote_targets
+        .fetch_add(remote_targets.count_ones() as usize, Ordering::Relaxed);
+    let elapsed = crate::hal::get_time().wrapping_sub(started_at);
+    local
+        .tlb_sync_ticks_total
+        .fetch_add(elapsed, Ordering::Relaxed);
+    local
+        .tlb_sync_ticks_max
+        .fetch_max(elapsed, Ordering::Relaxed);
+    if failed {
+        local.tlb_sync_failures.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// 跨 CPU 完整内存屏障协议可能返回的错误。
@@ -448,8 +567,26 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
         kernel_tlb_ack: cpu.kernel_tlb_ack.load(Ordering::Acquire),
         user_tlb_request: cpu.user_tlb_request.load(Ordering::Acquire),
         user_tlb_ack: cpu.user_tlb_ack.load(Ordering::Acquire),
+        tlb_kernel_full: cpu.tlb_kernel_full.load(Ordering::Relaxed),
+        tlb_user_full: cpu.tlb_user_full.load(Ordering::Relaxed),
+        tlb_user_range_firmware: cpu.tlb_user_range_firmware.load(Ordering::Relaxed),
+        tlb_user_range_ipi: cpu.tlb_user_range_ipi.load(Ordering::Relaxed),
+        tlb_user_range_fallback: cpu.tlb_user_range_fallback.load(Ordering::Relaxed),
+        tlb_user_range_pages: cpu.tlb_user_range_pages.load(Ordering::Relaxed),
+        tlb_remote_targets: cpu.tlb_remote_targets.load(Ordering::Relaxed),
+        tlb_sync_ticks_total: cpu.tlb_sync_ticks_total.load(Ordering::Relaxed),
+        tlb_sync_ticks_max: cpu.tlb_sync_ticks_max.load(Ordering::Relaxed),
+        tlb_sync_failures: cpu.tlb_sync_failures.load(Ordering::Relaxed),
         memory_barrier_request: cpu.memory_barrier_request.load(Ordering::Acquire),
         memory_barrier_ack: cpu.memory_barrier_ack.load(Ordering::Acquire),
+        ipi_interrupts: cpu.ipi_interrupts.load(Ordering::Relaxed),
+        ipi_send_failures: cpu.ipi_send_failures.load(Ordering::Relaxed),
+        ipi_reasons_published: core::array::from_fn(|index| {
+            cpu.ipi_reasons_published[index].load(Ordering::Relaxed)
+        }),
+        ipi_reasons_consumed: core::array::from_fn(|index| {
+            cpu.ipi_reasons_consumed[index].load(Ordering::Relaxed)
+        }),
         task: cpu.task_state.read_diagnostics(),
     }
 }
@@ -460,10 +597,11 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
 /// doorbell 失败，已经发布的 reason 保留到后续 IPI 消费，不能回滚原子状态。
 pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
     let configured = expected_online_mask();
+    let sender = self::cpu_id();
     if reason.bits() == 0 || targets & !configured != 0 {
         return Err(-3);
     }
-    if targets & (1usize << self::cpu_id()) != 0 {
+    if targets & (1usize << sender) != 0 {
         return Err(-3);
     }
     if targets & !online_cpu_mask() != 0 {
@@ -480,6 +618,15 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
                 .fetch_or(reason.bits(), Ordering::Release);
         }
     }
+    // IpiReason 的公开构造只有单 bit 常量。publication 按目标数计数；
+    // 同类 reason 若在接收前重复发布，mailbox 会合并，所以不能用
+    // published-consumed 的差值直接判断丢中断。
+    debug_assert_eq!(reason.bits().count_ones(), 1);
+    record_ipi_reasons(
+        &PER_CPUS[sender].ipi_reasons_published,
+        reason.bits(),
+        targets.count_ones() as usize,
+    );
 
     let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
     let mut first_error = None;
@@ -489,6 +636,10 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
             // 一个 doorbell 失败不能阻止其余已发布 mailbox 的目标被唤醒；
             // 完成整轮发送后再返回首个错误，失败目标的 reason 留待后续 IPI。
             if let Err(error) = crate::hal::send_ipi(hardware_id) {
+                // 该计数只用于事后诊断，不承载 mailbox 或 ack 的同步关系。
+                PER_CPUS[sender]
+                    .ipi_send_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -504,37 +655,6 @@ pub fn send_ipi(cpu_id: usize, reason: IpiReason) -> Result<(), isize> {
         return Err(-3);
     }
     send_ipi_mask(1usize << cpu_id, reason)
-}
-
-/// 发布测试 PING，并返回发送方应等待的 ack 序号。
-///
-/// 当前只有 CPU0 发送 PING；调用方必须等前一次 ack 后再对同一 CPU 调用，
-/// 否则 bit 合并只承诺处理一次，不能生成两个 ack。
-pub fn send_ipi_ping(cpu_id: usize) -> Result<usize, isize> {
-    if cpu_id >= CONFIGURED_CPU_COUNT {
-        return Err(-3);
-    }
-    let expected_ack = ipi_ping_ack(cpu_id).wrapping_add(1);
-    send_ipi(cpu_id, IpiReason::PING)?;
-    Ok(expected_ack)
-}
-
-/// 从 CPU0 发起一次 AP→BSP 硬件 IPI round-trip。
-///
-/// 请求 reason 仍由 AP hard IRQ 原子消费；AP 返回独立 idle 上下文后才发送
-/// reply doorbell。调用方必须等待返回的 ack 后才能向同一目标复用 reason。
-pub fn send_ipi_round_trip(cpu_id: usize) -> Result<usize, isize> {
-    if self::cpu_id() != BOOT_CPU_ID || cpu_id == BOOT_CPU_ID || cpu_id >= CONFIGURED_CPU_COUNT {
-        return Err(-3);
-    }
-    let expected = round_trip_reply_ack().wrapping_add(1);
-    send_ipi(cpu_id, IpiReason::ROUND_TRIP_REQUEST)?;
-    Ok(expected)
-}
-
-/// 查询目标 CPU 已处理的 PING 序号。
-pub fn ipi_ping_ack(cpu_id: usize) -> usize {
-    PER_CPUS[cpu_id].ipi_ping_ack.load(Ordering::Acquire)
 }
 
 /// 查询目标 CPU 已完成的 kernel-global TLB 同步序号。
@@ -570,18 +690,11 @@ pub(crate) fn memory_barrier_request(cpu_id: usize) -> usize {
         .load(Ordering::Acquire)
 }
 
-/// 查询 CPU0 已处理的 round-trip 回复序号。
-pub fn round_trip_reply_ack() -> usize {
-    PER_CPUS[BOOT_CPU_ID]
-        .round_trip_reply_ack
-        .load(Ordering::Acquire)
-}
-
-/// 查询目标 CPU 在 deferred idle 路径发送 IPI 的失败次数。
+/// 查询目标 CPU 提交硬件 doorbell 失败的累计次数。
 pub fn ipi_send_failures(cpu_id: usize) -> usize {
     PER_CPUS[cpu_id]
         .ipi_send_failures
-        .load(Ordering::Acquire)
+        .load(Ordering::Relaxed)
 }
 
 /// 让所有 online AP 停止，并等待它们承诺不再访问共享状态。
@@ -626,22 +739,11 @@ pub fn stop_secondary_cpus() -> Result<(), StopError> {
 /// handler 只做原子操作，不分配、不打印、不获取普通锁，也不直接调度。
 pub fn handle_ipi() {
     let local = &PER_CPUS[self::cpu_id()];
+    local.ipi_interrupts.fetch_add(1, Ordering::Relaxed);
     // Acquire 获取发送端在 Release fetch_or 前发布的数据；swap(0) 使原因只被
     // 当前 CPU 消费一次。doorbell 合并或重复到达都不会重复生成 ack。
     let reasons = local.pending_ipi.swap(0, Ordering::Acquire);
-    if reasons & IpiReason::PING.bits() != 0 {
-        // Release 把“本 CPU 已完成 handler”发布给等待方的 Acquire load。
-        local.ipi_ping_ack.fetch_add(1, Ordering::Release);
-    }
-    if reasons & IpiReason::ROUND_TRIP_REQUEST.bits() != 0 {
-        // hard IRQ 只发布 deferred work；SBI/MMIO doorbell 由 idle 栈发送。
-        local
-            .round_trip_reply_pending
-            .store(true, Ordering::Release);
-    }
-    if reasons & IpiReason::ROUND_TRIP_REPLY.bits() != 0 {
-        local.round_trip_reply_ack.fetch_add(1, Ordering::Release);
-    }
+    record_ipi_reasons(&local.ipi_reasons_consumed, reasons, 1);
     if reasons & IpiReason::STOP.bits() != 0 {
         // 不可返回的 stop 不能发生在 trap frame 上；只向 idle 栈发布请求。
         local.stop_requested.store(true, Ordering::Release);
@@ -713,19 +815,7 @@ pub(crate) fn service_secondary_ipi_work() -> bool {
         crate::hal::secondary_cpu_stop();
     }
 
-    let mut did_work = take_reschedule_request();
-    if !local
-        .round_trip_reply_pending
-        .swap(false, Ordering::Acquire)
-    {
-        return did_work;
-    }
-
-    if send_ipi(BOOT_CPU_ID, IpiReason::ROUND_TRIP_REPLY).is_err() {
-        local.ipi_send_failures.fetch_add(1, Ordering::Release);
-    }
-    did_work = true;
-    did_work
+    take_reschedule_request()
 }
 
 /// 在当前 CPU 的关中断安全点取走一次可合并的调度请求。
@@ -910,12 +1000,13 @@ fn synchronize_kernel_mapping_mask(
     // 即使某个 doorbell 报错，也先等待已经发布的 mailbox：目标可能由另一
     // 个 pending interrupt 唤醒；若它同时完成 STOP，stopped ack 本身已经
     // 承诺不再访问旧翻译，也可替代本轮 TLB ack。
+    let started_at = crate::hal::get_time();
     let send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
 
     let _irq_guard = IpiWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
-    loop {
+    let result = 'wait: loop {
         let mut missing = None;
         let stopped = stopped_cpu_mask();
         available &= !stopped;
@@ -927,7 +1018,7 @@ fn synchronize_kernel_mapping_mask(
                 if stopped_is_ack {
                     continue;
                 }
-                return Err(KernelTlbSyncError::UnavailableTargets {
+                break 'wait Err(KernelTlbSyncError::UnavailableTargets {
                     targets: remote,
                     available,
                 });
@@ -939,10 +1030,10 @@ fn synchronize_kernel_mapping_mask(
             }
         }
         let Some((cpu_id, observed)) = missing else {
-            return Ok(());
+            break 'wait Ok(());
         };
         if crate::hal::get_time() >= deadline {
-            return Err(KernelTlbSyncError::Timeout {
+            break 'wait Err(KernelTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],
                 observed,
@@ -950,7 +1041,14 @@ fn synchronize_kernel_mapping_mask(
             });
         }
         spin_loop();
-    }
+    };
+    record_tlb_shootdown(
+        TlbShootdownKind::KernelFull,
+        remote,
+        started_at,
+        result.is_err(),
+    );
+    result
 }
 
 /// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
@@ -986,17 +1084,21 @@ pub(crate) fn synchronize_user_tlb(
         mm_generation.is_none() || range.is_some(),
         "MM generation is only meaningful for a precise user TLB range"
     );
-    if let Some(range) = range {
-        let start_vpn = range.get_start().0;
-        let end_vpn = range.get_end().0;
-        let page_count = end_vpn.saturating_sub(start_vpn);
-        if page_count == 0 || page_count > MAX_USER_TLB_RANGE_PAGES {
-            return Err(UserTlbSyncError::InvalidRange {
-                start_vpn,
-                end_vpn,
-            });
+    let range_pages = match range {
+        Some(range) => {
+            let start_vpn = range.get_start().0;
+            let end_vpn = range.get_end().0;
+            let pages = end_vpn.saturating_sub(start_vpn);
+            if pages == 0 || pages > MAX_USER_TLB_RANGE_PAGES {
+                return Err(UserTlbSyncError::InvalidRange {
+                    start_vpn,
+                    end_vpn,
+                });
+            }
+            Some(pages)
         }
-    }
+        None => None,
+    };
     let configured = expected_online_mask();
     if targets == 0 || targets & !configured != 0 {
         return Err(UserTlbSyncError::InvalidTargets { targets });
@@ -1025,14 +1127,32 @@ pub(crate) fn synchronize_user_tlb(
         }
         return Ok(());
     }
+    let started_at = crate::hal::get_time();
 
     // RFENCE 直接接受硬件 hart mask，且调用返回就代表目标已完成失效；它没有
     // 可被并发发起者覆盖的共享 payload。LA64 返回 false，继续走固定区间槽。
     if let Some(range) = range {
+        let pages = range_pages.expect("validated user TLB range lost its page count");
         match crate::hal::remote_user_tlb_invalidate_range(live_targets, asid, range) {
-            Ok(true) => return Ok(()),
+            Ok(true) => {
+                record_tlb_shootdown(
+                    TlbShootdownKind::UserRangeFirmware { pages },
+                    remote,
+                    started_at,
+                    false,
+                );
+                return Ok(());
+            }
             Ok(false) => {}
-            Err(error) => return Err(UserTlbSyncError::Firmware { error }),
+            Err(error) => {
+                record_tlb_shootdown(
+                    TlbShootdownKind::UserRangeFirmware { pages },
+                    remote,
+                    started_at,
+                    true,
+                );
+                return Err(UserTlbSyncError::Firmware { error });
+            }
         }
 
         // 每个 CPU 只会同步等待一轮 shootdown，因此优先使用自己的固定槽。
@@ -1056,11 +1176,23 @@ pub(crate) fn synchronize_user_tlb(
                 let missing = remote & !stopped_cpu_mask() & !acknowledged;
                 if missing == 0 {
                     slot.release();
+                    record_tlb_shootdown(
+                        TlbShootdownKind::UserRangeIpi { pages },
+                        remote,
+                        started_at,
+                        false,
+                    );
                     return Ok(());
                 }
                 if crate::hal::get_time() >= deadline {
                     // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
                     // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
+                    record_tlb_shootdown(
+                        TlbShootdownKind::UserRangeIpi { pages },
+                        remote,
+                        started_at,
+                        true,
+                    );
                     return Err(UserTlbSyncError::RangeTimeout {
                         missing,
                         acknowledged,
@@ -1094,7 +1226,7 @@ pub(crate) fn synchronize_user_tlb(
     let _irq_guard = IpiWaitIrqGuard::enter();
     let deadline = crate::hal::get_time()
         .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
-    loop {
+    let result = loop {
         let stopped = stopped_cpu_mask();
         let mut missing = None;
         for cpu_id in 0..CONFIGURED_CPU_COUNT {
@@ -1108,10 +1240,10 @@ pub(crate) fn synchronize_user_tlb(
             }
         }
         let Some((cpu_id, observed)) = missing else {
-            return Ok(());
+            break Ok(());
         };
         if crate::hal::get_time() >= deadline {
-            return Err(UserTlbSyncError::Timeout {
+            break Err(UserTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],
                 observed,
@@ -1119,7 +1251,14 @@ pub(crate) fn synchronize_user_tlb(
             });
         }
         spin_loop();
-    }
+    };
+    let kind = if range.is_some() {
+        TlbShootdownKind::UserRangeFallback
+    } else {
+        TlbShootdownKind::UserFull
+    };
+    record_tlb_shootdown(kind, remote, started_at, result.is_err());
+    result
 }
 
 /// 在当前 CPU 的 timer IRQ fast path 发布一批待处理工作。
@@ -1196,11 +1335,7 @@ pub(crate) fn request_timer_reprogram() {
     PER_CPUS[BOOT_CPU_ID]
         .timer_reprogram_requested
         .store(true, Ordering::Release);
-    if send_ipi(BOOT_CPU_ID, IpiReason::TIMER_REPROGRAM).is_err() {
-        PER_CPUS[sender]
-            .ipi_send_failures
-            .fetch_add(1, Ordering::Relaxed);
-    }
+    let _ = send_ipi(BOOT_CPU_ID, IpiReason::TIMER_REPROGRAM);
 }
 
 /// CPU0 在关中断安全点消费一次可合并的 timer 重编程请求。

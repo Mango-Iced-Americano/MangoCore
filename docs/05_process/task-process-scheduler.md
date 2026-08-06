@@ -147,15 +147,15 @@ TCB/PCB 权威 hint，避免 setter 漏刷影子缓存。返回的 `Arc` 不能�
 
 阻塞等待通过 WaitQueue 模板：
 
-1. 当前任务加入业务 WaitQueue。
+1. 当前任务以一次性 `WaitEntry` 加入业务 WaitQueue。
 2. TaskManager 锁内完成 `Running(cpu) -> Blocking(cpu)` CAS。
 3. 同一临界区加入 interruptible registry。
 4. 释放业务锁。
 5. `schedule()` 切回 idle。
 6. idle 在真实切栈后提交 `Blocking(cpu) -> Blocked`。
-7. 早到唤醒执行 `Blocking(cpu) -> Running(cpu)`，晚到唤醒执行
-   `Blocked -> Queued(CPU0)`；两者都由同一个 TaskManager 入口裁决，晚到唤醒按
-   `TASK_MANAGER -> CPU0 RunQueue` 的固定锁序完成容器交接。
+7. entry 先固化通知；若任务已在 `Blocking`，唤醒执行
+   `Blocking(cpu) -> Running(cpu)`；若已是 `Blocked`，则执行
+   `Blocked -> Queued(target)`。两者都由同一个 TaskManager 入口裁决。
 
 带锁版本必须先入队、复查条件、再释放锁，避免丢失唤醒。
 
@@ -186,7 +186,7 @@ pub(crate) fn block_current_and_run_next_with_lock_checked<T>(
 这个函数先把 task 原子迁移为 `Blocking(cpu)` 并加入 interruptible registry，
 再复查是否仍应阻塞，然后释放业务锁并切换。复查失败时 wake 只取消阻塞，
 不会把仍使用当前内核栈的任务提前加入 runqueue。
-WaitQueue 自身只登记 `Weak<TaskControlBlock>`，不会提前写调度状态。
+WaitQueue 自身只登记“通知是否已到达”的 entry，不会提前写调度状态。
 
 ## 8. 定时器与等待
 
@@ -222,15 +222,18 @@ exec 成功后：
 |------|------|
 | TCB | 新 trap context、清 clear_child_tid、重置 robust list、禁用 alt signal stack |
 | PCB | replace exe、replace VM、mark execed、set exe path |
-| ExecSession | 临时关闭 clone，等待 sibling 在 owner CPU 清理并发布 live ack |
+| ExecSession | 临时关闭 clone，等待 sibling 发布资源清理 ack 与 idle inactive ack |
 | TID/registry | 非 leader owner 接管 PID，registry 与本 CPU current hint 同步重键 |
 | fd table | 跨 PCB 共享时先复制，再关闭当前 PCB 副本的 CLOEXEC fd |
 | sighand/futex | sighand 按需复制并保留 `SIG_IGN`；private futex table 换新 |
 | Completion | complete vfork |
 
 当前任务继续运行，其他线程在各自任务安全点完成线程级退出。exec owner 不远程摘除
-runqueue 节点或释放 TCB；只有 live count 降为 1 后才安装新 MM。身份重键发生在
+runqueue 节点或释放 TCB；只有 live count 降为 1，且其它线程都已撤销
+current 槽后才安装新 MM。身份重键发生在
 `ExecSession::finish()` 之后，不跨 context switch，也不在 registry 锁内析构旧 TCB。
+安全点进入 noreturn 退出前必须显式 drop 它刚克隆的 current `Arc`，因为
+context switch 不会自动展开原线程的 Rust 栈帧。
 
 ## 11. exit 路径中的协作
 

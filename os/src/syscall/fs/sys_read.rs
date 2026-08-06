@@ -24,8 +24,8 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     let is_nonblock = file.is_nonblock();
     if is_nonblock {
         read_into_user(&file, token, buf, count)
-    } else if let Some(wq) = file.inode.read_wait_queue() {
-        match WaitQueue::wait_until_interruptible(wq, || {
+    } else if let Some(wq) = file.read_wait_queue() {
+        match WaitQueue::wait_until_interruptible(wq.queue(), || {
             let ret = read_into_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
         }) {

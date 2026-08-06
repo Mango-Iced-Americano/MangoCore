@@ -62,6 +62,8 @@ SECTIONS
     sbss_with_stack = .;
     .bss : {
         *(.bss.stack)
+        /* EFI 取得的 FDT 快照必须躲过 sbss..ebss 清零。 */
+        *(.bss.boot)
         sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)

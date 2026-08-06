@@ -3,6 +3,7 @@
 QEMU_BASE_ARGS = -machine virt -nographic
 QEMU_MTTCG_ARGS = -accel tcg,thread=multi
 QEMU_SMP_ARGS = -smp cpus=$(CORE_NUM),sockets=1,cores=$(CORE_NUM),threads=1
+QEMU_MEMORY ?= 1G
 
 define qemu_two_drives
 -drive if=none,file=$(1),format=raw,id=x0 $(BLK_DEV_x0) -drive if=none,file=$(IMAGE_ROLE_$(2)_X1),format=raw,id=x1 $(BLK_DEV_x1)

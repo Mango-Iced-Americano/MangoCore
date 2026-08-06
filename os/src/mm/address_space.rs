@@ -21,7 +21,7 @@ use super::user_mapper::UserMapper;
 use super::vma::*;
 use super::vma_set::VmaSet;
 use super::{
-    FrameTracker, MmuGather, PhysAddr, PhysPageNum, TlbContext, VPNRange, VirtAddr, VirtPageNum,
+    FrameTracker, MmuGather, PageTableImpl, PhysAddr, PhysPageNum, TlbContext, VPNRange, VirtAddr, VirtPageNum,
     USER_STACK_ABI_ALIGN,
 };
 use crate::config::*;
@@ -38,13 +38,27 @@ use crate::task::{
 };
 use alloc::collections::BTreeSet;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::Write;
 use core::sync::atomic::{fence, AtomicBool, Ordering};
 use log::{debug, error, warn};
 use spin::Mutex;
+
+/// Fault handler 在必须等待 PageCache admission 或稳定页状态时返回的锁外等待令牌。
+/// `wait` 调用点必须先离开 AddressSpace VM 锁作用域。
+pub trait RetryWait: Send + Sync {
+    fn wait(&self);
+}
+
+/// 缺页处理的三态结果。Retry 不是 errno：它要求调用者释放 VM 锁、等待并从
+/// VMA 查找开始重新进入，避免 writeback(op_gate→VM) 与 fault(VM→op_gate) 反转。
+pub enum FaultOutcome {
+    Completed(PhysAddr),
+    Retry(Arc<dyn RetryWait>),
+    Error(MemoryError),
+}
 
 extern "C" {
     fn strampoline();
@@ -100,16 +114,65 @@ pub(crate) struct UserVmContext {
     pub(crate) asid: u16,
 }
 
-impl<T: PageTable> AddressSpace<T> {
-    pub fn new(mut inner: AddressSpaceInner<T>) -> Self {
+impl AddressSpace<PageTableImpl> {
+    pub fn new(mut inner: AddressSpaceInner<PageTableImpl>) -> Arc<Self> {
         // ELF/clone 构造期没有 CPU 能观察该页表，构造时积累的失效记录可直接结束。
         inner.mmu_gather.discard_unpublished();
-        Self {
+        let space = Arc::new(Self {
             inner: Mutex::new(inner),
             tlb: TlbContext::new(),
             private_expedited_registered: AtomicBool::new(false),
+        });
+        space
+            .inner
+            .lock()
+            .vmas
+            .set_owner(Arc::downgrade(&space));
+        space
+    }
+
+    /// PageCache writeback/truncate 的 rmap 回调。`write()` 负责在 VM 锁外执行
+    /// TLB flush；PageCache 保留独立 rmap 强引用，锁内用 `Arc::ptr_eq` 再确认
+    /// 该记录仍属于当前 VmaSet。
+    pub(crate) fn mkclean_file_page(
+        &self,
+        rmap: &Arc<FileVmaRmap>,
+        page_index: usize,
+        unmap: bool,
+    ) {
+        self.write(|inner| {
+            let mut mapper = UserMapper::new(&mut inner.page_table, &mut inner.mmu_gather);
+            inner
+                .vmas
+                .mkclean_file_page(&mut mapper, rmap, page_index, unmap);
+        });
+    }
+}
+
+impl<T: PageTable> AddressSpace<T> {
+    /// 在 VM 锁外消费 fault Retry 的 uaccess/trap 共用入口。
+    pub fn fault_in_user_va_retry(
+        &self,
+        addr: VirtAddr,
+        access: FaultAccess,
+    ) -> Result<PhysAddr, isize> {
+        loop {
+            let outcome = self.write(|inner| {
+                if let Ok(pa) = inner.resolve_user_va_inner(addr, access) {
+                    FaultOutcome::Completed(pa)
+                } else {
+                    super::frame_reserve(3);
+                    inner.do_page_fault(addr, access)
+                }
+            });
+            match outcome {
+                FaultOutcome::Completed(pa) => return Ok(pa),
+                FaultOutcome::Retry(wait) => wait.wait(),
+                FaultOutcome::Error(error) => return Err(memory_error_to_errno(error)),
+            }
         }
     }
+
 
     /// 返回不需要取得 VM 锁的稳定 MM 诊断编号。
     pub(crate) fn mm_id(&self) -> usize {
@@ -379,17 +442,27 @@ impl<T: PageTable> AddressSpaceInner<T> {
                 let mut start = 0;
                 let len = data.len();
                 for vpn in vma.inner.vpn_range {
-                    let ppn = match vma.map_one(&mut mapper, vpn) {
+                    // 数据页采用“先初始化、后发布”顺序，避免活跃 MM 中其它 CPU
+                    // 在 copy 完成前通过新 PTE 观察半成品页面。
+                    let ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                         Ok(ppn) => ppn,
                         Err(error) => {
                             let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
-                            return Err(error);
+                            return Err((error, vpn));
                         }
                     };
                     first_ppn.get_or_insert(ppn);
                     let end = start + PAGE_SIZE;
                     let src = &data[start..len.min(end)];
-                    ppn.get_bytes_array()[..src.len()].copy_from_slice(src);
+                    // Safety: 页已由当前 VMA 持有但尚无 PTE，当前路径独占写入。
+                    unsafe {
+                        ppn.with_bytes_mut(|dst| dst[..src.len()].copy_from_slice(src));
+                    }
+                    if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                        vma.remove_unmapped_frame(vpn);
+                        let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
+                        return Err((error, vpn));
+                    }
                     start = end;
                 }
             }
@@ -427,37 +500,54 @@ impl<T: PageTable> AddressSpaceInner<T> {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
         if let Some(vpn) = vpn_iter.next() {
             // special treatment for first page
-            let first_ppn = match vma.map_one(&mut mapper, vpn) {
+            let first_ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                 Ok(ppn) => ppn,
-                Err(error) => return Err(error),
+                Err(error) => return Err((error, vpn)),
             };
-            let first_dst = first_ppn.get_bytes_array();
-            first_dst[..offset].fill(0);
             let first_src = &data[..len.min(PAGE_SIZE - offset)];
-            first_dst[offset..offset + first_src.len()].copy_from_slice(first_src);
+            // Safety: 页面尚未安装 PTE，当前构造路径独占其内容。
+            unsafe {
+                first_ppn.with_bytes_mut(|dst| {
+                    dst[..offset].fill(0);
+                    dst[offset..offset + first_src.len()].copy_from_slice(first_src);
+                });
+            }
+            if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                vma.remove_unmapped_frame(vpn);
+                return Err((error, vpn));
+            }
 
             let mut start = PAGE_SIZE - offset;
             for vpn in vpn_iter {
-                let ppn = match vma.map_one(&mut mapper, vpn) {
+                let ppn = match vma.alloc_one_zeroed_unmapped(vpn) {
                     Ok(ppn) => ppn,
                     Err(error) => {
                         let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
-                        return Err(error);
+                        return Err((error, vpn));
                     }
                 };
-                let dst = ppn.get_bytes_array();
                 let end = start + PAGE_SIZE;
-                if start < len {
-                    if len >= end {
-                        let src = &data[start..end];
-                        dst[..src.len()].copy_from_slice(src);
-                    } else {
-                        let src = &data[start..len];
-                        dst[..src.len()].copy_from_slice(src);
-                        dst[src.len()..].fill(0);
-                    }
-                } else {
-                    dst.fill(0);
+                // Safety: 页面尚未安装 PTE，当前构造路径独占其内容。
+                unsafe {
+                    ppn.with_bytes_mut(|dst| {
+                        if start < len {
+                            if len >= end {
+                                let src = &data[start..end];
+                                dst[..src.len()].copy_from_slice(src);
+                            } else {
+                                let src = &data[start..len];
+                                dst[..src.len()].copy_from_slice(src);
+                                dst[src.len()..].fill(0);
+                            }
+                        } else {
+                            dst.fill(0);
+                        }
+                    });
+                }
+                if let Err(error) = vma.map_existing_in_memory(&mut mapper, vpn) {
+                    vma.remove_unmapped_frame(vpn);
+                    let _ = vma.unmap(&mut mapper, VmaUnmapReason::RemoveArea);
+                    return Err((error, vpn));
                 }
                 start = end;
             }
@@ -549,6 +639,49 @@ impl<T: PageTable> AddressSpaceInner<T> {
             return Err(EBUSY);
         }
         Ok(())
+    }
+
+    /// 在 VM 锁内把 `msync` 范围转换为锁外可执行的 PageCache 页区间。
+    ///
+    /// 这里只克隆 inode Arc 和标量范围，绝不进入 PageCache；因此 syscall 能先释放
+    /// VM 锁，再执行可能进行后端 I/O 的 writeback，避免 VM→PageCache 与 writeback
+    /// 快照路径反向嵌套。
+    pub fn msync_page_ranges(
+        &self,
+        addr: usize,
+        len: usize,
+    ) -> Result<Vec<(Arc<dyn IndexNode>, usize, usize)>, isize> {
+        self.validate_msync_range(addr, len, false)?;
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let rounded_len = len
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .ok_or(ENOMEM)?;
+        let end = addr.checked_add(rounded_len).ok_or(ENOMEM)?;
+        let mut cursor = VirtAddr::from(addr).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        let mut ranges = Vec::new();
+        while cursor < end_vpn {
+            let area_start = self.vmas.find_user_vma_key(cursor).ok_or(ENOMEM)?;
+            let area = self.vmas.get_by_start(area_start).ok_or(ENOMEM)?;
+            let overlap_end = core::cmp::min(area.vm_end(), end_vpn);
+            if area.flags.contains(MapFlags::MAP_SHARED) {
+                if let Some(inode) = area.vm_file() {
+                    let first_offset = area.vm_file_offset(cursor).map_err(|_| EINVAL)?;
+                    let last_vpn = VirtPageNum(overlap_end.0 - 1);
+                    let last_offset = area.vm_file_offset(last_vpn).map_err(|_| EINVAL)?;
+                    ranges.push((
+                        inode,
+                        first_offset >> PAGE_SIZE_BITS,
+                        last_offset >> PAGE_SIZE_BITS,
+                    ));
+                }
+            }
+            cursor = overlap_end;
+        }
+        Ok(ranges)
     }
 
     pub fn proc_maps_content(&self) -> String {
@@ -865,23 +998,31 @@ impl<T: PageTable> AddressSpaceInner<T> {
         &mut self,
         addr: VirtAddr,
         access: FaultAccess,
-    ) -> Result<PhysAddr, MemoryError> {
+    ) -> FaultOutcome {
         let vpn = addr.floor();
         let area_start = match self.vmas.find_user_vma_key(vpn) {
             Some(start) => Some(start),
-            None => self.vmas.expand_growsdown_for_fault(vpn)?,
+            None => match self.vmas.expand_growsdown_for_fault(vpn) {
+                Ok(start) => start,
+                Err(error) => return FaultOutcome::Error(error),
+            },
         };
         if area_start.is_some() {
             let ctx = super::page_fault::FaultContext::new(addr, access);
             let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
             let area = self.vmas.find_user_vma_mut(vpn).unwrap();
-            let result = super::page_fault::handle_page_fault(area, &mut mapper, ctx);
-            let pa = result?;
-            self.validate_fault_phys_addr(addr, pa)
+            match super::page_fault::handle_page_fault(area, &mut mapper, ctx) {
+                FaultOutcome::Completed(pa) => match self.validate_fault_phys_addr(addr, pa) {
+                    Ok(pa) => FaultOutcome::Completed(pa),
+                    Err(error) => FaultOutcome::Error(error),
+                },
+                FaultOutcome::Retry(wait) => FaultOutcome::Retry(wait),
+                FaultOutcome::Error(error) => FaultOutcome::Error(error),
+            }
         } else {
             // In all segments, nothing matches the requirements. Throws.
             error!("[do_page_fault] addr: {:?}, result: bad addr", addr);
-            Err(MemoryError::BadAddress)
+            FaultOutcome::Error(MemoryError::BadAddress)
         }
     }
 
@@ -902,9 +1043,13 @@ impl<T: PageTable> AddressSpaceInner<T> {
         }
 
         super::frame_reserve(3);
-        self.do_page_fault(addr, access)
-            .and_then(|_| self.validate_user_fault_result(addr, access))
-            .map_err(memory_error_to_errno)
+        match self.do_page_fault(addr, access) {
+            FaultOutcome::Completed(_) => self
+                .validate_user_fault_result(addr, access)
+                .map_err(memory_error_to_errno),
+            FaultOutcome::Retry(_) => Err(EAGAIN),
+            FaultOutcome::Error(error) => Err(memory_error_to_errno(error)),
+        }
     }
 
     /// 只检查当前 PTE，不触发缺页处理。
@@ -926,8 +1071,11 @@ impl<T: PageTable> AddressSpaceInner<T> {
         access: FaultAccess,
     ) -> Result<PhysAddr, isize> {
         super::frame_reserve(3);
-        self.do_page_fault(addr, access)
-            .map_err(memory_error_to_errno)
+        match self.do_page_fault(addr, access) {
+            FaultOutcome::Completed(pa) => Ok(pa),
+            FaultOutcome::Retry(_) => Err(EAGAIN),
+            FaultOutcome::Error(error) => Err(memory_error_to_errno(error)),
+        }
     }
 
     fn validate_fault_phys_addr(
@@ -997,65 +1145,89 @@ impl<T: PageTable> AddressSpaceInner<T> {
     #[cfg(feature = "oom_handler")]
     pub fn do_shallow_clean(&mut self) -> usize {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
-        let released = self
+        let candidates: Vec<VirtPageNum> = self
             .vmas
-            .iter_mut()
+            .iter()
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
                 start_vpn.0 >= (USR_MMAP_BASE >> PAGE_SIZE_BITS)
                     && start_vpn.0 < (USR_MMAP_END >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
-            .map(|area| area.do_oom(&mut mapper))
-            .sum();
+            .map(|area| area.vm_start())
+            .collect();
+        let mut released = 0usize;
+        for start in candidates {
+            if let Some(area) = self.vmas.get_mut_by_start(start) {
+                released = released.saturating_add(area.do_oom(&mut mapper));
+            }
+        }
         released
     }
     #[cfg(feature = "riscv")]
     #[cfg(feature = "oom_handler")]
     pub fn do_shallow_clean(&mut self) -> usize {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
-        let released = self
+        let candidates: Vec<VirtPageNum> = self
             .vmas
-            .iter_mut()
+            .iter()
             .filter(|area| {
                 let start_vpn = area.get_start::<T>();
                 start_vpn.0 >= (MMAP_BASE >> PAGE_SIZE_BITS)
                     && start_vpn.0 < (TASK_SIZE >> PAGE_SIZE_BITS)
                     && area.map_file.is_none()
             })
-            .map(|area| area.do_oom(&mut mapper))
-            .sum();
+            .map(|area| area.vm_start())
+            .collect();
+        let mut released = 0usize;
+        for start in candidates {
+            if let Some(area) = self.vmas.get_mut_by_start(start) {
+                released = released.saturating_add(area.do_oom(&mut mapper));
+            }
+        }
         released
     }
     #[cfg(feature = "loongarch64")]
     #[cfg(feature = "oom_handler")]
     pub fn do_deep_clean(&mut self) -> usize {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
-        let released = self
+        let candidates: Vec<VirtPageNum> = self
             .vmas
-            .iter_mut()
+            .iter()
             .filter(|area| {
                 area.get_start::<T>().0 < (USER_VA_END >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
             // 深度回收扩大 VMA 扫描范围，但不能绕过 frame 的共享引用。
             // futex 队列、SysV SHM 和 fork CoW 都通过同一个 Arc 所有权表达共享。
-            .map(|area| area.do_oom(&mut mapper))
-            .sum();
+            .map(|area| area.vm_start())
+            .collect();
+        let mut released = 0usize;
+        for start in candidates {
+            if let Some(area) = self.vmas.get_mut_by_start(start) {
+                released = released.saturating_add(area.do_oom(&mut mapper));
+            }
+        }
         released
     }
     #[cfg(feature = "riscv")]
     #[cfg(feature = "oom_handler")]
     pub fn do_deep_clean(&mut self) -> usize {
         let mut mapper = UserMapper::new(&mut self.page_table, &mut self.mmu_gather);
-        let released = self
+        let candidates: Vec<VirtPageNum> = self
             .vmas
-            .iter_mut()
+            .iter()
             .filter(|area| {
                 area.get_start::<T>().0 < (TASK_SIZE >> PAGE_SIZE_BITS) && area.map_file.is_none()
             })
             // 深度回收只扩大候选范围；实际换出仍必须尊重共享 backing 的 pin。
-            .map(|area| area.do_oom(&mut mapper))
-            .sum();
+            .map(|area| area.vm_start())
+            .collect();
+        let mut released = 0usize;
+        for start in candidates {
+            if let Some(area) = self.vmas.get_mut_by_start(start) {
+                released = released.saturating_add(area.do_oom(&mut mapper));
+            }
+        }
         released
     }
     /// Mention that trampoline is not collected by areas.
@@ -1575,8 +1747,14 @@ impl<T: PageTable> AddressSpaceInner<T> {
                 let pa = page_table.translate_va(VirtAddr::from(dst)).ok_or(EFAULT)?;
                 let page_offset = pa.page_offset();
                 let copy_len = (PAGE_SIZE - page_offset).min(src.len());
-                let page = pa.floor().get_bytes_array();
-                page[page_offset..page_offset + copy_len].copy_from_slice(&src[..copy_len]);
+                // Safety: ELF 地址空间仍是未发布的构造对象；页表翻译固定目标
+                // frame，当前 exec 构造路径独占其用户栈内容。
+                unsafe {
+                    pa.floor().with_bytes_mut(|page| {
+                        page[page_offset..page_offset + copy_len]
+                            .copy_from_slice(&src[..copy_len])
+                    });
+                }
                 dst = dst.checked_add(copy_len).ok_or(EFAULT)?;
                 src = &src[copy_len..];
             }
@@ -2018,7 +2196,8 @@ impl<T: PageTable> AddressSpaceInner<T> {
     fn zero_elf_load_pages(&mut self, pages: &[ElfLoadPage]) -> Result<(), isize> {
         for page in pages {
             let ppn = translate_page(&self.page_table, page.vpn).ok_or(ENOEXEC)?;
-            ppn.get_bytes_array().fill(0);
+            // Safety: ELF 地址空间尚未安装到进程，`&mut self` 独占构造过程。
+            unsafe { ppn.with_bytes_mut(|page| page.fill(0)) };
         }
         Ok(())
     }
@@ -2041,10 +2220,13 @@ impl<T: PageTable> AddressSpaceInner<T> {
             let copy_len = remaining.min(PAGE_SIZE - page_offset);
             let page_end = page_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             let ppn = translate_page(&self.page_table, vpn).ok_or(ENOEXEC)?;
-            copy_file(
-                file_offset,
-                &mut ppn.get_bytes_array()[page_offset..page_end],
-            )?;
+            // Safety: PT_LOAD 页属于尚未发布的 ELF 地址空间，当前 `&mut self`
+            // 是其唯一写者；闭包结束后页切片立即失效。
+            unsafe {
+                ppn.with_bytes_mut(|page| {
+                    copy_file(file_offset, &mut page[page_offset..page_end])
+                })
+            }?;
             virtual_address = virtual_address.checked_add(copy_len).ok_or(ENOEXEC)?;
             file_offset = file_offset.checked_add(copy_len).ok_or(ENOEXEC)?;
             remaining -= copy_len;
@@ -2427,8 +2609,22 @@ fn copy_from_page_cache(pc: &PageCache, mut file_off: usize, dst: &mut [u8]) -> 
         let page_off = file_off & (PAGE_SIZE - 1);
         let chunk = remaining.min(PAGE_SIZE - page_off);
         let frame = pc.frame_for_read(page_idx).map_err(|_| EIO)?;
-        dst[dst_off..dst_off + chunk]
-            .copy_from_slice(&frame.ppn.get_bytes_array()[page_off..page_off + chunk]);
+        let src = frame
+            .ppn
+            .start_addr()
+            .direct_map_ptr()
+            .wrapping_add(page_off)
+            .cast_const();
+        // Safety: `frame` 固定 PageCache frame 生命周期，索引计算保证读取不
+        // 跨页，目标范围位于调用方切片内。源页可能被 MAP_SHARED 用户映射
+        // 并发修改，所以使用 raw copy 而不创建共享 Rust 引用。
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                dst.as_mut_ptr().add(dst_off),
+                chunk,
+            );
+        }
         file_off = file_off.checked_add(chunk).ok_or(ENOEXEC)?;
         dst_off = dst_off.checked_add(chunk).ok_or(ENOEXEC)?;
         remaining -= chunk;

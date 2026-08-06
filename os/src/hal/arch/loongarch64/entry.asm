@@ -25,7 +25,12 @@ _start:
     la.global $sp, boot_stack_top
     # 2K1000LA remains single-core; normalize the common Rust entry ABI.
     sub.d       $a0,    $a0,    $a0
-    sub.d       $a1,    $a1,    $a1
+    # U-Boot 在 a2 中传 EFI system table。DMW 切换只改变地址解释方式，
+    # 不会改写寄存器内容，因此此处仍可直接取得原始 a2。
+    # 2K1000 的 PALEN=40；左移再逻辑右移 24 位可清除 0x9000... DMW 别名，
+    # 同时保留已经是物理地址的低 40 位指针。
+    slli.d      $a1,    $a2,    0x18
+    srli.d      $a1,    $a1,    0x18
     bl          rust_main
 
     .section .bss.stack

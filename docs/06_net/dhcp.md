@@ -2,16 +2,16 @@
 title: "DHCPv4 租约生命周期"
 module: "os/src/net/config.rs"
 category: net
-status: draft
+status: current
 owner: MangoCore Team
-last_updated: "2026-07-18"
+last_updated: "2026-08-06"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/net_core.rs"
   - "os/src/net/routing.rs"
   - "os/src/fs/procfs/files/net_resolv.rs"
 entry_points:
-  - "NetInterfaceInner::new()"
+  - "NetDirectory::new()"
   - "take_dhcp_event()"
   - "commit_dhcp_event()"
 arch:
@@ -38,15 +38,15 @@ gmac_dhcp 依赖 gmac_2k1000。没有启用它时，现有静态直连行为保�
 
 ## 常驻状态机
 
-启用 gmac_dhcp 后，NetInterfaceInner::new() 创建 DHCP socket，但不在启动
+启用 gmac_dhcp 后，NetDirectory::new() 创建 DHCP socket，但不在启动
 路径阻塞等待，也不删除 socket。其 SocketHandle 保存在 eth0 的 DeviceStack：
 
 ~~~text
-timer/idle/syscall poll
+CPU0 net poll worker
   -> Interface::poll()
   -> dhcpv4::Socket::poll()
   -> take_dhcp_event()       更新 smoltcp 地址和默认路由
-  -> IRQ: 暂存最新事件 / task: 释放 NET_INTERFACE 锁
+  -> DeviceStack 内暂存最新事件，随后释放栈锁
   -> commit_dhcp_event()     任务上下文更新 net_core、Router 和 DNS
 ~~~
 
@@ -61,9 +61,8 @@ timer/idle/syscall poll
 2. net_core 的 eth0 地址、默认网关和 DNS 服务器快照；
 3. 当前网络命名空间 Router 的 connected/default 路由。
 
-Deconfigured 会清除同样三处状态。租约提交在释放 NET_INTERFACE.inner 后进行。
-若事件来自定时器中断，则先保存在 DeviceStack，直到下一个任务上下文轮询再提交，
-避免中断路径等待 device_list/router 锁。
+Deconfigured 会清除同样三处状态。租约提交在释放 DeviceStack 后进行。hard IRQ
+只发布 worker 请求，绝不读取 DHCP socket 或等待 device_list/router 锁。
 
 ## DNS 交付
 
@@ -94,9 +93,10 @@ glibc 的同步 resolver 还依赖两项 socket ABI：在 UDP 查询 socket 上�
 
 ## QEMU 兼容路径
 
-非 2K1000 GMAC 配置仍保留原有启动期 5 秒 DHCP 探测，以维持现有 QEMU 启动和
-测例时序。该路径现在也保存 DHCP DNS，但完成或超时后仍删除 DHCP socket，尚不
-具备 QEMU 侧续租能力。
+QEMU 与启用 `gmac_dhcp` 的 2K1000LA 共用上述常驻状态机。网络初始化只注册
+DHCP socket 并发布首轮 poll 请求，不在 IRQ-off 的 boot 路径同步发送；调度器启动后，
+固定在 CPU0 的 worker 在受控 IRQ-on 窗口内发送 Discover 并持续处理续租/重新绑定。
+未启用 `gmac_dhcp` 的 2K1000LA 静态直连配置保持不变。
 
 ## 构建与实板验证
 

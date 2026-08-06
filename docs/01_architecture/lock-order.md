@@ -1,9 +1,9 @@
 ---
 title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
-status: current
+status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-04
+last_updated: 2026-08-05
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -14,7 +14,8 @@ related_docs:
 
 # MangoCore SMP 锁序与中断上下文约束
 
-本文定义 SMP 改造期间的锁契约。已完成的 FS/Net SMP 边界在下文明确列出；每个引入或改变锁关系的批次都必须同步本文，并用实际调用链验证。
+本文定义 SMP 改造期间的目标锁契约。`status: proposed` 表示这些规则是实施门禁，
+不表示当前单核代码已经满足。每个引入或改变锁关系的批次都必须同步本文，并用实际调用链验证。
 
 ## 1. 基础原语前置条件
 
@@ -70,51 +71,25 @@ MangoCore 不采用“给所有锁编号后允许任意嵌套”的总序。以�
    group-exit 快照释放 `thread_group` 后才取得 task/registry 锁、唤醒或发送 IPI。
    不存在 RunQueue 反向获取 thread-group 锁的路径。
 
-### 3.1 B15 历史过渡约束
+### FS/Net 已实现锁域
 
-### 3.1.1 FS/Net Phase-5 已实现锁域
+FS、网络与调度之间不建立可任意嵌套的全局总序；跨域操作统一拆成
+“锁内快照或提交—解锁—进入下一域”。当前实现约束如下：
 
-FS、网络与调度不是可任意嵌套的全局锁链；跨域动作固定为“快照/提交—解锁—进入下一域”。
-
-| 层级 | 锁域 | 当前契约 |
+| 子系统 | 正向锁序 | 约束 |
 |---|---|---|
-| FS-F0..F3 | `rename_gate` → directory gate → victim metadata → directory caches | 跨目录先 `rename_gate`；parent 为祖先优先、否则 inode ID；cache 只能在 parent gate 后 |
-| IO-I0..I3 | `io_txn` → `op_gate` → `entries -> inner` → `PageEntry.data` | 元数据锁只定位/clone；释放后才访问单页 bytes |
-| Net-N0..N3 | ports/route directory → socket lifecycle → one DeviceStack → event/epoll/WaitQueue | N0 短提交；N2 只持一个 stack，释放 N1/N2 后才通知 |
-| Leaf | `OUTPUT_LOCK` | 所有业务锁释放且格式参数已快照后才能取得 |
+| native ext4 namespace | `rename_gate -> parent dir_gate -> victim dir_gate -> inode_txn` | 跨目录先取全局 rename 门；同类对象按 inode ID 排序，锁后重验目录项 |
+| 文件 I/O | `inode_txn -> PageCache.op_gate -> entries/inner -> PageEntry.data` | 用户访问在全部 inode/PageCache 锁外；`PageEntry.data` 不反向取得元数据锁 |
+| lwext4 | `PageCache -> LWEXT4_GLOBAL -> fs.lw -> inode state` | C 全局门不可重入，不跨 fault、调度、IPI/TLB ack 或输出锁 |
+| 网络控制面 | `PortRegistry/NetDirectory -> socket lifecycle -> one DeviceStack` | N0 只做短提交；一个线程同时最多持有一个设备栈锁 |
+| 网络通知 | 释放 DeviceStack 后再进入 EventPoll/WaitQueue | IRQ 只置原子 pending/deferred 标志，CPU0 worker 才执行 smoltcp |
 
-FS/Net 锁不得获取 `task.inner`、runqueue 或跨 context switch/IPC wait；不得在业务锁内
-faultable uaccess。`DeviceStack` 不得反向取得 socket lifecycle、EventPoll 或 WaitQueue；
-`PageEntry.data` 不得反向取得 `entries`/`inner`。IRQ 只发布 poll generation，worker 在 task
-context 取得单个 DeviceStack，并在释放后发布 socket/epoll wake。设计依据见
-`docs/10_plan/fs-net-smp-adaptation.md` §2、§4.5。
+`RouteSocketHandle` 单调且不复用。访问者在目录中确认 route 状态并升级目标栈的
+`Weak`，释放目录锁后取得单个栈锁，再用 route ID 与 protocol 重验本地 binding。
+端口绑定则以每 netns 的 `reserve -> socket.bind -> commit/abort` 为线性化协议；
+registry 锁不跨 socket 或 DeviceStack 操作。
 
-### 3.1.1 FS/Net WP5 DeviceStack 路由目录
-
-WP5 将旧的单一 `NET_INTERFACE` 锁拆为短持的 `NetDirectory` 与每设备一个
-`DeviceStackCell::inner`。固定协议如下：
-
-```text
-PortRegistry / NetDirectory：只快照或提交 route、不得进入 smoltcp
-  -> （释放目录锁）
-  -> 可选 socket lifecycle 锁：只快照内核状态，禁止从 DeviceStack 反向取得
-  -> 单个 DeviceStack：Interface + device + SocketSet + local bindings
-  -> （释放全部上述锁）
-  -> EventWaitQueue / epoll / WaitQueue 唤醒
-```
-
-- `RouteSocketHandle` 单调且不复用。读者先在目录确认 `Active + protocol` 并升级
-  `Weak<DeviceStackCell>`，释放目录后才锁该栈；栈内必须按同一 route ID 和 protocol
-  重验 `LocalSocketBinding`，失败即拒绝，不能访问已复用的 smoltcp slot。
-- add 先在栈内插入 socket/binding，后在目录发布 `Active`；remove 先从目录撤 route，
-  后在单栈内删除 binding/socket，并在栈锁外析构。rebind 经过 `Migrating`，任一时刻
-  至多持有 source 或 target 其中一把 `DeviceStack` 锁。
-- `DeviceStack -> NetDirectory`、`DeviceStack -> socket lifecycle`、
-  `DeviceStack -> EventWaitQueue/WaitQueue` 均禁止。UDP poll 仅在栈锁内提取内核所有
-  packet，释放栈锁后才取得 OS socket/事件队列锁。
-- `NetNamespace.ports` 与 route directory 都是 N0 短提交域，二者不嵌套；port reserve
-  完成后才进入 socket lifecycle/DeviceStack。目录或栈锁不得跨 faultable uaccess、
-  context switch、IPI/TLB 等待或 console 输出。
+### 3.1 B15 历史过渡约束
 
 B15 尚未拆分 per-CPU runqueue 时，ready/interruptible 容器曾由单一
 `TASK_MANAGER` 保护。该实现只用于说明状态机的演进背景，已由 B18 的 3.3 节取代，
@@ -219,6 +194,22 @@ B59 删除 `translated_byte_buffer()`、`translate_user_buffer_checked()` 和物
   `munmap/mprotect` 导致映射变化时立即部分完成或 `EFAULT`，不得持锁等待；
 - `fault_in_user_va()` 必须先解析已经满足权限的 PTE，避免正常 copy 重复进入
   CoW/SharedWrite 并提交无效 TLB 刷新。
+
+### signalfd pending 与通知域
+
+signalfd 的 pending 队列是权威状态，`Sighand::signalfd_events` 只负责通知等待者重查。生产者
+固定采用以下单向顺序：
+
+```text
+task.inner 或 process.signal 锁内提交 pending
+  -> 释放 pending owner 锁
+  -> 短暂取得 sighand，克隆 EventWaitQueue Arc
+  -> EventWaitQueue::notify_events_all
+```
+
+禁止持有 `task.inner` 或 `process.signal` 进入 `notify_signalfd()`；也禁止让 EventWaitQueue
+回调反向获取 pending owner 锁。普通 fork 创建新 sighand 通知域，`CLONE_SIGHAND` 才共享，
+共享的 signalfd File 不能缓存某个进程的队列地址。
 
 B59 只适配完成重构所必需的 FS/Net 调用点，不代表这些共享子系统已通过完整 SMP 并发审计。
 Driver 未在本批改动；其余 FS/Net/Driver 审计由对应负责人后续完成。
@@ -449,8 +440,8 @@ B19 只为 focused ktest 的 kernel-only 任务开放显式目标 CPU，不改�
 AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready
 屏障等待且不持锁。AP dispatch 前只锁自己的 runqueue；`dispatch_task()` 先后取得
 `task.inner` 和本地 processor，但两把锁不嵌套，也不跨 `__switch`。任务切回 idle
-后先释放 processor 锁，再把 Zombie 加入受锁的全局 `TASK_MANAGER`，因此没有
-`processor -> TASK_MANAGER` 嵌套。
+后先释放 processor 锁，再把 Zombie 加入 owner CPU 的 `local_zombies`，因此不需要
+获取全局 `TASK_MANAGER`。
 
 这个批次没有两个 runqueue 的同时持有、迁移或 work stealing。AP 任务入口也不得
 访问尚未审计的 console、FS、NET、设备和用户 MM；这些能力约束不能用锁本身替代。
@@ -478,9 +469,10 @@ kernel-only AP 任务完成验证。初始 affinity 已作为入队硬约束，B
 
 B35 复用同一 `TASK_MANAGER` 锁串行化稳定 Blocked 线程的 affinity 与 wake：写侧必须在锁内
 同时确认精确 `Blocked` 状态和同一 TCB 指针仍在 registry，随后 Release 发布 mask；wake 取得
-同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为线程退出清理摘除 registry 后、
-标记 Zombie 前存在短暂 Blocked 窗口。该路径不获取 runqueue，也不搬 owner；远程
-Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
+同一锁后以 Acquire 读取并选择目标。只检查状态不够，因为 wake 会在同一锁域把任务移出
+registry 并发布新 owner。退出不会直接执行 `Blocked -> Zombie`：group-exit、exec 和 fatal
+signal 必须先唤醒目标，再由目标在自己的 `Running(cpu)` 安全点退出。该路径不获取 runqueue，
+也不搬 owner；远程 Running/Blocking 修改在 B35 当时尚未实现，后续由 B38 的请求槽协议闭合。
 
 ### 3.6 B36 稳定 Queued affinity 搬队约束
 
@@ -610,7 +602,7 @@ exec 的临时门禁固定采用：
   -> 解锁
   -> 逐 sibling 投递 SIGKILL/wake/RESCHEDULE
   -> 释放快照 Arc
-  -> Completion 等待（不持任何内核锁）
+  -> Completion 等待 sibling 清理资源并离开 current 槽（不持任何内核锁）
   -> owner 独占旧 MM 后安装新映像
   -> thread_group：清除 ExecSession 并重新开放 clone
 ```
@@ -620,13 +612,19 @@ exec 的临时门禁固定采用：
 - `publish_thread()` 只在持有 `thread_group` 时同时检查永久 group exit 和临时 exec，
   因此成员登记、`New -> Queued` 与关门操作具有单一线性化顺序；
 - `remove_thread()` 在用户资源撤销和 TLB flush/ack 完成后才以 AcqRel 递减 live
-  count；只有权威计数变为 1 才完成 exec Completion，不能用成员快照为空代替；
-- `remove_thread()` 可在 `thread_group` 内克隆 Completion，但必须解锁后
-  `complete()`，因为唤醒会进入 WaitQueue/RunQueue；
+  count。该 ack 只证明线程不再使用用户资源，不证明它已离开自身内核栈和 CPU current 槽；
+- idle 收尾先撤销 current 槽，再由 `publish_exit_inactive()` 递减
+  `ExecState.pending_inactive`。计数到零时只在 `thread_group` 内克隆
+  Completion，解锁后才 `complete()`；
+- exec owner 必须同时观察到 `live_threads == 1` 和 `pending_inactive == 0`。
+  前者保护 MM/资源生命期，后者保证非 leader exec 不会在旧 leader 仍使用
+  内核栈时交换 TID；
 - exec owner 的等待、IPI/TLB ack 和 context switch 都不持有 `thread_group`、
   `TASK_MANAGER`、task.inner 或 runqueue；
-- WaitQueue 在自身条件锁内识别生命周期停止请求，先摘除 waiter 再返回
+- WaitQueue 协议在提交 Blocking 前后都复查生命周期停止请求，先摘除 waiter 再返回
   `Interrupted`；调用层释放 syscall 栈上的 `Arc` 后才进入安全点；
+- 任何 noreturn 退出调用都必须在 context switch 前显式释放当前内核栈上的
+  TCB `Arc`；调度切换不会展开已废弃的 Rust 栈帧；
 - vfork child 已经 publish 后，父线程被生命周期请求中止只能返回 `StopCaller`，
   不能调用 unpublished cleanup。
 - `reset_exec_resources()` 只在 live count 为 1 后运行。它在 `process.inner` 内读取
@@ -654,7 +652,8 @@ exec.finish()：释放 thread_group 锁并重新开放 clone
 
 关键约束：
 
-- live count 已在安装新映像前收缩为 1，因此 `exec.finish()` 后不再存在可与身份接管并发
+- live count 已在安装新映像前收缩为 1，且所有 sibling 均已发布 inactive ack，
+  因此 `exec.finish()` 后不再存在可与身份接管并发
   发布的同 PCB sibling；身份交换不需要嵌套 `thread_group` 和 task registry；
 - registry 锁内可以短持单个 TCB 的 `tid_handle` 锁，但不得析构 TCB、`TidHandle`，
   也不得取得 processor、`TASK_MANAGER` 或 runqueue 锁；
@@ -704,6 +703,12 @@ B22 的 trap-return 激活登记、B23 的 PTE 修改侧和 B51 的切离登记�
 `MmuGather::seal()` 取得 `TlbFlush`，再由块作用域析构 guard。这个接口不暴露可变
 guard，是“先解锁再等 ack”的类型级门禁，不依赖每个调用点人工记住 `drop()`。
 
+B86 把同一边界继续下推到架构页表实现：物理页的原始 PTE 视图分为只读
+`get_pte_array()` 和可写 `get_pte_array_mut()`，两者均为 crate-private `unsafe`；只读 walk
+不得再先制造 `&mut PTE` 后降级为共享引用，写 walk 则必须持有 `&mut PageTable`。这里
+`unsafe` 只证明物理页类型和存活期，`&mut PageTable` 与外层 VM 锁才共同证明独占修改权。
+因此禁止恢复任何 `&PageTable -> &mut PTE` 的辅助函数，即使当前调用点“碰巧持锁”。
+
 禁止在 VM 锁内等待 user-TLB ack。目标 CPU 可能已经关闭本地 IRQ并在 page fault 中等待
 同一 VM 锁；发起者若持锁等它处理 IPI，会形成 `VM lock -> ack -> target VM lock` 环。
 等待者临时开放 IRQ只能解决“两个无锁等待者互相成为 IPI 目标”，不能修复持普通锁等待。
@@ -737,6 +742,12 @@ trap context 页由对应 TCB 拥有，Rust 可变访问只能通过
 `TaskControlBlockInner::trap_context_mut(&mut self)` 完成。返回引用的生命周期绑定到
 `task.inner` guard；禁止把直映区指针包装成 `'static mut`，也禁止 current-task helper
 从临时 guard 中返回引用。
+
+B87 删除了 `PhysAddr::{get_ref,get_mut,get_bytes_ref,get_bytes_mut}` 和
+`PhysPageNum::get_mut`：这些安全函数无法证明任意物理内存的类型、存活期或独占权，却能
+返回可逃逸的 `'static` 引用。trap context 的 raw pointer 解引用改为只存在于上述 TCB
+owner 方法，unsafe 注释分别证明 frame 存活、页首对齐和 `&mut self` 独占。整页 byte view
+仍涉及 MM/PageCache/FS 的共享所有权，必须作为独立审计处理，不能借本节点顺带修改。
 
 LoongArch 用户未对齐访存固定分为：
 
@@ -843,9 +854,10 @@ PCB 内保存的 deadline。旧值 copyout 若
 
 ### 3.15 B70 sigtimedwait 的领取与回复边界
 
-`WaitQueue` 条件闭包会在无锁快速路径执行，也会在持有等待队列锁、完成 waiter 登记后再次
-执行。因此 `sigtimedwait()` 的条件闭包只允许在 signal owner 锁内领取一条 pending signal，
-再把完整 `PendingSignal` 移交给 syscall 栈：
+`WaitQueue` 条件闭包会在无锁快速路径执行，也会在完成 waiter 登记后于等待队列锁外再次
+执行。登记后的早到 wake 由 `WaitEntry` token 保存，不再要求用队列锁包住第二次检查。
+`sigtimedwait()` 的条件闭包仍只允许在 signal owner 锁内领取一条 pending signal，再把完整
+`PendingSignal` 移交给 syscall 栈：
 
 ```text
 task.inner 或 process signal lock：唯一 dequeue
@@ -854,8 +866,8 @@ task.inner 或 process signal lock：唯一 dequeue
   -> UserPtrMut 写回 SigInfo
 ```
 
-用户地址写入可能缺页、触发 CoW 或等待 TLB shootdown，不能位于 WaitQueue、`task.inner` 或
-进程 signal lock 内。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
+用户地址写入可能缺页、触发 CoW 或等待 TLB shootdown，不能位于 `task.inner` 或进程 signal
+lock 内，也应放在整个等待协议退出之后。copyout 返回 `EFAULT` 时信号已经消费，这与 Linux 6.6 先 dequeue、后
 `copy_siginfo_to_user()` 的顺序一致；不得为“回滚”把信号重新入队。
 
 ### 3.16 B71 sigtimedwait 的睡眠登记窗口
@@ -1084,6 +1096,28 @@ mutex 决定 writer 的唯一全序，最后离开临界区的 writer 一定发�
 `take_shared_signal()`/`take_shared_matching()` 只在 signal 临界区内 dequeue 和更新 hint；随后
 先解锁，再进入 POSIX timer owner 执行 discard/finalize，因此 B80 的 signal/timer 无嵌套锁序
 保持不变。
+
+### 3.24 B89 单页帧领取与锁外清零
+
+`FRAME_ALLOCATOR` 写锁只保护 fresh region 游标、recycled 栈和 owner bit。普通
+`frame_alloc()` 的固定顺序为：
+
+```text
+FRAME_ALLOCATOR write lock
+  -> reserve_one(): 唯一领取 PPN 并生成 FrameReservation
+FRAME_ALLOCATOR unlock
+  -> FrameReservation::into_tracker(): 按需清零 4 KiB
+  -> Arc::new(FrameTracker)
+```
+
+返回 reservation 后必须先结束包含 `write()` 临时 guard 的语句，才能消费或
+drop reservation；否则异常回滚会通过 `frame_dealloc()` 重入同一把锁。当前
+OOM/非 OOM 调用点都使用独立 `let reservation = ...;` 语句表达该边界。
+
+reservation 用 `Option::take()` 完成 PPN 所有权移交；消费后它的 `Drop` 是 no-op，
+未消费则将 PPN 归还。recycled 页始终在锁外重新清零；只有启用
+`zero_init` 且首次领取的 fresh 页可依赖 BSP 预清零而跳过。连续帧与
+unsafe uninit 路径未经过此 reservation，不应把两类所有权协议混用。
 
 ## 4. 永久禁止的组合
 

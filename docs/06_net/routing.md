@@ -4,7 +4,7 @@ module: "os/src/net/routing.rs + config.rs (route_check, lookup_source_ip)"
 category: net
 status: current
 owner: MangoCore Team
-last_updated: "2026-08-04"
+last_updated: "2026-08-05"
 code_paths:
   - "os/src/net/routing.rs"
   - "os/src/net/config.rs"
@@ -42,13 +42,14 @@ related_docs:
 
 整个子系统分布在两个文件中：`routing.rs` 定义核心数据结构和主路由函数，`config.rs` 提供两个便利包装供 syscall 层使用。
 
-路由目录属于 N0：只快照 `Active` route、protocol 与 `Weak<DeviceStackCell>`，随后释放 N0；N2 内再按 route ID/protocol/local binding 重验。旧 `SocketHandle` slot 复用不会被旧 route 访问，且目录不与 `NetNamespace.ports` 或 DeviceStack 嵌套。
-
 ## 核心数据结构
 
 ### RouteSocketHandle
 
-不透明的 `usize` 包装体，用作套接字路由绑定的键。每个经过路由的 socket 在 `NetInterfaceInner.bindings` 映射表中拥有唯一的 `RouteSocketHandle`，格式化为 `RH(N)` 便于日志追踪。
+不透明的 `usize` 包装体，用作套接字路由绑定的键。每个 routed socket 在
+`NetDirectory.routes` 中拥有唯一且不复用的 `RouteSocketHandle`，格式化为
+`RH(N)` 便于日志追踪。目录只快照 Active route、protocol 与目标栈 Weak，释放
+目录锁后才进入 DeviceStack，并按 route ID/protocol/local binding 重验。
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,19 +66,26 @@ pub struct RouteSocketHandle(pub(crate) usize);
 pub(crate) enum InetProtocol { Tcp, Udp, Raw }
 ```
 
-不对外暴露，仅在 `SocketBinding` 内部使用。
+不对外暴露，同时用于目录条目和设备栈内 binding 的一致性重验。
 
-### SocketBinding
+### RouteDirectoryEntry 与 LocalSocketBinding
 
-将逻辑句柄连接到具体设备栈的桥梁。三元组 `(ifindex, handle, proto)` 唯一确定一个 smoltcp 协议栈中的 socket：
+route 映射拆成两个锁域。目录条目只定位设备栈；本地条目与 SocketSet 同锁域，最终确定 smoltcp handle：
 
 ```rust
-pub(crate) struct SocketBinding {
-    pub ifindex: u32,        // 目标设备栈索引
-    pub handle: SocketHandle, // smoltcp SocketHandle
-    pub proto: InetProtocol,  // 协议类型
+struct RouteDirectoryEntry<'a> {
+    stack: Weak<DeviceStackCell<'a>>,
+    protocol: InetProtocol,
+    state: RouteState,
+}
+
+struct LocalSocketBinding {
+    handle: SocketHandle,
+    protocol: InetProtocol,
 }
 ```
+
+访问者在目录锁内升级 `Weak` 并克隆稳定的栈 `Arc`，随后释放目录锁；取得目标设备栈锁后按 route ID 和 protocol 重验本地条目。该顺序禁止 N0/N2 嵌套，也防止已回收 SocketSet slot 被旧 route 误用。
 
 ### RouteDecision
 
@@ -266,14 +274,14 @@ pub fn route_check(dest: IpAddress) -> Result<(), SyscallErr> {
   └── RouteDecision { ifindex, source, next_hop, is_local }
 
   → NetInterface::tcp_connect(RouteSocketHandle, remote, local)
-  → NetInterfaceInner.bindings[BTreeMap]
-     └── RouteSocketHandle → SocketBinding { ifindex, handle, proto }
-     └── stack_mut(binding.ifindex) → DeviceStack
-     └── sockets.get_mut::<tcp::Socket>(binding.handle)
+  → NetDirectory.routes[BTreeMap] → Weak<DeviceStackCell>
+     └── 释放目录锁，取得目标 DeviceStack
+     └── LocalSocketBinding 按 route ID/protocol 重验
+     └── sockets.get_mut::<tcp::Socket>(handle)
 ```
 
 1. 用户调用 `connect(fd, addr)` → syscall 分配 `RouteSocketHandle`。
-2. syscall 将 smoltcp socket 添加到 `NetInterfaceInner` 并记录 `SocketBinding`。
+2. syscall 先在目标栈建立本地 binding，再向 `NetDirectory` 发布 Active route。
 3. 传输数据时通过 `tcp_routed_socket(rh, ...)` 等方法完成读写。
 4. 销毁时调用 `remove_routed(rh)` 同时清理 `SocketSet` 和绑定表。
 

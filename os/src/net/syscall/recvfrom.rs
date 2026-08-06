@@ -19,14 +19,13 @@ use super::common::MsgFlags;
 /// - `MSG_PEEK`：委托 `try_peek_recvmsg()`（不消费数据），UDP socket 通过此标志
 ///   查看队列头部的数据。
 /// - 非阻塞 `Stream` fast path：使用 `UserBufferWriter` 零拷贝接收，
-///   在 `try_recv` 前调用 `NET_INTERFACE.try_poll()` 推进 TCP 状态机。
-///   缺少此 poll 会导致非阻塞 recv 循环饿死定时器中断。
+///   在 `try_recv` 前执行一次不等待的有界 poll，忙栈由 worker 后续推进。
 /// - 阻塞模式与 Datagram/Raw：先接收到内核 `Vec<u8>`，完成等待后再通过
 ///   `copy_to_user_array` 写回，避免跨越等待点保存用户页视图。
 /// - `src_addr`/`addrlen`：接收前验证 `*addrlen` 值（负值或过小 → `-EINVAL`），
 ///   接收后通过 `Endpoint::fill_sockaddr()` 写回用户空间。
 ///
-/// **关键约束**：非阻塞路径必须在 `try_recv` 前调用 `NET_INTERFACE.try_poll()`。
+/// **关键约束**：非阻塞路径不得等待 worker completion。
 ///
 /// # Errors
 ///
@@ -87,7 +86,7 @@ pub fn sys_recvfrom(
 
     // Stream non-blocking zero-copy fast path
     if is_nonblock && matches!(socket.socket_type(), PSOCK::Stream) {
-        NET_INTERFACE.try_poll();
+        NET_INTERFACE.poll_now();
         let mut ubuf = match UserBufferWriter::new(token, buf as *mut u8, len_usize) {
             Ok(w) => w.into_user_buffer(),
             Err(e) => return e,
@@ -132,11 +131,10 @@ pub fn sys_recvfrom(
         };
         if let Some(wait_queue) = socket.recv_wait_queue() {
             if is_nonblock {
-                // Non-blocking: poll once before trying to recv, so smoltcp can
-                // advance TCP state (handshake, data delivery). Without this, a
-                // tight non-blocking recv loop can starve the timer interrupt.
-                NET_INTERFACE.try_poll();
-                log::info!("[sys_recvfrom] after try_poll, calling recv()");
+                // 非阻塞首试只能在无 fd/socket/N2 锁时做有界 try-lock 扫描，
+                // 不能等待 CPU0 worker completion。
+                NET_INTERFACE.poll_now();
+                log::info!("[sys_recvfrom] after bounded poll, calling recv()");
                 let n = match recv() {
                     Ok(n) => n as isize,
                     Err(e) => -(e as isize),

@@ -25,6 +25,9 @@ unsafe extern "C" fn _start() -> ! {
             # lu52i.d     $t0, $t0, -1792     # CA Cached, PLV0
             csrwr       $t0, 0x181          # 状态控制寄存器CSR_DMW1的地址
 
+            # QEMU direct boot 在 a2 传入 EFI system table。先把它整理成
+            # rust_main 的第二个参数；后续读取 CPUID 会覆盖 a0，但不会影响 a1。
+            addi.d      $a1, $a2, 0
             # CPUID is CPU-local, so it can be read before any shared stack exists.
             csrrd       $a0, 0x20
             # Reject an ID without a reserved slot before assigning or using $sp.
@@ -41,8 +44,6 @@ unsafe extern "C" fn _start() -> ! {
             # Stacks grow down, so $sp begins at the slot's exclusive upper bound.
             add.d       $sp, $sp, $t0
 
-            # LA64 QEMU has no DTB/opaque boot argument in this phase.
-            addi.d      $a1, $zero, 0
             # 将全局符号entry即程序入口地址rust_main地址放到临时寄存器t0中
             la.global   $t0, {entry}
             jirl        $zero,$t0,0x0

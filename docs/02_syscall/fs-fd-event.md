@@ -3,7 +3,7 @@ title: "文件、fd 与事件 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-07-13
+last_update: 2026-08-03
 tags: [syscall, fs, fd, epoll, eventfd]
 ---
 
@@ -201,124 +201,30 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 
 | 路径 | 条件 | 行为 |
 |------|------|------|
-| direct user buffer | `inode.supports_user_buffer_io()` | 每次最多 `IO_CHUNK_SIZE`，构造 `UserBufferWriter` 后调用 `file.read_user()` |
-| kernel bounce buffer | 其他 inode | 分配 `IO_CHUNK_SIZE` 内核 buffer，`file.read()` 后按页写入用户 buffer |
+| direct user buffer | `inode.supports_user_buffer_io()` | 构造可写前缀后调用 `file.read_user()` |
+| kernel bounce buffer | 其他 inode | 按可写前缀读取到内核 buffer，再用同一个 writer 复制 |
 
-读取前先通过 `writable_len_for_read()` 检查用户目标地址可写。若还没有可访问页，会先 fault-in 1 字节，避免消费文件数据后才发现用户地址坏。
+读取前通过 `UserBufferWriter::new_writable_prefix()` 在一次 VM 临界区内确定当前连续可写前缀。
+若首页尚不可写，它会 fault-in 首页；若后续页不可写，则立即返回已有前缀，而不会为了本次
+可能发生的短读提前触发后续页的 lazy allocation、CoW 或 TLB shootdown。
 
-`read_into_user()` 的关键设计是“先证明目标用户 buffer 可写，再让文件对象产生数据”。如果反过来先从文件读出数据，再写用户页，遇到坏用户地址时会出现文件偏移已前进但 syscall 返回 `EFAULT` 的语义风险。direct user buffer 路径把用户页封装成 `UserBufferWriter`，适合支持用户 buffer I/O 的 inode；bounce buffer 路径先读入内核临时页，再逐段复制给用户，适合普通 `File::read()` 接口。
+关键顺序仍是“先限定本轮可交付长度，再让文件对象产生数据”。简化后的两条路径为：
 
-`read_into_user()` 的完整实现如下：
+```text
+(writer, accessible) = new_writable_prefix(user_addr, want)
 
-```rust
-fn read_into_user(file: &vfs::File, token: usize, buf: usize, count: usize) -> isize {
-    if count == 0 {
-        return match file.read(&mut []) {
-            Ok(n) => n as isize,
-            Err(e) => -(e as isize),
-        };
-    }
-
-    if file.inode.supports_user_buffer_io() {
-        let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-        let mut total = 0usize;
-        while total < count {
-            let want = (count - total).min(chunk_cap);
-
-            let user_addr = match buf.checked_add(total) {
-                Some(v) => v,
-                None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
-            };
-            let accessible = match writable_len_for_read(token, user_addr, want) {
-                Ok(n) => n,
-                Err(errno) => return if total > 0 { total as isize } else { errno },
-            };
-
-            let mut ubuf = match UserBufferWriter::new(token, user_addr as *mut u8, accessible) {
-                Ok(w) => w.into_user_buffer(),
-                Err(errno) => return if total > 0 { total as isize } else { errno },
-            };
-
-            let n = match file.read_user(&mut ubuf) {
-                Ok(n) => n,
-                Err(e) => return if total > 0 { total as isize } else { -(e as isize) },
-            };
-            if n == 0 { break; }
-            total += n;
-            if n < accessible { break; }
-            if let Some(task) = current_task() {
-                if crate::task::has_actionable_signal(&task) { break; }
-            }
-        }
-        return total as isize;
-    }
-
-    // kbuf path for pipe/socket/devfs/procfs — avoids ENOSYS probe overhead
-    let chunk_cap = count.min(crate::hal::IO_CHUNK_SIZE);
-    let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve(chunk_cap).is_err() {
-        return -(SyscallErr::ENOMEM as isize);
-    }
-    unsafe { kbuf.set_len(chunk_cap); }
-
-    let mut total = 0usize;
-    while total < count {
-        let want = (count - total).min(chunk_cap);
-        let user_addr = match buf.checked_add(total) {
-            Some(v) => v,
-            None => return if total > 0 { total as isize } else { -(SyscallErr::EFAULT as isize) },
-        };
-        let accessible = match writable_len_for_read(token, user_addr, want) {
-            Ok(n) => n,
-            Err(errno) => return if total > 0 { total as isize } else { errno },
-        };
-
-        let n = match file.read(&mut kbuf[..accessible]) {
-            Ok(n) => n,
-            Err(e) => {
-                let ret = -(e as isize);
-                return if total > 0 { total as isize } else { ret };
-            }
-        };
-        if n == 0 {
-            break;
-        }
-
-        let mut copied = 0usize;
-        while copied < n {
-            let this_addr = user_addr.saturating_add(copied);
-            let page_remain =
-                crate::config::PAGE_SIZE - (this_addr & (crate::config::PAGE_SIZE - 1));
-            let chunk = (n - copied).min(page_remain.max(1));
-            let mut writer = match UserBufferWriter::new(token, this_addr as *mut u8, chunk) {
-                Ok(w) => w,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            let c = match writer.write_from(&kbuf[copied..copied + chunk]) {
-                Ok(c) => c,
-                Err(errno) => {
-                    if copied > 0 { total += copied; }
-                    return if total > 0 { total as isize } else { errno };
-                }
-            };
-            copied += c;
-            if c < chunk { break; }
-        }
-
-        total += copied;
-        if copied < n { break; }
-        if let Some(task) = current_task() {
-            if crate::task::has_actionable_signal(&task) { break; }
-        }
-    }
-    total as isize
-}
+direct: file.read_user(writer.into_user_buffer())
+bounce: n = file.read(kernel_buffer[..accessible])
+        copied = writer.write_from(kernel_buffer[..n])
 ```
 
-direct user buffer 分支用于 inode 声明可直接处理用户 buffer 的对象；bounce buffer 分支用于 pipe、socket、devfs、procfs 等仍走 `File::read(&mut [u8])` 的对象。两条路径都对部分成功作特殊处理，已读字节数优先于后续错误。
+前缀扫描只返回 VA 描述符和长度，不保存 PTE、PA 或用户页 slice，也不跨文件 I/O 持有 VM 锁。
+真正写入用户页时，`UserBuffer` 仍逐页重新取得 VM 锁并校验当前 PTE，因此并发
+`munmap/mprotect/CoW` 不会让构造期翻译变成悬空引用。
+
+direct user buffer 分支用于能直接处理用户 buffer 的 inode；bounce buffer 分支用于 pipe、
+socket、devfs、procfs 等 `File::read(&mut [u8])` 对象。两条路径都以实际完成字节数为准；首字节
+前失败返回 errno，已有前缀完成后再失败则返回 partial count。
 
 ### 3.3 `sys_write`
 

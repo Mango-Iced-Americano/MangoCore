@@ -661,19 +661,19 @@ fn wait_for_default_stop_signal() {
         }
 
         let mut guard = wait_queue.lock();
-        guard.prepare_to_wait(Arc::downgrade(&task));
+        let entry = guard.prepare_to_wait(Arc::downgrade(&task));
         if has_pending_stop_release_signal(&task) {
-            guard.finish_wait(task.as_ref());
+            guard.finish_entry(&entry);
             break;
         }
         drop(task);
 
         block_current_and_run_next_with_lock_checked(guard, |task| {
-            !has_pending_stop_release_signal(task)
+            entry.is_waiting() && !has_pending_stop_release_signal(task)
         });
 
         let task = current_task().unwrap();
-        wait_queue.lock().finish_wait(&task);
+        wait_queue.lock().finish_entry(&entry);
     }
 }
 

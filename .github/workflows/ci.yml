@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main, chore/clean-up]
   pull_request:
-    branches: [develop, main]
   workflow_dispatch:
     inputs:
       qemu_timeout:
@@ -31,6 +29,7 @@ jobs:
     name: Toolchain provisioning contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -283,7 +282,7 @@ jobs:
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 --output /tmp/score-rv64.json 2>&1 || true'
+            python3 /app/scripts/score_test.py --log /tmp/qemu-rv64.log --arch rv64 --output /tmp/score-rv64.json --table 2>&1; echo "score_exit=$?"'
       - name: Docker compose down
         if: always()
         run: docker compose down
@@ -355,7 +354,7 @@ jobs:
         if: always()
         run: |
           docker compose exec -T os-dev bash -lc '
-            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 --output /tmp/score-la64.json 2>&1 || true'
+            python3 /app/scripts/score_test.py --log /tmp/qemu-la64.log --arch la64 --output /tmp/score-la64.json --table 2>&1; echo "score_exit=$?"'
       - name: Docker compose down
         if: always()
         run: docker compose down

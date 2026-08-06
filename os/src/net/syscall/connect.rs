@@ -1,5 +1,6 @@
 use super::common::read_sockaddr;
 use crate::net::socket::UnixEndpoint;
+use crate::net::socket::inet::common::port::{AutoBindPurpose, PortManager};
 use crate::net::Endpoint;
 use crate::syscall::utils::wait_io;
 use crate::task::current_task;
@@ -66,6 +67,15 @@ pub fn sys_connect(sockfd: u32, addr: usize, addrlen: u32) -> isize {
 
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
+
+    if let Err(error) = PortManager::ensure_auto_bound(
+        &task,
+        &socket,
+        Some(&endpoint),
+        AutoBindPurpose::Connect,
+    ) {
+        return -(error as isize);
+    }
 
     let files_ref = task.process.files();
     let is_nonblock = files_ref

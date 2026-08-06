@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 #[cfg(feature = "net_perf_diag")]
 use core::sync::atomic::Ordering as AtomicOrdering;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, Loopback, Medium, TxToken},
@@ -25,6 +25,7 @@ use smoltcp::{
     time::{Duration, Instant},
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
 };
+use spin::Once;
 
 /// 全局网络接口单例，管理短持 route 目录和逐设备 smoltcp 栈。
 ///
@@ -140,7 +141,8 @@ fn record_poll_perf(stack_only: bool, progressed: bool, lock_busy: bool, elapsed
 }
 
 /// 初始化网络子系统。必须先调用 `net_core::init()` 注册 lo/eth0 设备，
-/// 再调用本函数创建对应的 `smoltcp::Interface` 并启动 DHCP 探测。
+/// 再调用本函数创建对应的 `smoltcp::Interface`、注册常驻 DHCP socket
+/// 并发布首轮后台 poll 请求。
 ///
 /// 如果 `NET_DEVICE` 中无网卡，仅启用 loopback。
 pub fn init() {
@@ -158,47 +160,34 @@ pub fn init() {
         crate::net::socket::inet::stream::inner::LISTEN_BUFFER_SIZE
     );
     if has_nic {
-        boot_trace!("[kernel] net interface initialized (RoutingDevice: lo + eth)");
+        boot_trace!("[kernel] net interface initialized (per-device stacks: lo + eth)");
     } else {
         boot_trace!("[kernel] net interface initialized (loopback only, no NIC)");
     }
 }
 
-/// 网络轮询测试钩子触发点（ktest-only，生产 boot 恒为 None）。
+/// 网络轮询 worker 的请求合并与等待域。
 ///
-/// 这些钩子只服务于 net_smp ktest 对竞态窗口的确定性探测，生产路径不得安装；
-/// 每次 ktest 结束后必须通过 `set_test_poll_hook(None)` 清除。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum NetPollTestHookPoint {
-    /// WP1 的历史窗口标记；为既有 ktest ABI 保留，但 WP6 不再触发它。
-    IrqAfterTryLockBeforeDrop,
-    /// IRQ 路径发布 poll generation 前触发。此时尚未修改任意 poll 原子状态。
-    IrqBeforePublish,
-}
-
-/// 网络轮询测试钩子函数类型（ktest 专用）。
-///
-/// 回调运行在 IRQ 路径，禁止加锁、睡眠、分配或打印。
-pub(crate) type NetPollTestHook = fn(NetPollTestHookPoint);
-
-/// 网络轮询 worker 的单调请求序列。
-///
-/// `requested` 与 `completed` 只表达“至少有一次 poll 请求尚未处理”，不记录包数。
-/// IRQ 只能发布 generation 和 deferred 标志；WaitQueue 唤醒必须由任务/idle 安全点完成。
+/// `pending` 是合并门：生产者只在 false -> true 时唤醒 worker；worker 先清门，
+/// 再扫描，从而不会把扫描期间的新请求吞入旧轮。IRQ 只发布原子状态，WaitQueue
+/// 唤醒留给安全点。
 struct NetPollControl {
-    requested: AtomicU64,
-    completed: AtomicU64,
+    pending: AtomicBool,
     deferred_wake: AtomicBool,
-    wait_queue: Mutex<Option<crate::task::WaitQueue>>,
+    /// DeviceStack try_lock 失败只置位；CPU0 下一 scheduler tick 才重新提交。
+    retry_armed: AtomicBool,
+    /// WaitQueue 需要堆分配，因此在 worker 首次运行时构造；`pending` 自身会
+    /// 保存早于初始化到达的请求，不需要为静态对象开启 `const_heap`。
+    worker_wait: Once<Mutex<crate::task::WaitQueue>>,
 }
 
 impl NetPollControl {
     const fn new() -> Self {
         Self {
-            requested: AtomicU64::new(0),
-            completed: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
             deferred_wake: AtomicBool::new(false),
-            wait_queue: Mutex::new(None),
+            retry_armed: AtomicBool::new(false),
+            worker_wait: Once::new(),
         }
     }
 }
@@ -213,27 +202,6 @@ pub struct NetInterface<'a> {
     /// 指向新 socket。
     next_route_id: AtomicUsize,
     poll: NetPollControl,
-    /// ktest 专用轮询钩子（原子编码：0 = None，否则为 `NetPollTestHook` 函数指针地址）。
-    ///
-    /// 生产 boot 恒为 0（None）；`set_test_poll_hook` 可随时安装或清除。
-    /// 使用 `AtomicUsize` 而非普通字段：`set_test_poll_hook(&self)` 需要跨 CPU
-    /// 安全的内驻可变性，且 IRQ 路径读取不得引入新锁。
-    test_poll_hook: AtomicUsize,
-}
-
-impl<'a> NetInterface<'a> {
-    /// 设置/清除 ktest 专用轮询钩子。
-    ///
-    /// 传入 `None` 可清除已安装的钩子。生产 boot 不调用本方法，字段保持 `None`。
-    /// 函数指针以单字原子编码（0 = None），读取端在 IRQ 路径，不引入新锁；
-    /// 回调约束见 `NetPollTestHook`。
-    pub(crate) fn set_test_poll_hook(&self, hook: Option<NetPollTestHook>) {
-        let v = match hook {
-            Some(h) => h as usize,
-            None => 0,
-        };
-        self.test_poll_hook.store(v, Ordering::SeqCst);
-    }
 }
 
 /// 路由目录在 N0 锁域内提供短生命周期查询/发布；不能在该锁下取得 DeviceStack。
@@ -513,7 +481,9 @@ impl<'a> NetDirectory<'a> {
 
             #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
             if has_real_nic {
-                // DHCP probe
+                // QEMU 也使用与 gmac_dhcp 相同的常驻 DHCP 上层语义。启动阶段
+                // 仍处于 IRQ-off 上下文，不在这里 poll VirtIO 并轮询 TX used ring；
+                // 只注册 socket，交给调度器启动后的 CPU0 worker。
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
                     discover_timeout: Duration::from_secs(2),
@@ -522,41 +492,8 @@ impl<'a> NetDirectory<'a> {
                     min_renew_timeout: Duration::from_secs(60),
                     ..dhcpv4::RetryConfig::default()
                 });
-                let dhcp_handle = eth_sockets.add(dhcp_socket);
-                let deadline =
-                    Instant::from_millis(current_time_duration().as_millis() as i64 + 5000);
-
-                loop {
-                    let timestamp =
-                        Instant::from_millis(current_time_duration().as_millis() as i64);
-                    *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = 2;
-                    eth_iface.poll(timestamp, &mut eth_device, &mut eth_sockets);
-
-                    let event = eth_sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-                    match event {
-                        Some(dhcpv4::Event::Configured(cfg)) => {
-                            net_core::set_eth0_ipv4(IpCidr::Ipv4(cfg.address));
-                            net_core::set_default_gateway(cfg.router);
-                            let dns_servers: Vec<_> = cfg.dns_servers.iter().copied().collect();
-                            net_core::set_dns_servers(&dns_servers);
-                            log::info!(
-                                "[net::config] DHCP: got IP {:?} gateway {:?} DNS {:?}",
-                                cfg.address,
-                                cfg.router,
-                                dns_servers
-                            );
-                            break;
-                        }
-                        Some(dhcpv4::Event::Deconfigured) => {}
-                        None => {}
-                    }
-
-                    if timestamp >= deadline {
-                        log::info!("[net::config] DHCP timeout, continuing without IP");
-                        break;
-                    }
-                }
-                eth_sockets.remove(dhcp_handle);
+                runtime_dhcp_handle = Some(eth_sockets.add(dhcp_socket));
+                println!("[net] eth0 DHCP client started (deferred to CPU0 poll worker)");
             }
 
             // Source IP from net_core (DHCP result)
@@ -599,7 +536,10 @@ impl<'a> NetDirectory<'a> {
             );
         }
 
-        log::info!("[net::config] initialized {} stacks", directory.stacks.len());
+        log::info!(
+            "[net::config] initialized {} stacks",
+            directory.stacks.len()
+        );
         directory
     }
 }
@@ -607,6 +547,9 @@ impl<'a> NetDirectory<'a> {
 impl<'a> NetInterface<'a> {
     pub fn init(&self) {
         self._init();
+        // worker 尚未创建时 request_poll() 只保留 pending=true；worker 首次进入
+        // wait_event 的条件复查就会消费它，从而立即发送首个 DHCP Discover。
+        self.request_poll();
     }
 
     pub fn add_socket<T>(&self, ifindex: u32, socket: T) -> Option<SocketHandle>
@@ -624,16 +567,31 @@ impl<'a> NetInterface<'a> {
             directory: Mutex::new(None),
             next_route_id: AtomicUsize::new(1),
             poll: NetPollControl::new(),
-            test_poll_hook: AtomicUsize::new(0),
         }
     }
 
-    /// 从普通任务上下文请求一次网络推进。Release 使 worker 在 Acquire 后观察到
-    /// 请求前已提交的 socket 状态；唤醒不持有 DeviceStack/socket 锁。
-    pub fn kick_from_task(&self) {
-        self.poll.requested.fetch_add(1, Ordering::Release);
-        if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
-            wait_queue.wake_all();
+    /// 返回 worker 唯一的等待队列。只有任务上下文会触发首次构造；请求方若在
+    /// 此前到达，只需保留 `pending=true`，worker 启动后的条件检查会立即消费。
+    fn worker_wait(&self) -> &Mutex<crate::task::WaitQueue> {
+        self.poll
+            .worker_wait
+            .call_once(|| Mutex::new(crate::task::WaitQueue::new()));
+        self.poll
+            .worker_wait
+            .get()
+            .expect("net poll worker wait queue was not initialized")
+    }
+
+    /// 纯异步地请求 CPU0 poll worker 推进网络状态。
+    ///
+    /// `pending` 的 AcqRel test-and-set 同时发布此前的 socket 状态并充当合并门；
+    /// 只有第一个未处理请求需要唤醒已经启动的 worker。
+    /// 调用方不得持有 DeviceStack、socket 或 task.inner 锁。
+    pub fn request_poll(&self) {
+        if !self.poll.pending.swap(true, Ordering::AcqRel) {
+            if let Some(wait_queue) = self.poll.worker_wait.get() {
+                wait_queue.lock().wake_all();
+            }
         }
     }
 
@@ -641,37 +599,26 @@ impl<'a> NetInterface<'a> {
     ///
     /// 此路径不得轮询、拿 WaitQueue、分配或输出；安全点随后把 deferred 标志转换为唤醒。
     fn kick_from_irq(&self) {
-        self.poll.requested.fetch_add(1, Ordering::Release);
-        self.poll.deferred_wake.store(true, Ordering::Release);
-    }
-
-    /// 供 ktest 观察 publish 与 worker consume 的 generation，不改变 poll 状态。
-    pub(crate) fn poll_generation_snapshot(&self) -> (u64, u64) {
-        (
-            self.poll.requested.load(Ordering::Acquire),
-            self.poll.completed.load(Ordering::Acquire),
-        )
+        if !self.poll.pending.swap(true, Ordering::AcqRel) {
+            self.poll.deferred_wake.store(true, Ordering::Release);
+        }
     }
 
     /// 在任务或 idle 安全点把 IRQ 的发布转换为 worker 唤醒。
     pub fn run_deferred_net_wake(&self) {
         if self.poll.deferred_wake.swap(false, Ordering::AcqRel) {
-            if let Some(wait_queue) = self.poll.wait_queue.lock().as_mut() {
-                wait_queue.wake_all();
+            if let Some(wait_queue) = self.poll.worker_wait.get() {
+                wait_queue.lock().wake_all();
             }
         }
     }
 
-    fn run_test_poll_hook(&self, point: NetPollTestHookPoint) {
-        let hook_v = self.test_poll_hook.load(Ordering::SeqCst);
-        if hook_v == 0 {
-            return;
+    /// CPU0 housekeeping 消费一次忙栈 retry。不能从 worker 立即重发请求，
+    /// 否则持续持有 N2 的调用者会让 worker 在内核栈上空转。
+    pub fn run_deferred_poll_retry(&self) {
+        if self.poll.retry_armed.swap(false, Ordering::AcqRel) {
+            self.request_poll();
         }
-        // SAFETY: [Category 5 — Invalid Values] `set_test_poll_hook` 仅写入非空
-        // `NetPollTestHook` 的函数指针位模式，0 单独表示 None；本函数排除了 0，
-        // 因而恢复出的函数指针有效且与写入类型一致。
-        let hook: NetPollTestHook = unsafe { core::mem::transmute(hook_v) };
-        hook(point);
     }
 
     /// 在目录锁内只克隆目标栈 Arc；调用者必须在释放目录后才取得栈锁。
@@ -759,7 +706,9 @@ impl<'a> NetInterface<'a> {
                 return;
             };
             stack.state.store(STACK_DRAINING, Ordering::Release);
-            directory.routes.retain(|_, entry| !entry.stack.ptr_eq(&Arc::downgrade(&stack)));
+            directory
+                .routes
+                .retain(|_, entry| !entry.stack.ptr_eq(&Arc::downgrade(&stack)));
             stack
         };
         // 目录已先撤销全部 route；已取得 stack Arc 的访问者只能在栈锁内看到旧绑定并
@@ -804,7 +753,11 @@ impl<'a> NetInterface<'a> {
         stack.inner.lock().iface.set_mtu(mtu);
     }
 
-    pub fn transmit_on_stack(&self, ifindex: u32, bytes: &[u8]) -> Result<isize, crate::utils::error::SyscallErr> {
+    pub fn transmit_on_stack(
+        &self,
+        ifindex: u32,
+        bytes: &[u8],
+    ) -> Result<isize, crate::utils::error::SyscallErr> {
         let stack = self
             .stack_arc(ifindex)
             .ok_or(crate::utils::error::SyscallErr::ENETDOWN)?;
@@ -854,11 +807,6 @@ impl<'a> NetInterface<'a> {
         Some(f(socket))
     }
 
-    /// 兼容旧 ktest 的目录临界区入口；禁止从闭包进入 smoltcp 或取得 DeviceStack 锁。
-    pub(crate) fn inner_handler<T>(&self, f: impl FnOnce(&mut NetDirectory<'a>) -> T) -> Option<T> {
-        Some(f(self.directory.lock().as_mut()?))
-    }
-
     /// Return the ifindex of every currently-registered DeviceStack.
     pub fn stack_ifindexes(&self) -> Vec<u32> {
         self.directory
@@ -894,22 +842,11 @@ impl<'a> NetInterface<'a> {
         (tcp, udp, raw, pending)
     }
 
-    pub fn poll(&self) {
-        self.kick_from_task();
-    }
-
-    /// 兼容旧调用方的 task-context kick。真实 smoltcp 推进只由 poll worker 完成。
-    pub fn try_poll(&self) -> bool {
-        self.kick_from_task();
-        true
-    }
-
     /// Hard-IRQ publish-only network kick。
     ///
-    /// 此函数的上界仅为两个原子 store 与可选 ktest hook；不得触碰目录、
-    /// DeviceStack、WaitQueue 或 smoltcp 锁。
+    /// 此函数的上界仅为两个原子更新；不得触碰目录、DeviceStack、WaitQueue
+    /// 或 smoltcp 锁。
     pub fn try_poll_irq(&self) -> bool {
-        self.run_test_poll_hook(NetPollTestHookPoint::IrqBeforePublish);
         self.kick_from_irq();
         true
     }
@@ -922,9 +859,9 @@ impl<'a> NetInterface<'a> {
         let mut stack_guard = match stack.inner.try_lock() {
             Some(guard) => guard,
             None => {
-                // 某个 DeviceStack 忙时不能阻塞 worker；重新发布 generation，使本轮
-                // 已完成的其它 stack 不受影响，且该 stack 在锁释放后必定获得重试。
-                self.kick_from_task();
+                // N2 忙时 worker 只记录下一 scheduler tick 的 retry，不能在此处重发
+                // ticket；否则同一忙栈会驱动 worker 紧循环并饿死真正的锁持有者。
+                self.poll.retry_armed.store(true, Ordering::Release);
                 crate::task::perf::record_net_poll(false, true);
                 #[cfg(feature = "net_perf_diag")]
                 record_poll_perf(true, false, true, 0);
@@ -1013,16 +950,24 @@ impl<'a> NetInterface<'a> {
         }
     }
 
+    /// 在当前任务上下文执行一次不等待的网络扫描。
+    ///
+    /// 该入口只用于 `O_NONBLOCK` 与零超时查询：每个 DeviceStack 都通过
+    /// `try_lock()` 获取，忙栈只登记下一 tick 重试，因此调用时间有结构化上界。
+    /// 调用方不得持有 socket、DeviceStack、fd table 或 EventWaitQueue 锁。
+    pub fn poll_now(&self) {
+        self.poll_each_stack_bounded();
+    }
+
     /// CPU0 专属的网络轮询 worker。
     ///
-    /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；这里不再修改
-    /// 运行期 affinity。`completed` 只写入本轮开始取得的 target，防止 poll 中的新
-    /// 请求被旧轮次吞掉。
+    /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；每次醒来最多
+    /// 消费两轮 pending 请求。第一轮清门后到来的请求由第二轮处理；第二轮之后
+    /// 仍有新请求则保留 pending，交还 scheduler 后重新走等待协议，不在此处自旋。
     pub fn net_poll_worker(&self) {
-        let mut observed = self.poll.completed.load(Ordering::Acquire);
         loop {
-            match crate::task::WaitQueue::wait_event_interruptible_lazy(&self.poll.wait_queue, || {
-                (self.poll.requested.load(Ordering::Acquire) != observed).then_some(0isize)
+            match crate::task::WaitQueue::wait_event_interruptible(self.worker_wait(), || {
+                self.poll.pending.load(Ordering::Acquire).then_some(0isize)
             }) {
                 crate::task::WaitResult::Ready(_) => {}
                 crate::task::WaitResult::Interrupted => {
@@ -1036,328 +981,24 @@ impl<'a> NetInterface<'a> {
                 crate::task::WaitResult::TimedOut => {}
             }
 
-            loop {
-                let target = self.poll.requested.load(Ordering::Acquire);
-                self.poll_each_stack_bounded();
-                self.poll.completed.store(target, Ordering::Release);
-                observed = target;
-                if self.poll.requested.load(Ordering::Acquire) == target {
+            for _ in 0..2 {
+                // AcqRel 清门与 producer 的 AcqRel test-and-set 配对：清门后的新
+                // 提交必定重新置 pending，因而不会丢失下一轮扫描请求。
+                if !self.poll.pending.swap(false, Ordering::AcqRel) {
                     break;
                 }
+                // kernel worker 从调度器的 IRQ-off 边界进入。smoltcp 可能同步
+                // 提交 VirtIO TX 并轮询 used ring，不应在整个等待期间屏蔽 timer/IPI。
+                // hard IRQ 仍只发布原子 pending/deferred 状态，不会重入
+                // DeviceStack、VirtIO 或 WaitQueue 锁域。
+                crate::hal::with_local_interrupts_enabled(|| self.poll_each_stack_bounded());
+                // 受控窗口已关闭，且本轮所有网络锁均已释放；在此统一兑现窗口内
+                // 累积的 timer/IPI 调度请求，禁止在网络临界区中途切换任务。
+                crate::task::run_task_safe_point();
             }
         }
     }
 
-    pub fn _poll(&self) {
-        self.kick_from_task();
-    }
-
-    #[cfg(any())]
-    /// Non-blocking poll ONLY the specified stack (by ifindex).
-    /// Skips remove-list draining and accept scanning — those are handled by
-    /// the periodic full poll in the idle loop.
-    pub fn try_poll_stack(&self, ifindex: u32) -> bool {
-        let mut guard = match self.inner.try_lock() {
-            Some(g) => g,
-            None => {
-                crate::task::perf::record_net_poll(false, true);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(true, false, true, 0);
-                return false;
-            }
-        };
-        let inner = match guard.as_mut() {
-            Some(i) => i,
-            None => {
-                crate::task::perf::record_net_poll(false, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(true, false, false, 0);
-                return false;
-            }
-        };
-        let stack = match inner.stack_mut(ifindex) {
-            Some(s) => s,
-            None => {
-                crate::task::perf::record_net_poll(false, false);
-                #[cfg(feature = "net_perf_diag")]
-                record_poll_perf(true, false, false, 0);
-                return false;
-            }
-        };
-
-        use crate::net::neighbour::CURRENT_POLL_IFINDEX;
-        use crate::net::socket::inet::datagram::udp::dispatch_udp_packets;
-        use smoltcp::time::Instant;
-
-        *CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
-
-        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
-        #[cfg(feature = "net_perf_diag")]
-        let poll_start = crate::hal::get_time();
-        let mut progressed = stack.iface.poll(now, &mut stack.device, &mut stack.sockets);
-        progressed |= capture_dhcp_event(stack);
-        let dhcp_event = stack
-            .pending_dhcp_event
-            .take()
-            .map(|event| (ifindex, event));
-        dispatch_udp_packets(&mut stack.sockets);
-        drop(guard);
-
-        if let Some((ifindex, event)) = dhcp_event {
-            commit_dhcp_event(ifindex, event);
-        }
-
-        if progressed {
-            crate::net::wake_tcp_waiters();
-            crate::net::wake_raw_waiters();
-        }
-        crate::task::perf::record_net_poll(progressed, false);
-        crate::net::wake_tcp_accept_waiters();
-        #[cfg(feature = "net_perf_diag")]
-        record_poll_perf(
-            true,
-            progressed,
-            false,
-            crate::hal::get_time().wrapping_sub(poll_start),
-        );
-        progressed
-    }
-
-    #[cfg(any())]
-    fn old_poll_once(&self, commit_dhcp: bool) -> bool {
-        let mut progressed = false;
-        let mut dhcp_events = Vec::new();
-        self.inner_handler(|inner| {
-            // Pre-collect all removal handles with their ifindex
-            let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
-                let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove
-                    .drain(..)
-                    .map(|rh| {
-                        let ifindex = inner
-                            .bindings
-                            .get(&rh)
-                            .map(|b| b.ifindex)
-                            .or_else(|| {
-                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
-                            })
-                            .unwrap_or(1);
-                        (inner.resolve(rh), ifindex, rh)
-                    })
-                    .collect()
-            };
-            let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
-                let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove
-                    .drain(..)
-                    .map(|rh| {
-                        let ifindex = inner
-                            .bindings
-                            .get(&rh)
-                            .map(|b| b.ifindex)
-                            .or_else(|| {
-                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
-                            })
-                            .unwrap_or(1);
-                        (inner.resolve(rh), ifindex, rh)
-                    })
-                    .collect()
-            };
-
-            for stack in inner.stacks.iter_mut() {
-                // Set the current poll ifindex so ARP interceptors
-                // can tag neighbour entries with the correct interface.
-                *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
-
-                // 1. Clean up UDP sockets belonging to this stack
-                for (resolved, ifindex, rh) in &udp_removes {
-                    if *ifindex as usize == stack.nic.nic_id() {
-                        if let Some(h) = resolved {
-                            stack.sockets.remove(*h);
-                        }
-                        inner.bindings.remove(rh);
-                    }
-                }
-
-                // 1.5. Deliver raw frames to packet sockets before smoltcp consumes them
-                {
-                    let nic_id = stack.nic.nic_id() as u32;
-                    if let IfaceDevice::Veth(ref veth_driver) = stack.device {
-                        let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(
-                            nic_id, &rx_queue,
-                        );
-                    }
-                }
-
-                // 2. Drive protocol stack
-                let timestamp = Instant::from_millis(current_time_duration().as_millis() as i64);
-                progressed |= stack
-                    .iface
-                    .poll(timestamp, &mut stack.device, &mut stack.sockets);
-                if capture_dhcp_event(stack) {
-                    progressed = true;
-                }
-                if commit_dhcp {
-                    if let Some(event) = stack.pending_dhcp_event.take() {
-                        dhcp_events.push((stack.nic.nic_id() as u32, event));
-                    }
-                }
-
-                // 3. Clean up TCP sockets belonging to this stack
-                for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() {
-                        continue;
-                    }
-                    let can_remove = match resolved {
-                        Some(h) => {
-                            let socket = stack.sockets.get::<tcp::Socket>(*h);
-                            socket.state() == tcp::State::Closed
-                        }
-                        None => true,
-                    };
-                    if can_remove {
-                        if let Some(h) = resolved {
-                            stack.sockets.remove(*h);
-                        }
-                        inner.bindings.remove(rh);
-                    } else {
-                        TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
-                    }
-                }
-
-                // 4. Dispatch UDP packets for this stack
-                dispatch_udp_packets(&mut stack.sockets);
-            }
-        });
-        for (ifindex, event) in dhcp_events {
-            commit_dhcp_event(ifindex, event);
-        }
-        // 5. 更新所有 TCP/RAW socket 事件并唤醒等待者
-        if progressed {
-            crate::net::wake_tcp_waiters();
-            crate::net::wake_raw_waiters();
-        }
-
-        // Unconditional listener accept scan — catches new connections
-        // even when smoltcp didn't report poll progress.
-        crate::net::wake_tcp_accept_waiters();
-
-        progressed
-    }
-
-    pub fn poll_until_quiescent(&self) {
-        while self.try_poll() {
-            // 继续推进，直到没有数据可处理
-            crate::task::try_yield(); // 可选：避免占着 CPU 不放
-        }
-    }
-    #[cfg(any())]
-    pub fn old_poll(&self) {
-        log::trace!("[NetInterface::poll] poll...");
-        self.inner_handler(|inner| {
-            let udp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
-                let mut to_remove = UDP_SOCKETS_TO_REMOVE.lock();
-                to_remove
-                    .drain(..)
-                    .map(|rh| {
-                        let ifindex = inner
-                            .bindings
-                            .get(&rh)
-                            .map(|b| b.ifindex)
-                            .or_else(|| {
-                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
-                            })
-                            .unwrap_or(1);
-                        (inner.resolve(rh), ifindex, rh)
-                    })
-                    .collect()
-            };
-            let tcp_removes: Vec<(Option<SocketHandle>, u32, RouteSocketHandle)> = {
-                let mut to_remove = TCP_SOCKETS_TO_REMOVE.lock();
-                to_remove
-                    .drain(..)
-                    .map(|rh| {
-                        let ifindex = inner
-                            .bindings
-                            .get(&rh)
-                            .map(|b| b.ifindex)
-                            .or_else(|| {
-                                crate::net::net_core::find_by_name("eth0").map(|d| d.ifindex)
-                            })
-                            .unwrap_or(1);
-                        (inner.resolve(rh), ifindex, rh)
-                    })
-                    .collect()
-            };
-
-            for stack in inner.stacks.iter_mut() {
-                for (resolved, ifindex, rh) in &udp_removes {
-                    if *ifindex as usize == stack.nic.nic_id() {
-                        if let Some(h) = resolved {
-                            stack.sockets.remove(*h);
-                        }
-                        inner.bindings.remove(rh);
-                    }
-                }
-
-                *crate::net::neighbour::CURRENT_POLL_IFINDEX.lock() = stack.nic.nic_id() as u32;
-
-                // Deliver raw frames to packet sockets before smoltcp consumes them
-                {
-                    let nic_id = stack.nic.nic_id() as u32;
-                    if let IfaceDevice::Veth(ref veth_driver) = stack.device {
-                        let rx_queue = veth_driver.inner.rx_queue.lock();
-                        crate::net::socket::packet::deliver_frames_from_veth_queue(
-                            nic_id, &rx_queue,
-                        );
-                    }
-                }
-
-                stack.iface.poll(
-                    Instant::from_millis(current_time_duration().as_millis() as i64),
-                    &mut stack.device,
-                    &mut stack.sockets,
-                );
-
-                for (resolved, ifindex, rh) in &tcp_removes {
-                    if *ifindex as usize != stack.nic.nic_id() {
-                        continue;
-                    }
-                    let can_remove = match resolved {
-                        Some(h) => {
-                            let socket = stack.sockets.get::<tcp::Socket>(*h);
-                            socket.state() == tcp::State::Closed
-                                || socket.state() == tcp::State::TimeWait
-                        }
-                        None => true,
-                    };
-                    if can_remove {
-                        if let Some(h) = resolved {
-                            stack.sockets.remove(*h);
-                        }
-                        inner.bindings.remove(rh);
-                    } else {
-                        TCP_SOCKETS_TO_REMOVE.lock().push(*rh);
-                    }
-                }
-
-                dispatch_udp_packets(&mut stack.sockets);
-            }
-        });
-        // poll 结束后同步所有 TCP socket 的 IO 事件到 pollee（对标 DragonOS on_iface_events）
-        {
-            let sockets = crate::net::TCP_SOCKETS.lock();
-            for weak in sockets.iter() {
-                if let Some(socket) = weak.upgrade() {
-                    socket.update_io_events();
-                }
-            }
-        }
-        // poll 结束后唤醒所有 TCP/RAW socket 的等待队列
-        crate::net::wake_tcp_waiters();
-        crate::net::wake_raw_waiters();
-    }
     /// 旧的直接 SocketHandle API 只服务于未路由内部 socket；公开 Inet socket 必须
     /// 使用 route ID，从而在 DeviceStack 内重验绑定。
     pub fn remove(&self, handler: SocketHandle, ifindex: u32) {
@@ -1368,10 +1009,6 @@ impl<'a> NetInterface<'a> {
         let removed = stack_guard.sockets.remove(handler);
         drop(stack_guard);
         drop(removed);
-    }
-
-    pub fn _remove(&self, handler: SocketHandle, ifindex: u32) {
-        self.remove(handler, ifindex);
     }
 
     fn add_routed_socket_on_stack<T>(
@@ -1389,32 +1026,43 @@ impl<'a> NetInterface<'a> {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .ok()?,
         );
-        let handle = {
+        {
             let mut inner = stack.inner.lock();
             if stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
                 return None;
             }
             let handle = inner.sockets.add(socket);
-            inner.bindings.insert(route, LocalSocketBinding { handle, protocol: proto });
-            handle
-        };
+            inner.bindings.insert(
+                route,
+                LocalSocketBinding {
+                    handle,
+                    protocol: proto,
+                },
+            );
+        }
         let published = {
             let mut directory = self.directory.lock();
-            let directory = directory.as_mut()?;
-            let current = directory.stacks.get(&ifindex)?;
-            if !Arc::ptr_eq(current, &stack) || stack.state.load(Ordering::Acquire) != STACK_ACTIVE {
-                false
-            } else {
-                directory.routes.insert(
-                    route,
-                    RouteDirectoryEntry {
-                        stack: Arc::downgrade(&stack),
-                        protocol: proto,
-                        state: RouteState::Active,
-                    },
-                );
-                true
+            let mut published = false;
+            if let Some(directory) = directory.as_mut() {
+                if let Some(current) = directory.stacks.get(&ifindex) {
+                    // local binding 建立期间设备可能被另一个 CPU 删除再重建；只有目录
+                    // 中仍是同一个栈且状态仍为 ACTIVE，才允许把 route 发布给读者。
+                    if Arc::ptr_eq(current, &stack)
+                        && stack.state.load(Ordering::Acquire) == STACK_ACTIVE
+                    {
+                        directory.routes.insert(
+                            route,
+                            RouteDirectoryEntry {
+                                stack: Arc::downgrade(&stack),
+                                protocol: proto,
+                                state: RouteState::Active,
+                            },
+                        );
+                        published = true;
+                    }
+                }
             }
+            published
         };
         if published {
             return Some(route);
@@ -1429,7 +1077,6 @@ impl<'a> NetInterface<'a> {
                 .map(|binding| inner.sockets.remove(binding.handle))
         };
         drop(removed);
-        let _ = handle;
         None
     }
 
@@ -1437,7 +1084,9 @@ impl<'a> NetInterface<'a> {
     where
         T: AnySocket<'a>,
     {
-        let ifindex = net_core::default_iface().map(|iface| iface.ifindex).unwrap_or(1);
+        let ifindex = net_core::default_iface()
+            .map(|iface| iface.ifindex)
+            .unwrap_or(1);
         self.add_routed_socket_on_stack(proto, socket, ifindex)
     }
 
@@ -1509,7 +1158,11 @@ impl<'a> NetInterface<'a> {
         }
         let DeviceStackInner { iface, sockets, .. } = &mut *inner;
         let context = iface.context();
-        Some(sockets.get_mut::<tcp::Socket>(binding.handle).connect(context, remote, local))
+        Some(
+            sockets
+                .get_mut::<tcp::Socket>(binding.handle)
+                .connect(context, remote, local),
+        )
     }
 
     pub fn remove_routed(&self, route: RouteSocketHandle) {
@@ -1616,183 +1269,9 @@ impl<'a> NetInterface<'a> {
         let _ = target_handle;
         Some(route)
     }
-
-    #[cfg(any())]
-    pub fn old_remove(&self, handler: SocketHandle, ifindex: u32) {
-        self._remove(handler, ifindex)
-    }
-    #[cfg(any())]
-    pub fn old_remove_inner_legacy(&self, handler: SocketHandle, ifindex: u32) {
-        if let Some(inner) = self.inner.lock().as_mut() {
-            if let Some(stack) = inner.stack_mut(ifindex) {
-                stack.sockets.remove(handler);
-            }
-        }
-    }
-
-    #[cfg(any())]
-    pub fn old_add_routed_socket_legacy<T>(&self, proto: InetProtocol, socket: T) -> Option<RouteSocketHandle>
-    where
-        T: AnySocket<'a>,
-    {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let target_ifindex = net_core::default_iface().map(|d| d.ifindex).unwrap_or(1);
-        let stack = inner_ref.stack_mut(target_ifindex)?;
-        let handle = stack.sockets.add(socket);
-        let id = inner_ref.next_socket_id;
-        inner_ref.next_socket_id += 1;
-        let route_handle = RouteSocketHandle(id);
-        inner_ref.bindings.insert(
-            route_handle,
-            SocketBinding {
-                ifindex: target_ifindex,
-                handle,
-                proto,
-            },
-        );
-        Some(route_handle)
-    }
-
-    #[cfg(any())]
-    pub fn old_add_routed_socket_on_legacy<T>(
-        &self,
-        proto: InetProtocol,
-        socket: T,
-        ifindex: u32,
-    ) -> Option<RouteSocketHandle>
-    where
-        T: AnySocket<'a>,
-    {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let stack = inner_ref.stack_mut(ifindex)?;
-        let handle = stack.sockets.add(socket);
-        let id = inner_ref.next_socket_id;
-        inner_ref.next_socket_id += 1;
-        let route_handle = RouteSocketHandle(id);
-        inner_ref.bindings.insert(
-            route_handle,
-            SocketBinding {
-                ifindex,
-                handle,
-                proto,
-            },
-        );
-        Some(route_handle)
-    }
-
-    #[cfg(any())]
-    pub fn old_tcp_routed_socket_legacy<T>(
-        &self,
-        rh: RouteSocketHandle,
-        f: impl FnOnce(&mut tcp::Socket) -> T,
-    ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let binding = *inner_ref.bindings.get(&rh)?;
-        let stack = inner_ref.stack_mut(binding.ifindex)?;
-        let socket = stack.sockets.get_mut::<tcp::Socket>(binding.handle);
-        Some(f(socket))
-    }
-
-    #[cfg(any())]
-    pub fn old_udp_routed_socket_legacy<T>(
-        &self,
-        rh: RouteSocketHandle,
-        f: impl FnOnce(&mut udp::Socket) -> T,
-    ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let binding = *inner_ref.bindings.get(&rh)?;
-        let stack = inner_ref.stack_mut(binding.ifindex)?;
-        let socket = stack.sockets.get_mut::<udp::Socket>(binding.handle);
-        Some(f(socket))
-    }
-
-    #[cfg(any())]
-    pub fn old_tcp_connect_legacy(
-        &self,
-        rh: RouteSocketHandle,
-        remote: smoltcp::wire::IpEndpoint,
-        local: smoltcp::wire::IpEndpoint,
-    ) -> Option<Result<(), smoltcp::socket::tcp::ConnectError>> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let binding = *inner_ref.bindings.get(&rh)?;
-        let stack = inner_ref.stack_mut(binding.ifindex)?;
-        let socket = stack.sockets.get_mut::<tcp::Socket>(binding.handle);
-        Some(socket.connect(stack.iface.context(), remote, local))
-    }
-
-    #[cfg(any())]
-    pub fn old_remove_routed(&self, rh: RouteSocketHandle) {
-        let mut inner = self.inner.lock();
-        if let Some(inner_ref) = inner.as_mut() {
-            let binding = inner_ref.bindings.remove(&rh);
-            if let Some(b) = binding {
-                if let Some(stack) = inner_ref.stack_mut(b.ifindex) {
-                    stack.sockets.remove(b.handle);
-                }
-            }
-        }
-    }
-
-    #[cfg(any())]
-    pub fn old_rebind_routed_udp(
-        &self,
-        rh: RouteSocketHandle,
-        new_ifindex: u32,
-    ) -> Option<RouteSocketHandle> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let old_binding = inner_ref.bindings.remove(&rh)?;
-        if old_binding.ifindex == new_ifindex {
-            inner_ref.bindings.insert(rh, old_binding);
-            return Some(rh);
-        }
-        let rx_buf = udp::PacketBuffer::new(
-            vec![udp::PacketMetadata::EMPTY; 1024],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let tx_buf = udp::PacketBuffer::new(
-            vec![udp::PacketMetadata::EMPTY; 1024],
-            vec![0u8; crate::net::MAX_BUFFER_SIZE],
-        );
-        let new_socket = udp::Socket::new(rx_buf, tx_buf);
-        {
-            let old_stack = inner_ref.stack_mut(old_binding.ifindex)?;
-            old_stack.sockets.remove(old_binding.handle);
-        }
-        let new_stack = inner_ref.stack_mut(new_ifindex)?;
-        let new_handle = new_stack.sockets.add(new_socket);
-        inner_ref.bindings.insert(
-            rh,
-            SocketBinding {
-                ifindex: new_ifindex,
-                handle: new_handle,
-                proto: InetProtocol::Udp,
-            },
-        );
-        Some(rh)
-    }
-
-    #[cfg(any())]
-    pub fn old_raw_routed_socket<T>(
-        &self,
-        rh: RouteSocketHandle,
-        f: impl FnOnce(&mut raw::Socket) -> T,
-    ) -> Option<T> {
-        let mut inner = self.inner.lock();
-        let inner_ref = inner.as_mut()?;
-        let binding = *inner_ref.bindings.get(&rh)?;
-        let stack = inner_ref.stack_mut(binding.ifindex)?;
-        let socket = stack.sockets.get_mut::<raw::Socket>(binding.handle);
-        Some(f(socket))
-    }
 }
 
-/// 内核任务入口：由 boot 在创建期固定到 CPU0，随后永久消费 poll generation。
+/// 内核任务入口：由 boot 在创建期固定到 CPU0，随后永久消费合并后的 poll 请求。
 pub fn net_poll_worker() {
     NET_INTERFACE.net_poll_worker()
 }

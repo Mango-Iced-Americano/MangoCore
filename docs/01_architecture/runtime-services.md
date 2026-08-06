@@ -3,7 +3,7 @@ title: "运行期服务 (Runtime Services)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-04
 tags: [architecture, runtime, trace, timer]
 ---
 
@@ -141,10 +141,11 @@ let should_poll_console = true;
 schedule_tick += 1
 console poll                       [rv64 每 64 tick，其他架构每 tick]
 do_wake_expired()
-NET_INTERFACE.try_poll()           [每 64 tick]
+NET_INTERFACE.run_deferred_poll_retry() [每 tick]
+NET_INTERFACE.request_poll()       [每 64 tick]
 fs::reclaim::maybe_reclaim_fs_caches()
 zombie queue drain
-stale zombie cleanup + queue stats [每 64 tick]
+task queue stats [每 64 tick]
 threads::compact_shared_futex()
 fetch_task()
 switch or idle
@@ -154,10 +155,11 @@ switch or idle
 
 | 场景 | 行为 |
 |------|------|
-| 有调度循环进展 | 每 `BACKGROUND_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.try_poll()` |
-| 没有 ready task | 每 `IDLE_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.poll()`，否则 `spin_loop()` |
+| 有调度循环进展 | 每 tick 消费 retry 位；每 `BACKGROUND_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()` |
+| 没有 ready task | 每 `IDLE_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()`，否则 `spin_loop()` |
 
-后台 poll 使用 `try_poll()` 避免阻塞在网络接口锁上；idle 路径允许调用 `poll()` 驱动网络进展。
+housekeeping 只异步 request；真正的 smoltcp 推进固定由 CPU0 poll worker 执行。
+忙栈 retry 延后一整个 scheduler tick，避免 worker 在内核栈上空转。
 
 ### 4.2 timeout 唤醒
 
@@ -171,7 +173,9 @@ switch or idle
 
 退出任务先进入专用 zombie 队列。调度循环发现 `has_zombie_queue_tasks_fast()` 后，批量取出最多 64 个 zombie 并 drop，避免不可运行的 TCB 留在 ready queue。
 
-每 64 tick 还会执行兜底清理：从 ready 和 interruptible 队列各尝试取出 zombie，并记录 ready/interruptible/zombie/nonzero nice 统计。
+每 64 tick 记录 ready/interruptible 长度、runqueue zombie 不变量诊断和 nonzero nice
+统计，不再获取全局 `TaskManager` 锁扫描 interruptible zombie。终态 TCB 只有
+Per-CPU `local_zombies` 一种容器 owner。
 
 ### 4.5 shared futex compact
 
@@ -193,7 +197,8 @@ panic 路径使用不阻塞的 `try_current_task()`；CPU-local 尚未安装或 
 `noreturn` 返回路径前显式释放，因为 context switch 不会展开旧 Rust 栈帧。
 
 B56 的 `CpuDiagnostics` 逐核汇总 online/scheduler/STOP、current PID/TID、runqueue 与
-zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack。任务侧字段是
+zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack。B91 又补充
+每 CPU context switch、实际 migration、成功 steal 和 runqueue peak。任务侧字段是
 原子 hint；active MM 只尝试取得 `active_user_vm` 槽锁，锁忙时输出 `busy=1`。这些值来自
 不同时间点，只用于事后诊断，不能替代 current/runqueue/MM 锁内的所有权判断。
 
@@ -268,14 +273,17 @@ CPU 状态只读原子字段和一次 active-MM `try_lock()`；整条诊断链�
 | 日志没有输出 | `console::log_init()`、`LOG` 环境变量、HAL console |
 | Ctrl+T 无效 | `run_tasks()` console poll、`trace::check_magic_key()` |
 | TTY 丢字符 | `trace::stash_char()`、`CharStash` 容量和 TTY reader |
-| 网络不进展 | `BACKGROUND_NET_POLL_INTERVAL`、idle `NET_INTERFACE.poll()` |
+| 网络不进展 | poll worker、`pending/deferred_wake`、后台 `request_poll()` |
 | timeout 不醒 | `do_wake_expired()`、timer interrupt handler |
-| zombie 堆积 | zombie queue drain、stale zombie cleanup |
+| zombie 堆积 | zombie queue drain、Per-CPU zombie 计数 |
 | perf 无计数 | `perf_stats` feature 和 `STATS_ON` |
 
-运行期服务大多没有独立内核线程，而是挂在调度循环、trap 返回或 syscall 公共路径上。trace 事件在 syscall 入口记录，timer 到期在调度循环和中断路径推进，网络 poll 在调度循环降频执行，PageCache reclaim 也通过调度循环合作式调用。调试运行期服务时要先确认触发点是否被执行，再看服务内部状态。
+运行期服务多数挂在调度循环、trap 返回或 syscall 公共路径上；网络 poll 是例外，
+由 CPU0 独立内核 worker 执行，调度循环只负责异步 kick 与忙栈 retry。PageCache
+reclaim 仍通过调度循环合作式调用。调试时应先确认生产者是否发布请求，再检查
+worker 是否获得运行机会和目标栈锁。
 
-例如 timeout 不醒不能只看 `KernelTimerQueue` 是否插入了 timer，还要看 timer interrupt 是否推进时间、`do_wake_expired()` 是否在调度循环执行、等待任务是否仍在 interruptible queue。网络不进展也不能只看 socket 对象，还要看网卡是否初始化、`NET_INTERFACE.try_poll()` 是否周期执行、idle 分支是否调用 `NET_INTERFACE.poll()`。
+例如 timeout 不醒不能只看 `KernelTimerQueue` 是否插入了 timer，还要看 timer interrupt 是否推进时间、`do_wake_expired()` 是否在调度循环执行、等待任务是否仍在 interruptible queue。网络不进展也不能只看 socket 对象，还要看网卡是否初始化、请求是否发布、deferred wake 是否在安全点领取，以及 CPU0 worker 是否推进对应 DeviceStack。
 
 ## 11. 测试映射
 

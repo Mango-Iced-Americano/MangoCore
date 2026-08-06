@@ -41,6 +41,8 @@ SECTIONS
     sbss_with_stack = .;
     .bss : {
         *(.bss.stack)
+        /* FDT 快照必须躲过 BSP 的 sbss..ebss 清零。 */
+        *(.bss.boot)
         sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)

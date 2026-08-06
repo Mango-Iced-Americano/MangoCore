@@ -13,6 +13,10 @@ use alloc::vec::Vec;
 /// Returns all mm-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
     vec![
+        KernelTest::new(
+            "mm::firmware_memory_reaches_allocator",
+            test_firmware_memory_reaches_allocator,
+        ),
         KernelTest::new("mm::alloc_free_one_page", test_alloc_free_one_page),
         KernelTest::new("mm::alloc_contiguous_pages", test_alloc_contiguous_pages),
         KernelTest::new(
@@ -28,6 +32,41 @@ pub fn tests() -> Vec<KernelTest> {
             test_shared_futex_pin_blocks_reclaim,
         ),
     ]
+}
+
+/// 验证运行期固件拓扑已经贯穿 RAM 判定和内核恒等映射元数据。
+///
+/// 该测试在默认 1 GiB 配置下同样有效；当 `QEMU_MEMORY=8G` 使固件末端超过
+/// 编译期 `MEMORY_END` 时，还会明确证明静态上界之外的最后一个可用页已被接入。
+fn test_firmware_memory_reaches_allocator() -> Result<(), &'static str> {
+    let mut last_usable = None;
+    crate::hal::firmware::for_each_usable_ram_range(&[], |start, end| {
+        last_usable = Some((start, end));
+    });
+    let (_, usable_end) = last_usable.ok_or("firmware published no usable RAM")?;
+    let probe_addr = usable_end
+        .checked_sub(PAGE_SIZE)
+        .ok_or("last usable RAM range is smaller than one page")?;
+    if !mm::is_ram_phys_addr(probe_addr) || !mm::is_allocatable_ram_phys_addr(probe_addr) {
+        return Err("last firmware RAM page is not allocatable");
+    }
+
+    let probe_ppn = mm::PhysAddr::from(probe_addr).floor();
+    if mm::KERNEL_SPACE.lock().is_dirty(probe_ppn).is_none() {
+        return Err("last firmware RAM page lacks kernel mapping metadata");
+    }
+
+    let total = crate::hal::firmware::usable_memory_size();
+    if total / 1024 != mm::total_memory_kbytes() {
+        return Err("ABI memory total differs from firmware usable RAM");
+    }
+    crate::println!(
+        "[memory-test] usable={} MiB highest_page={:#x} dynamic_above_static={}",
+        total / (1024 * 1024),
+        probe_addr,
+        usable_end > crate::config::MEMORY_END,
+    );
+    Ok(())
 }
 
 /// 共享 futex 的 resident-frame key 依赖队列 pin 保持身份稳定。

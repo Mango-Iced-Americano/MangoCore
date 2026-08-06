@@ -32,7 +32,7 @@ pub static NEIGHBOUR_TABLE: Mutex<BTreeMap<(u32, IpAddress), NeighbourEntry>> =
     Mutex::new(BTreeMap::new());
 
 /// The ifindex of the device stack currently being polled by smoltcp.
-/// Set by [`crate::net::config::NetInterface::poll_once`] before each stack poll.
+/// Set by the per-stack poll path before entering smoltcp.
 /// Used by the adapter layer to tag received ARP replies with the correct ifindex.
 pub static CURRENT_POLL_IFINDEX: Mutex<u32> = Mutex::new(0);
 
