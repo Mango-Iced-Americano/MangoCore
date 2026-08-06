@@ -16,6 +16,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::fs::vfs::event::EventWaitQueue;
 use crate::fs::vfs::{self, FileFlags};
 use crate::mm::{UserBufferWriter, UserPtrMut};
 use crate::net::{Endpoint, Socket, SocketFile, PSOCK};
@@ -100,7 +101,7 @@ pub fn create_unix_socket(
     is_nonblock: bool,
 ) -> Result<Arc<dyn Socket>, SyscallErr> {
     match socket_type {
-        PSOCK::Stream => {
+        PSOCK::Stream | PSOCK::SeqPacket => {
             let socket: Arc<dyn Socket> = Arc::new(stream::UnixStreamSocket::new(is_nonblock));
             Ok(socket)
         }
@@ -125,16 +126,22 @@ pub fn make_unix_socket_pair(
     socket_type: PSOCK,
 ) -> (Arc<dyn Socket>, Arc<dyn Socket>) {
     match socket_type {
-        PSOCK::Stream => {
+        PSOCK::Stream | PSOCK::SeqPacket => {
             let (inner_a, inner_b) =
                 stream::inner::Connected::new_pair(stream::inner::UNIX_STREAM_DEFAULT_BUF_SIZE);
-            let socket_a = Arc::new(stream::UnixStreamSocket::new_connected(
+            let recv_waiter_a = Arc::new(EventWaitQueue::new());
+            let recv_waiter_b = Arc::new(EventWaitQueue::new());
+            let socket_a = Arc::new(stream::UnixStreamSocket::new_connected_with_peer_waiter(
                 inner_a,
                 is_nonblock,
+                recv_waiter_a,
+                Arc::downgrade(&recv_waiter_b),
             ));
-            let socket_b = Arc::new(stream::UnixStreamSocket::new_connected(
+            let socket_b = Arc::new(stream::UnixStreamSocket::new_connected_with_peer_waiter(
                 inner_b,
                 is_nonblock,
+                recv_waiter_b,
+                Arc::downgrade(&socket_a.recv_waiters),
             ));
             (socket_a, socket_b)
         }

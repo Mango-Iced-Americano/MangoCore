@@ -58,10 +58,13 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         }
     }
 
-    // 仅支持 SOCK_STREAM 和 SOCK_DGRAM 的 socketpair
+    // Rust's process-spawn implementation uses SOCK_SEQPACKET for its
+    // close-on-exec error channel.  The Unix implementation provides the
+    // same reliable byte-stream transport for SeqPacket, so accept it here
+    // instead of rejecting a valid socketpair request.
     let (socket1, socket2): (Arc<dyn crate::net::Socket>, Arc<dyn crate::net::Socket>) = match psock
     {
-        PSOCK::Stream | PSOCK::Datagram => {
+        PSOCK::Stream | PSOCK::SeqPacket | PSOCK::Datagram => {
             let (s1, s2) = make_unix_socket_pair(is_nonblock, psock);
             (s1, s2)
         }

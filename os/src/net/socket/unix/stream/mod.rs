@@ -26,7 +26,7 @@ use crate::net::syscall::common::MsgFlags;
 use crate::net::{Endpoint, Socket, PSOCK, SHUT_RD};
 use crate::task::WaitQueue;
 use crate::utils::error::{GeneralRet, SyscallErr, SyscallRet};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -43,10 +43,14 @@ pub struct UnixStreamSocket {
     /// 发送缓冲区大小
     send_buf_size: AtomicUsize,
     /// 等待队列
-    pub recv_waiters: EventWaitQueue,
-    pub send_waiters: EventWaitQueue,
-    pub connect_waiters: EventWaitQueue,
-    pub accept_waiters: EventWaitQueue,
+    pub recv_waiters: Arc<EventWaitQueue>,
+    pub send_waiters: Arc<EventWaitQueue>,
+    pub connect_waiters: Arc<EventWaitQueue>,
+    pub accept_waiters: Arc<EventWaitQueue>,
+    /// The socketpair peer's receive queue.  A CLOEXEC close must wake a
+    /// blocking reader so it can observe the EOF marker published in the
+    /// shared ring buffer.
+    peer_recv_waiter: Mutex<Option<Weak<EventWaitQueue>>>,
 }
 
 impl core::fmt::Debug for UnixStreamSocket {
@@ -65,23 +69,38 @@ impl UnixStreamSocket {
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: EventWaitQueue::new(),
-            send_waiters: EventWaitQueue::new(),
-            connect_waiters: EventWaitQueue::new(),
-            accept_waiters: EventWaitQueue::new(),
+            recv_waiters: Arc::new(EventWaitQueue::new()),
+            send_waiters: Arc::new(EventWaitQueue::new()),
+            connect_waiters: Arc::new(EventWaitQueue::new()),
+            accept_waiters: Arc::new(EventWaitQueue::new()),
+            peer_recv_waiter: Mutex::new(None),
         }
     }
 
     pub fn new_connected(connected: Connected, is_nonblock: bool) -> Self {
+        Self::new_connected_with_peer_waiter(connected, is_nonblock, Arc::new(EventWaitQueue::new()), Weak::new())
+    }
+
+    /// Build a connected socketpair endpoint and retain a weak reference to
+    /// the peer's receive wait queue.  The weak link avoids an ownership cycle
+    /// while allowing `Drop` to wake a reader after the peer closes its
+    /// CLOEXEC error channel.
+    pub(crate) fn new_connected_with_peer_waiter(
+        connected: Connected,
+        is_nonblock: bool,
+        recv_waiters: Arc<EventWaitQueue>,
+        peer_recv_waiter: Weak<EventWaitQueue>,
+    ) -> Self {
         Self {
             inner: Mutex::new(Inner::Connected(connected)),
             is_nonblock: AtomicBool::new(is_nonblock),
             recv_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
             send_buf_size: AtomicUsize::new(UNIX_STREAM_DEFAULT_BUF_SIZE),
-            recv_waiters: EventWaitQueue::new(),
-            send_waiters: EventWaitQueue::new(),
-            connect_waiters: EventWaitQueue::new(),
-            accept_waiters: EventWaitQueue::new(),
+            recv_waiters,
+            send_waiters: Arc::new(EventWaitQueue::new()),
+            connect_waiters: Arc::new(EventWaitQueue::new()),
+            accept_waiters: Arc::new(EventWaitQueue::new()),
+            peer_recv_waiter: Mutex::new(Some(peer_recv_waiter)),
         }
     }
 
@@ -521,6 +540,23 @@ impl Socket for UnixStreamSocket {
 
 impl Drop for UnixStreamSocket {
     fn drop(&mut self) {
+        // Closing the last descriptor of a connected endpoint is equivalent
+        // to SHUT_RDWR for the peer.  In particular, Rust's process-spawn
+        // error channel relies on EOF after the child successfully execs.
+        // Publish the ring-buffer state before waking the peer, and do not
+        // hold the socket state lock while notifying its wait queue.
+        let peer_recv_waiter = self.peer_recv_waiter.lock().take().and_then(|weak| weak.upgrade());
+        {
+            let inner = self.inner.lock();
+            if let Inner::Connected(conn) = &*inner {
+                conn.rx.lock().set_recv_shutdown();
+                conn.peer_rx.lock().set_send_shutdown();
+            }
+        }
+        if let Some(waiter) = peer_recv_waiter {
+            waiter.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP);
+        }
+
         let (abstract_name, path_name) = {
             let abstract_name = {
                 let inner = self.inner.lock();
