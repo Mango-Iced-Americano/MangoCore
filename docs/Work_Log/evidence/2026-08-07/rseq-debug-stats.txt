@@ -1,0 +1,11 @@
+serial_lines=327687
+rseq_registration_calls=108 (matched [syscall] rseq(293))
+rseq_unsupported=0
+set_mempolicy_home_node_unsupported=6
+BUILDSTORM_TOOLCHAIN=observed
+BUILDSTORM_MINIBUILD=observed
+BUILDSTORM_COMPILE=not observed before timeout
+kernel_panic_marker=0 (filename references to libpanic excluded)
+qemu_exit=124 (600s timeout)
+qemu_debug_log=10 lines; no guest_errors/unimp marker requiring follow-up
+raw_logs=rseq-debug-buildstorm.log.gz,rseq-debug-qemu.log.gz,rseq-debug-e2fsck.log.gz

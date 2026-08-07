@@ -1,0 +1,13 @@
+commit=b4f38d48b6d3425f93f5323944dcf6edae0cbda9
+branch=smp
+container=6b17b5297342cc14a02d200db798aae3bf10954110855eaa46b0ca43caa86825
+image=zhouzhouyi/os-contest:20260510
+kernel=/tmp/rseq-debug-rv/rv64/release/normal/kernel/kernel-rv
+kernel_build=make -C /app/os -f make/rv64.mk PROFILE=normal MODE=release BUILD_ROOT=/tmp/rseq-debug-rv CORE_NUM=8 LOG=debug build
+qemu=/opt/qemu-bin-10.0.2/bin/qemu-system-riscv64 -accel tcg,thread=multi -d guest_errors,unimp
+memory=8G
+smp=cpus=8,sockets=1,cores=8,threads=1
+x0=/tmp/sdcard-rseq-clean.img (fresh copy of official RV image)
+x1=/tmp/rseq-rv/rv64/release/normal/tools/disk.img
+cmdline=mango.mode=normal profile=buildstorm
+timeout=600s
