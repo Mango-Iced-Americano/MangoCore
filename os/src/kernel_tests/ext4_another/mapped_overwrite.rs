@@ -12,6 +12,7 @@ use crate::config::PAGE_SIZE;
 use crate::fs::vfs::{FilePrivateData, FileSystem, FileType, IndexNode, InodeMode};
 
 use super::fixtures::open_clean_media;
+use super::writeback_observer::{PageCacheBackendSwapGuard, WritebackCall};
 
 fn write_all(file: &Arc<dyn IndexNode>, offset: usize, data: &[u8]) -> Result<(), &'static str> {
     let private = spin::Mutex::new(FilePrivateData::Unused);
@@ -53,9 +54,24 @@ pub(super) fn test_fully_mapped_overwrite_uses_fast_path() -> Result<(), &'stati
     let initial = vec![0x5a; PAGE_SIZE * 2];
     write_all(&file, 0, &initial)?;
     file.sync().map_err(|_| "mapped-overwrite initial sync failed")?;
+    let cache = file
+        .page_cache()
+        .ok_or("mapped-overwrite page cache missing")?;
+    let observer = PageCacheBackendSwapGuard::install(&cache)?;
     let overwrite = vec![0xa5; PAGE_SIZE * 2];
     write_all(&file, 0, &overwrite)?;
     file.sync().map_err(|_| "mapped-overwrite overwrite sync failed")?;
+    let calls = observer.snapshot_calls();
+    drop(observer);
+    if calls.iter().any(|call| matches!(call, WritebackCall::Page { .. }))
+        || calls.as_slice()
+            != [WritebackCall::Pages {
+                start_index: 0,
+                page_count: 2,
+            }]
+    {
+        return Err("fully mapped overwrite did not use one batched writeback");
+    }
     read_exact(&file, &overwrite)?;
     cleanup(&root, NAME)
 }

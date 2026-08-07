@@ -24,6 +24,8 @@ mod persistence;
 mod sync;
 #[cfg(feature = "ext4_another_backend")]
 mod symlink;
+#[cfg(feature = "ext4_another_backend")]
+mod writeback_observer;
 
 pub fn tests() -> alloc::vec::Vec<KernelTest> {
     #[cfg(feature = "ext4_another_backend")]
