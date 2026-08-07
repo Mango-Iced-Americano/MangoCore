@@ -1617,12 +1617,15 @@ mod enabled {
         crate::println!("[vfs-find] {} calls={} hit={} miss={} avg={}us lock={}us inner={}us insert={}us",
             reason, f_calls, f_hit, f_miss, f_us, lock_us, inner_us, insert_us);
 
-        // lwext4 metadata diagnostics
-        let lw = crate::fs::ext4_lwext4::counters::snapshot();
-        crate::println!("[lwext4] find={} find_cycles={} probe_type={} pt_cycles={} get_inode_id={} gii_enoent={} gii_cycles={} meta_cold={} meta_hot={} meta_cold_cycles={} file_open={} fo_cycles={} file_size={} file_close={} fc_cycles={} dirent={} de_cycles={} create_pre={} logical_size={} ls_cycles={} ensure_pc={} cache_hit={} cache_miss={} pc_creates={}",
-            lw.0, lw.1, lw.2, lw.3, lw.4, lw.5, lw.6, lw.7, lw.8, lw.9,
-            lw.10, lw.11, lw.12, lw.13, lw.14, lw.15, lw.16, lw.17, lw.18, lw.19, lw.20,
-            lw.21, lw.22, lw.23);
+        // lwext4 metadata diagnostics are only present in the legacy backend.
+        #[cfg(feature = "ext4_lwext4_backend")]
+        {
+            let lw = crate::fs::ext4_lwext4::counters::snapshot();
+            crate::println!("[lwext4] find={} find_cycles={} probe_type={} pt_cycles={} get_inode_id={} gii_enoent={} gii_cycles={} meta_cold={} meta_hot={} meta_cold_cycles={} file_open={} fo_cycles={} file_size={} file_close={} fc_cycles={} dirent={} de_cycles={} create_pre={} logical_size={} ls_cycles={} ensure_pc={} cache_hit={} cache_miss={} pc_creates={}",
+                lw.0, lw.1, lw.2, lw.3, lw.4, lw.5, lw.6, lw.7, lw.8, lw.9,
+                lw.10, lw.11, lw.12, lw.13, lw.14, lw.15, lw.16, lw.17, lw.18, lw.19, lw.20,
+                lw.21, lw.22, lw.23);
+        }
 
         // mount/bind diagnostics
         let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();

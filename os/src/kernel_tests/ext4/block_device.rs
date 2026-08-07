@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::drivers::block::BlockDevice;
+use crate::drivers::block::{BlockDevice, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
 /// Records I/O requests so byte-bridge tests can assert batching semantics.
@@ -38,27 +38,33 @@ impl<const BLOCK_SIZE: usize> RecordingMemBlock<BLOCK_SIZE> {
 }
 
 impl<const BLOCK_SIZE: usize> BlockDevice for RecordingMemBlock<BLOCK_SIZE> {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         self.calls.lock().push((false, block_id, buf.len()));
         let start = block_id * BLOCK_SIZE;
         buf.copy_from_slice(&self.data.lock()[start..start + buf.len()]);
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         self.calls.lock().push((true, block_id, buf.len()));
         let start = block_id * BLOCK_SIZE;
         self.data.lock()[start..start + buf.len()].copy_from_slice(buf);
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
         Some(self.data.lock().len() as u64)
     }
 
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.flushes.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        true
     }
 }
 
@@ -114,6 +120,7 @@ pub(super) fn test_memblk_isolation() -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(feature = "ext4_lwext4_backend")]
 pub(super) fn test_open_unformatted_returns_err() -> Result<(), &'static str> {
     use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
 

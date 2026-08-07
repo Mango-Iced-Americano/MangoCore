@@ -14,7 +14,7 @@ use log::info;
 use pci::*;
 use spin::Mutex;
 
-use crate::utils::error::SyscallErr;
+use crate::drivers::block::{BlockDeviceError, BlockDeviceResult};
 
 /// One reusable AHCI DMA slot. The controller is serialized by `SataBlock`'s
 /// mutex, so one slot covers every in-flight request without the per-request
@@ -48,7 +48,7 @@ impl SataBlock {
 }
 
 impl BlockDevice for SataBlock {
-    fn read_block(&self, mut block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, mut block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         assert_eq!(
             buf.len() % BLOCK_SIZE,
             0,
@@ -70,9 +70,10 @@ impl BlockDevice for SataBlock {
             );
             block_id += chunk.len() / BLOCK_SIZE;
         }
+        Ok(())
     }
 
-    fn write_block(&self, mut block_id: usize, buf: &[u8]) {
+    fn write_block(&self, mut block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         assert_eq!(
             buf.len() % BLOCK_SIZE,
             0,
@@ -102,24 +103,29 @@ impl BlockDevice for SataBlock {
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                 .wrapping_sub(flush_started),
         );
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
         self.0.lock().capacity_bytes()
     }
 
-    fn flush(&self) -> Result<(), SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         let started =
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         let result = self.0.lock().flush().map_err(|err| {
             log::error!("SATA cache flush failed: {:?}", err);
-            SyscallErr::EIO
+            BlockDeviceError::DeviceError
         });
         crate::task::perf::record_sata_flush(
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                 .wrapping_sub(started),
         );
         result
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        true
     }
 }
 

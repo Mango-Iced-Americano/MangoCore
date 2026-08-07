@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-31
+last_updated: 2026-08-07
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/filesystem.rs"
@@ -65,7 +65,7 @@ rust_main()
 
 ### 2.1 两种启动模式
 
-**initramfs 模式**（默认，由 `Cargo.toml` 中 `default = ["initramfs"]` 控制）：
+**initramfs 模式**（默认，由 `Cargo.toml` 中 `default = ["initramfs", "ext4_another_backend"]` 控制）：
 
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
@@ -73,6 +73,9 @@ rust_main()
 4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。
 5. `/sbin/init` 挂载 procfs、sysfs、`/run`、`/dev/shm`，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。`profile=buildstorm` 是例外：只挂载 x0，准备 `/proc`、`/sys`、`/dev`、`/tmp` 后 chroot `/sdcard`，不绑定 tools 盘。
 6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
+
+ext4 动态挂载通过 `fs::ext4_backend` 分派到 `another_ext4`（可持久化写入且要求可靠 flush）；
+`ext4_lwext4_backend` 仅在显式 legacy feature 下编译，避免默认路径链接旧 C 后端。
 
 ## 3. VFS_ROOT lazy_static
 

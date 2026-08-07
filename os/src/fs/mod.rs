@@ -3,7 +3,11 @@ pub mod dev;
 pub mod eventfd;
 pub mod eventpoll;
 pub mod ext4;
+#[cfg(feature = "ext4_lwext4_backend")]
 pub mod ext4_lwext4;
+#[cfg(feature = "ext4_another_backend")]
+pub mod ext4_another;
+pub(crate) mod ext4_backend;
 pub mod fat32;
 mod filesystem;
 #[cfg(feature = "initramfs")]

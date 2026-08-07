@@ -23,7 +23,7 @@ use crate::hal::{
     BLOCK_SZ,
 };
 use crate::task::perf;
-use crate::utils::error::SyscallErr;
+use crate::drivers::block::BlockDeviceResult;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 #[cfg(not(target_arch = "riscv64"))]
@@ -45,7 +45,7 @@ lazy_static! {
 static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 impl BlockDevice for VirtIOBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
@@ -75,9 +75,10 @@ impl BlockDevice for VirtIOBlock {
 
             offset += chunk_len;
         }
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         assert!(buf.len() % BLOCK_SZ == 0);
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
@@ -107,6 +108,7 @@ impl BlockDevice for VirtIOBlock {
 
             offset += chunk_len;
         }
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
@@ -115,11 +117,15 @@ impl BlockDevice for VirtIOBlock {
         Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
     }
 
-    fn flush(&self) -> Result<(), SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.0.lock().flush().map_err(|err| {
             log::error!("VirtIO PCI block flush failed: {:?}", err);
-            SyscallErr::EIO
+            crate::drivers::block::BlockDeviceError::DeviceError
         })
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        true
     }
 }
 

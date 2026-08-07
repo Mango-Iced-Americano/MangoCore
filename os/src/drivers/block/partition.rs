@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-use super::BlockDevice;
+use super::{BlockDevice, BlockDeviceError, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
 pub const LOGICAL_SECTOR_SIZE: u64 = 512;
@@ -88,13 +88,16 @@ fn checked_device_offset(
     offset
 }
 
-fn read_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &mut [u8]) {
+fn read_parent_bytes(
+    parent: &Arc<dyn BlockDevice>,
+    absolute: u64,
+    buf: &mut [u8],
+) -> BlockDeviceResult {
     if buf.is_empty() {
-        return;
+        return Ok(());
     }
     if absolute % BLOCK_SZ as u64 == 0 && buf.len() % BLOCK_SZ == 0 {
-        parent.read_block((absolute / BLOCK_SZ as u64) as usize, buf);
-        return;
+        return parent.read_block((absolute / BLOCK_SZ as u64) as usize, buf);
     }
 
     let mut done = 0usize;
@@ -103,7 +106,7 @@ fn read_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &mut [u8
     if head_offset != 0 {
         let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
         let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block((absolute / BLOCK_SZ as u64) as usize, &mut bounce);
+        parent.read_block((absolute / BLOCK_SZ as u64) as usize, &mut bounce)?;
         buf[..copy_len].copy_from_slice(&bounce[head_offset..head_offset + copy_len]);
         done = copy_len;
     }
@@ -111,27 +114,31 @@ fn read_parent_bytes(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &mut [u8
     let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
     if middle_len != 0 {
         let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
-        parent.read_block(parent_block, &mut buf[done..done + middle_len]);
+        parent.read_block(parent_block, &mut buf[done..done + middle_len])?;
         done += middle_len;
     }
 
     if done < buf.len() {
         let position = absolute + done as u64;
         let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block((position / BLOCK_SZ as u64) as usize, &mut bounce);
+        parent.read_block((position / BLOCK_SZ as u64) as usize, &mut bounce)?;
         let tail_len = buf.len() - done;
         buf[done..].copy_from_slice(&bounce[..tail_len]);
     }
+    Ok(())
 }
 
 /// Write bytes while `PARTITION_RMW_LOCK` is already held.
-fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf: &[u8]) {
+fn write_parent_bytes_guarded(
+    parent: &Arc<dyn BlockDevice>,
+    absolute: u64,
+    buf: &[u8],
+) -> BlockDeviceResult {
     if buf.is_empty() {
-        return;
+        return Ok(());
     }
     if absolute % BLOCK_SZ as u64 == 0 && buf.len() % BLOCK_SZ == 0 {
-        parent.write_block_rmw_guarded((absolute / BLOCK_SZ as u64) as usize, buf);
-        return;
+        return parent.write_block_rmw_guarded((absolute / BLOCK_SZ as u64) as usize, buf);
     }
 
     let mut done = 0usize;
@@ -141,16 +148,16 @@ fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf:
         let copy_len = (BLOCK_SZ - head_offset).min(buf.len());
         let parent_block = (absolute / BLOCK_SZ as u64) as usize;
         let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block(parent_block, &mut bounce);
+        parent.read_block(parent_block, &mut bounce)?;
         bounce[head_offset..head_offset + copy_len].copy_from_slice(&buf[..copy_len]);
-        parent.write_block_rmw_guarded(parent_block, &bounce);
+        parent.write_block_rmw_guarded(parent_block, &bounce)?;
         done = copy_len;
     }
 
     let middle_len = ((buf.len() - done) / BLOCK_SZ) * BLOCK_SZ;
     if middle_len != 0 {
         let parent_block = ((absolute + done as u64) / BLOCK_SZ as u64) as usize;
-        parent.write_block_rmw_guarded(parent_block, &buf[done..done + middle_len]);
+        parent.write_block_rmw_guarded(parent_block, &buf[done..done + middle_len])?;
         done += middle_len;
     }
 
@@ -158,11 +165,12 @@ fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf:
         let position = absolute + done as u64;
         let parent_block = (position / BLOCK_SZ as u64) as usize;
         let mut bounce = vec![0u8; BLOCK_SZ];
-        parent.read_block(parent_block, &mut bounce);
+        parent.read_block(parent_block, &mut bounce)?;
         let tail_len = buf.len() - done;
         bounce[..tail_len].copy_from_slice(&buf[done..]);
-        parent.write_block_rmw_guarded(parent_block, &bounce);
+        parent.write_block_rmw_guarded(parent_block, &bounce)?;
     }
+    Ok(())
 }
 
 /// 解析传统 MBR 中的四个主分区项。
@@ -171,7 +179,7 @@ fn write_parent_bytes_guarded(parent: &Arc<dyn BlockDevice>, absolute: u64, buf:
 /// 由 `PartitionBlockDevice` 转换到各平台的 `BLOCK_SZ`，不额外要求起点对齐。
 pub fn probe_mbr(dev: &Arc<dyn BlockDevice>) -> MbrProbe {
     let mut sector = vec![0u8; BLOCK_SZ];
-    dev.read_block(0, &mut sector);
+    let _ = dev.read_block(0, &mut sector);
     if sector[MBR_SIGNATURE_OFF] != 0x55 || sector[MBR_SIGNATURE_OFF + 1] != 0xaa {
         return MbrProbe::NoMbr;
     }
@@ -339,32 +347,38 @@ impl PartitionBlockDevice {
 }
 
 impl BlockDevice for PartitionBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let (absolute, valid_len) = self.io_range(block_id, buf.len());
         if valid_len != 0 {
-            read_parent_bytes(&self.parent, absolute, &mut buf[..valid_len]);
+            read_parent_bytes(&self.parent, absolute, &mut buf[..valid_len])?;
         }
         buf[valid_len..].fill(0);
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let _rmw = PARTITION_RMW_LOCK.lock();
-        self.write_block_rmw_guarded(block_id, buf);
+        self.write_block_rmw_guarded(block_id, buf)
     }
 
-    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
+    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let (absolute, valid_len) = self.io_range(block_id, buf.len());
         if valid_len != 0 {
-            write_parent_bytes_guarded(&self.parent, absolute, &buf[..valid_len]);
+            write_parent_bytes_guarded(&self.parent, absolute, &buf[..valid_len])?;
         }
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
         Some(self.size_bytes)
     }
 
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.parent.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
     }
 }
 
@@ -402,27 +416,31 @@ impl BlockSizeAdapter {
 }
 
 impl BlockDevice for BlockSizeAdapter {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let absolute = self.absolute_offset(block_id, buf.len());
-        read_parent_bytes(&self.parent, absolute, buf);
+        read_parent_bytes(&self.parent, absolute, buf)
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let _rmw = PARTITION_RMW_LOCK.lock();
-        self.write_block_rmw_guarded(block_id, buf);
+        self.write_block_rmw_guarded(block_id, buf)
     }
 
-    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) {
+    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let absolute = self.absolute_offset(block_id, buf.len());
-        write_parent_bytes_guarded(&self.parent, absolute, buf);
+        write_parent_bytes_guarded(&self.parent, absolute, buf)
     }
 
     fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
     }
 
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.parent.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
     }
 }
 
@@ -445,11 +463,11 @@ impl ReadOnlyBlockDevice {
 }
 
 impl BlockDevice for ReadOnlyBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        self.parent.read_block(block_id, buf);
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
+        self.parent.read_block(block_id, buf)
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let count = self.blocked_writes.fetch_add(1, Ordering::Relaxed);
         if count < 4 {
             println!(
@@ -458,13 +476,18 @@ impl BlockDevice for ReadOnlyBlockDevice {
                 buf.len()
             );
         }
+        Err(BlockDeviceError::DeviceError)
     }
 
     fn size_bytes(&self) -> Option<u64> {
         self.parent.size_bytes()
     }
 
-    fn flush(&self) -> Result<(), crate::utils::error::SyscallErr> {
+    fn flush(&self) -> BlockDeviceResult {
         self.parent.flush()
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.parent.supports_reliable_flush()
     }
 }

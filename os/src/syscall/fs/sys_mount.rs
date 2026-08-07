@@ -570,7 +570,7 @@ pub fn sys_mount(
                     );
                     let new_fs: Arc<dyn vfs::FileSystem> = match detected.fs_type {
                         crate::fs::FS_Type::Ext4 => {
-                            match crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem::open_ext4rs_with_options(
+                            match crate::fs::ext4_backend::open(
                                 fs_device,
                                 mountflags.contains(MountFlags::MS_RDONLY),
                             ) {

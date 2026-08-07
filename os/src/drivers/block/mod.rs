@@ -6,7 +6,7 @@ pub mod virtio_dma_pool;
 pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
-pub use block_dev::BlockDevice;
+pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceResult};
 #[cfg(feature = "block_sata")]
 type BlockDeviceImpl = sata_blk::SataBlock;
 #[cfg(feature = "block_virt")]

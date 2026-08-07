@@ -614,20 +614,23 @@ fn stats_resource_content(
     let _ = writeln!(s, "pc_entries_len={}", pc_ent_len);
     let _ = writeln!(s, "pc_entries_live={}", pc_ent_live);
     let _ = writeln!(s, "pc_entries_holes={}", pc_ent_holes);
-    // lwext4 metadata probes (embedded here so old initproc can see them)
-    let lw = crate::fs::ext4_lwext4::counters::snapshot();
-    let _ = writeln!(s, "lwext4_find={}", lw.0);
-    let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
-    let _ = writeln!(s, "lwext4_meta_cold={}", lw.7);
-    let _ = writeln!(s, "lwext4_meta_hot={}", lw.8);
-    let _ = writeln!(s, "lwext4_file_open={}", lw.10);
-    let _ = writeln!(s, "lwext4_file_close={}", lw.13);
-    let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
-    let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
-    let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
-    let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
-    let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
-    let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
+    // lwext4 metadata probes (legacy backend only).
+    #[cfg(feature = "ext4_lwext4_backend")]
+    {
+        let lw = crate::fs::ext4_lwext4::counters::snapshot();
+        let _ = writeln!(s, "lwext4_find={}", lw.0);
+        let _ = writeln!(s, "lwext4_find_cycles={}", lw.1);
+        let _ = writeln!(s, "lwext4_meta_cold={}", lw.7);
+        let _ = writeln!(s, "lwext4_meta_hot={}", lw.8);
+        let _ = writeln!(s, "lwext4_file_open={}", lw.10);
+        let _ = writeln!(s, "lwext4_file_close={}", lw.13);
+        let _ = writeln!(s, "lwext4_dir_entries={}", lw.15);
+        let _ = writeln!(s, "lwext4_create_pre={}", lw.17);
+        let _ = writeln!(s, "lwext4_ensure_pc={}", lw.20);
+        let _ = writeln!(s, "lwext4_find_cache_hit={}", lw.21);
+        let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
+        let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
+    }
     // mount/bind probes
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
     let _ = writeln!(s, "mnt_propagate={}", mnt.0);
@@ -1165,6 +1168,7 @@ fn stats_ext4_content(
 //  STATS: lwext4 metadata probes
 // ═══════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "ext4_lwext4_backend")]
 fn stats_lwext4_content(
     _extra: usize,
     offset: usize,
@@ -1198,6 +1202,16 @@ fn stats_lwext4_content(
     let _ = writeln!(s, "lwext4_find_cache_miss={}", lw.22);
     let _ = writeln!(s, "lwext4_ensure_pc_creates={}", lw.23);
     write_str(offset, len, buf, &s)
+}
+
+#[cfg(not(feature = "ext4_lwext4_backend"))]
+fn stats_lwext4_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
+    write_str(offset, len, buf, "backend=unavailable\n")
 }
 
 // ═══════════════════════════════════════════════════════════════════════

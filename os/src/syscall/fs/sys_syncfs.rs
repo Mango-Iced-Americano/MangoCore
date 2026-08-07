@@ -20,6 +20,16 @@ pub fn sys_syncfs(fd: usize) -> isize {
     // Must unwrap MountFSInode to reach the real Ext4FileSystem.
     let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
     let fs = inode.fs();
+    #[cfg(feature = "ext4_another_backend")]
+    if let Some(ext4) = fs
+        .as_any_ref()
+        .downcast_ref::<crate::fs::ext4_another::Ext4FileSystem>()
+    {
+        return match ext4.sync_all() {
+            Ok(()) => SUCCESS,
+            Err(error) => -(error as isize),
+        };
+    }
     if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
         ext4.flush_metadata_cache();
     }

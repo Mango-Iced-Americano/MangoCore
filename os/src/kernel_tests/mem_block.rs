@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::drivers::block::BlockDevice;
+use crate::drivers::block::{BlockDevice, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
 /// 有界、零扩展的内存块设备；越界读返回 0，越界写被忽略。
@@ -39,29 +39,35 @@ impl MemBlockDevice {
 }
 
 impl BlockDevice for MemBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let offset = block_id * BLOCK_SZ;
         let data = self.data.lock();
         if offset >= data.len() {
             buf.fill(0);
-            return;
+            return Ok(());
         }
         let end = core::cmp::min(offset + buf.len(), data.len());
         buf[..end - offset].copy_from_slice(&data[offset..end]);
         buf[end - offset..].fill(0);
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let offset = block_id * BLOCK_SZ;
         let mut data = self.data.lock();
         if offset >= data.len() {
-            return;
+            return Ok(());
         }
         let end = core::cmp::min(offset + buf.len(), data.len());
         data[offset..end].copy_from_slice(&buf[..end - offset]);
+        Ok(())
     }
 
     fn size_bytes(&self) -> Option<u64> {
         Some(self.size)
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        true
     }
 }

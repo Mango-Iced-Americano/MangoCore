@@ -4,6 +4,7 @@ use spin::Mutex;
 use crate::fs::vfs::FilePrivateData;
 use crate::fs::vfs::IndexNode;
 use crate::hal::BLOCK_SZ;
+use crate::drivers::block::BlockDeviceResult;
 use crate::println;
 
 use super::direntry::{remove_dir_entry_record, DirEntryType};
@@ -56,7 +57,7 @@ unsafe impl Send for FakeBlockDevice {}
 unsafe impl Sync for FakeBlockDevice {}
 
 impl BlockDevice for FakeBlockDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         let data = self.data.lock();
         if block_id < data.len() {
             let copy_len = buf.len().min(BLOCK_SZ);
@@ -64,14 +65,16 @@ impl BlockDevice for FakeBlockDevice {
         } else {
             buf.fill(0);
         }
+        Ok(())
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         let mut data = self.data.lock();
         if block_id < data.len() {
             let copy_len = buf.len().min(BLOCK_SZ);
             data[block_id][..copy_len].copy_from_slice(&buf[..copy_len]);
         }
+        Ok(())
     }
 }
 

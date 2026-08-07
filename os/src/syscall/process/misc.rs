@@ -19,6 +19,8 @@ static SYSLOG_READ_ALL_CLEARED: AtomicBool = AtomicBool::new(false);
 
 pub fn sys_shutdown() -> isize {
     info!("[sys_shutdown] flushing page caches and ext4 metadata...");
+    #[cfg(feature = "ext4_another_backend")]
+    crate::fs::ext4_another::shutdown_all_instances();
     flush_all_page_caches();
     info!("[sys_shutdown] flushing all ext4 instances...");
     let mut guard = EXT4_REGISTRY.lock();
