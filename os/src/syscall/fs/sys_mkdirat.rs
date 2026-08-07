@@ -64,11 +64,24 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         dir_mode.insert(vfs::InodeMode::S_ISGID);
     }
 
-    // Create with attrs
-    let inode = match parent.mkdir(&leaf, dir_mode) {
-        Ok(inode) => inode,
-        Err(e) => return -(e as isize),
-    };
+    // Create with attrs.  another_ext4 can report metadata transaction
+    // contention as EAGAIN; mkdir is a blocking namespace mutation, so wait
+    // and retry without holding any VFS lookup lock.
+    let mut created = None;
+    let ret = wait_io_core(
+        || match parent.mkdir(&leaf, dir_mode) {
+            Ok(inode) => {
+                created = Some(inode);
+                SUCCESS
+            }
+            Err(e) => -(e as isize),
+        },
+        false,
+    );
+    if ret < 0 {
+        return ret;
+    }
+    let inode = created.expect("mkdir succeeded without returning an inode");
     // Set uid/gid after creation
     if let Ok(mut child_meta) = inode.metadata() {
         child_meta.uid = uid;

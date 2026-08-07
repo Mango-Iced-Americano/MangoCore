@@ -121,8 +121,14 @@ pub fn sys_renameat2(
         }
     }
 
-    match old_parent.rename(&old_leaf, &new_parent, &new_leaf, flags) {
-        Ok(_) => SUCCESS,
-        Err(e) => -(e as isize),
-    }
+    // another_ext4 serializes namespace metadata with a transaction gate;
+    // a concurrent commit can make rename transiently return EAGAIN.  The
+    // blocking rename syscall must wait and retry outside the VFS locks.
+    wait_io_core(
+        || match old_parent.rename(&old_leaf, &new_parent, &new_leaf, flags) {
+            Ok(_) => SUCCESS,
+            Err(e) => -(e as isize),
+        },
+        false,
+    )
 }
