@@ -372,6 +372,15 @@ impl PageEntry {
         }
     }
 
+    fn flags(&self) -> u32 {
+        self.flags.load(Ordering::Acquire)
+    }
+
+    fn compare_exchange_flags(&self, old: u32, new: u32) -> Result<u32, u32> {
+        self.flags
+            .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
+    }
+
     /// CAS a decoded state while preserving orthogonal referenced/redirtied bits.
     fn compare_exchange_state(&self, old: PageState, new: PageState) -> Result<u32, u32> {
         let mut raw = self.flags.load(Ordering::Acquire);
@@ -408,6 +417,87 @@ impl PageEntry {
     fn test_and_clear_flag(&self, flag: u32) -> bool {
         let old = self.flags.fetch_and(!flag, Ordering::AcqRel);
         (old & flag) != 0
+    }
+
+    /// Acquire the per-page write lease.  The lease is separate from the
+    /// data RwLock: it prevents writeback from claiming the page while a
+    /// writer is copying user/kernel bytes and publishing Dirty.
+    fn try_lock_for_write(&self) -> Result<bool, SyscallErr> {
+        const MAX_RETRIES: usize = 100;
+
+        for _ in 0..MAX_RETRIES {
+            let old = self.flags();
+            match Self::decode_state(old) {
+                PageState::UpToDate | PageState::Dirty if old & PG_LOCKED == 0 => {
+                    let new = old | PG_LOCKED | PG_REFERENCED;
+                    if self.compare_exchange_flags(old, new).is_ok() {
+                        return Ok(old & PG_DIRTY != 0);
+                    }
+                    core::hint::spin_loop();
+                }
+                PageState::Writeback => core::hint::spin_loop(),
+                PageState::Loading => return Err(SyscallErr::EAGAIN),
+                PageState::Error => return Err(SyscallErr::EIO),
+                _ => core::hint::spin_loop(),
+            }
+        }
+
+        Err(SyscallErr::EAGAIN)
+    }
+
+    /// Publish a completed write and return whether it transitioned a clean
+    /// page to Dirty (the caller updates global dirty accounting).
+    fn commit_write(&self) -> bool {
+        let mut old = self.flags();
+        loop {
+            let new = (old | PG_UPTODATE | PG_DIRTY | PG_REFERENCED) & !PG_LOCKED;
+            match self.compare_exchange_flags(old, new) {
+                Ok(_) => return old & PG_DIRTY == 0,
+                Err(current) => old = current,
+            }
+        }
+    }
+
+    fn abort_write(&self) {
+        self.clear_flag(PG_LOCKED);
+    }
+
+    /// Claim a dirty page for writeback.  A writer holding PG_LOCKED is never
+    /// displaced by writeback; the CAS clears Dirty and sets Writeback/Locked
+    /// as one ownership transition.
+    fn claim_writeback(&self) -> bool {
+        let mut old = self.flags();
+        loop {
+            if old & (PG_DIRTY | PG_LOCKED) != PG_DIRTY {
+                return false;
+            }
+            let new = (old & !PG_DIRTY) | PG_WRITEBACK | PG_LOCKED;
+            match self.compare_exchange_flags(old, new) {
+                Ok(_) => return true,
+                Err(current) => old = current,
+            }
+        }
+    }
+
+    /// Complete a successful writeback and report whether the page was
+    /// redirtied while the backend I/O was in flight.
+    fn complete_writeback(&self) -> bool {
+        let redirtied = self.test_and_clear_flag(PG_REDIRTIED);
+        let add = if redirtied {
+            PG_DIRTY
+        } else {
+            PG_UPTODATE | PG_REFERENCED
+        };
+        let _ = self.flags.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            Some((old | add) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
+        });
+        redirtied
+    }
+
+    fn restore_dirty_after_writeback(&self) {
+        let _ = self.flags.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            Some((old | PG_DIRTY) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
+        });
     }
 
     /// 检查所有 segment 是否均已有效
@@ -1614,6 +1704,7 @@ impl PageCache {
             let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry =
                 self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
+            let was_dirty = entry.try_lock_for_write()?;
             perf::record_pc_write_lookup(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
                     .wrapping_sub(lookup_start),
@@ -1628,7 +1719,9 @@ impl PageCache {
             );
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
             let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            self.mark_dirty_after_copy(start_page, &entry);
+            if entry.commit_write() && !was_dirty {
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
             perf::record_pc_write_commit(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
                     .wrapping_sub(commit_start),
@@ -1649,6 +1742,7 @@ impl PageCache {
             page_offset: usize,
             sub_len: usize,
             full_page_overwrite: bool,
+            was_dirty: bool,
         }
 
         let mut copies: Vec<CopyItem> = Vec::new();
@@ -1676,11 +1770,21 @@ impl PageCache {
             }
             let entry =
                 self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
+            let was_dirty = match entry.try_lock_for_write() {
+                Ok(was_dirty) => was_dirty,
+                Err(error) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(error);
+                }
+            };
             copies.push(CopyItem {
                 entry,
                 page_offset,
                 sub_len,
                 full_page_overwrite,
+                was_dirty,
             });
             total_written += sub_len;
         }
@@ -1702,7 +1806,9 @@ impl PageCache {
                 .entry
                 .mark_valid_and_check_full(item.page_offset, item.sub_len);
             let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            self.mark_dirty_after_copy(page_index, &item.entry);
+            if item.entry.commit_write() && !item.was_dirty {
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
             commit_cycles = commit_cycles.wrapping_add(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
                     .wrapping_sub(commit_start),
@@ -1933,6 +2039,7 @@ impl PageCache {
                 Some(old_size),
                 full_page_overwrite,
             )?;
+            let was_dirty = entry.try_lock_for_write()?;
             let user_offset = write_start - offset;
             let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let copied = entry.with_bytes_mut(|dst| {
@@ -1941,12 +2048,19 @@ impl PageCache {
                     &mut dst[page_offset..page_offset + sub_len],
                 )
             });
+            let copied = match copied {
+                Ok(copied) => copied,
+                Err(_) => {
+                    entry.abort_write();
+                    return Err(SyscallErr::EFAULT);
+                }
+            };
             perf::record_pc_write_copy(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
                     .wrapping_sub(copy_start),
             );
-            let copied = copied.map_err(|_| SyscallErr::EFAULT)?;
             if copied != sub_len {
+                entry.abort_write();
                 total_written += copied;
                 return if total_written == 0 {
                     Err(SyscallErr::EFAULT)
@@ -1956,7 +2070,9 @@ impl PageCache {
             }
             entry.mark_valid(page_offset, copied);
             let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            self.mark_dirty_after_copy(page_index, &entry);
+            if entry.commit_write() && !was_dirty {
+                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
             perf::record_pc_write_commit(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
                     .wrapping_sub(commit_start),
@@ -2181,20 +2297,16 @@ impl PageCache {
             }
         };
 
-        // CAS Dirty → Writeback
-        match entry.compare_exchange_state(PageState::Dirty, PageState::Writeback) {
-            Ok(_) => {
-                GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
-                GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => {
-                perf::record_pc_writeback(
-                    0,
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
-                );
-                return Ok(());
-            }
+        // Claim Dirty → Writeback only if no writer owns PG_LOCKED.
+        if !entry.claim_writeback() {
+            perf::record_pc_writeback(
+                0,
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
+            );
+            return Ok(());
         }
+        GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+        GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
 
         let result = if let Some(backend) = self.backend() {
             // 写回前确保所有 segment 有效（填充部分写入的页面空洞）
@@ -2202,8 +2314,7 @@ impl PageCache {
                 // Dirty -> Writeback accounting has already been committed.
                 // A populate failure must make the page retryable instead of
                 // leaving it permanently stranded in Writeback.
-                entry.test_and_clear_flag(PG_REDIRTIED);
-                entry.set_state(PageState::Dirty);
+                entry.restore_dirty_after_writeback();
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
                 return Err(error);
@@ -2218,31 +2329,25 @@ impl PageCache {
             match result {
                 Ok(_) => {
                     // Writeback succeeded: check PG_REDIRTIED
-                    if entry.test_and_clear_flag(PG_REDIRTIED) {
+                    if entry.complete_writeback() {
                         // Redirtied during writeback → restore to Dirty
                         crate::task::perf::record_wb_redirty();
-                        entry.set_state(PageState::Dirty);
                         GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        entry.set_state(PageState::UpToDate);
                     }
                     GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
                     Ok(())
                 }
                 Err(e) => {
                     // Writeback failed: restore to Dirty for retry
-                    entry.set_state(PageState::Dirty);
+                    entry.restore_dirty_after_writeback();
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                     GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
                     Err(e)
                 }
             }
         } else {
-            if entry.test_and_clear_flag(PG_REDIRTIED) {
-                entry.set_state(PageState::Dirty);
+            if entry.complete_writeback() {
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-            } else {
-                entry.set_state(PageState::UpToDate);
             }
             GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
             Ok(())
@@ -2276,15 +2381,10 @@ impl PageCache {
             let end = (start + count).min(entries.len());
             for i in start..end {
                 if let Some(entry) = &entries[i] {
-                    match entry
-                        .compare_exchange_state(PageState::Dirty, PageState::Writeback)
-                    {
-                        Ok(_) => {
-                            GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
-                            GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
-                            page_slices.push((i, entry.clone()));
-                        }
-                        Err(_) => {}
+                    if entry.claim_writeback() {
+                        GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+                        GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
+                        page_slices.push((i, entry.clone()));
                     }
                 }
             }
@@ -2296,19 +2396,15 @@ impl PageCache {
 
         let restore_dirty = |pages: &[(usize, Arc<PageEntry>)]| {
             for (idx, entry) in pages {
-                entry.test_and_clear_flag(PG_REDIRTIED);
-                entry.set_state(PageState::Dirty);
+                entry.restore_dirty_after_writeback();
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
             }
         };
         let complete_writeback = |pages: &[(usize, Arc<PageEntry>)]| {
             for (idx, entry) in pages {
-                if entry.test_and_clear_flag(PG_REDIRTIED) {
-                    entry.set_state(PageState::Dirty);
+                if entry.complete_writeback() {
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    entry.set_state(PageState::UpToDate);
                 }
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
             }
