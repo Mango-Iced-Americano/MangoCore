@@ -4,7 +4,7 @@ use core::convert::TryFrom;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::fs::page_cache::PageCache;
+use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -38,11 +38,18 @@ pub(crate) struct InodeLifetime {
     mtime_dirty: AtomicBool,
     ctime_dirty: AtomicBool,
     timestamp_generation: AtomicUsize,
+    inode_flags: Mutex<InodeFlags>,
     page_cache: Mutex<Option<Weak<PageCache>>>,
     /// Keep dirty cache data reachable until a successful data+metadata sync.
     /// This closes the write → reopen window where a new VFS inode could
     /// otherwise recreate a cache from the old on-disk inode size.
     dirty_page_cache: Mutex<Option<Arc<PageCache>>>,
+    /// Fast-path hint for the common case where the dirty cache is already
+    /// retained. The mutex remains authoritative so a concurrent writer cannot
+    /// miss a release and leave the cache unpinned.
+    dirty_cache_pinned: AtomicBool,
+    /// Generation associated with the last successful dirty-cache release.
+    last_release_generation: AtomicUsize,
     reclaim: Mutex<Option<another_ext4::InodeReclaimHandle>>,
     reclaim_error: Mutex<Option<SyscallErr>>,
     pins: AtomicUsize,
@@ -66,8 +73,11 @@ impl InodeLifetime {
             mtime_dirty: AtomicBool::new(false),
             ctime_dirty: AtomicBool::new(false),
             timestamp_generation: AtomicUsize::new(0),
+            inode_flags: Mutex::new(InodeFlags::empty()),
             page_cache: Mutex::new(None),
             dirty_page_cache: Mutex::new(None),
+            dirty_cache_pinned: AtomicBool::new(false),
+            last_release_generation: AtomicUsize::new(0),
             reclaim: Mutex::new(None),
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
@@ -123,6 +133,14 @@ impl InodeLifetime {
         *self.cached_times.lock()
     }
 
+    pub(crate) fn inode_flags(&self) -> InodeFlags {
+        *self.inode_flags.lock()
+    }
+
+    pub(crate) fn set_inode_flags(&self, flags: InodeFlags) {
+        *self.inode_flags.lock() = flags;
+    }
+
     pub(crate) fn page_cache(&self) -> Option<Arc<PageCache>> {
         self.dirty_page_cache
             .lock()
@@ -143,15 +161,32 @@ impl InodeLifetime {
     }
 
     pub(crate) fn retain_dirty_page_cache(&self, cache: &Arc<PageCache>) {
+        // The atomic is only a hint. Always take the mutex before deciding
+        // that the cache is already retained; a release may have raced with a
+        // writer that advanced size_generation before reaching this method.
+        let already_pinned = self.dirty_cache_pinned.load(Ordering::Acquire);
         let mut dirty_page_cache = self.dirty_page_cache.lock();
+        if already_pinned && dirty_page_cache.is_some() {
+            return;
+        }
         if dirty_page_cache.is_none() {
             self.pin();
             *dirty_page_cache = Some(cache.clone());
+            self.dirty_cache_pinned.store(true, Ordering::Release);
         }
     }
 
-    pub(crate) fn release_dirty_page_cache(&self) {
-        if self.dirty_page_cache.lock().take().is_some() {
+    pub(crate) fn release_dirty_page_cache(&self, committed_generation: usize) {
+        let mut dirty_page_cache = self.dirty_page_cache.lock();
+        self.last_release_generation
+            .store(committed_generation, Ordering::Relaxed);
+        // The mutex synchronizes with retain_dirty_page_cache. A writer that
+        // advanced the generation while this sync was completing will either
+        // make this check fail or repin immediately after the release.
+        if self.size_generation.load(Ordering::Acquire) == 0
+            && dirty_page_cache.take().is_some()
+        {
+            self.dirty_cache_pinned.store(false, Ordering::Release);
             self.unpin();
         }
     }
@@ -283,7 +318,7 @@ impl Ext4FileSystem {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ).is_ok() {
-                    lifetime.release_dirty_page_cache();
+                    lifetime.release_dirty_page_cache(generation);
                 }
             }
             for (lifetime, timestamps) in committed_timestamps {

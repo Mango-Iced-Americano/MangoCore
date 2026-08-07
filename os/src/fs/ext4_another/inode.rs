@@ -337,7 +337,7 @@ impl IndexNode for Ext4Inode {
             ctime,
             file_type,
             mode: InodeMode::from(file_type) | permissions,
-            flags: InodeFlags::empty(),
+            flags: self.lifetime.inode_flags(),
             nlinks: u64::from(attr.links),
             uid: attr.uid,
             gid: attr.gid,
@@ -364,6 +364,7 @@ impl IndexNode for Ext4Inode {
             ctime: Some(u32::try_from(metadata.ctime.tv_sec).map_err(|_| SyscallErr::EFBIG)?),
             crtime: None,
         };
+        self.lifetime.set_inode_flags(metadata.flags);
         fs.inner()
             .setattr(
                 u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
