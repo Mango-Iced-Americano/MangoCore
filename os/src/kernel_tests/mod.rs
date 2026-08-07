@@ -41,6 +41,10 @@ mod kt_fs_smp;
 mod kt_net_smp;
 #[path = "fs_fat_smp.rs"]
 mod kt_fs_fat_smp;
+#[path = "ext4_another_lifetime_sync.rs"]
+mod kt_ext4_another_lifetime_sync;
+#[path = "page_cache_sync.rs"]
+mod kt_page_cache_sync;
 
 use runner::KernelTest;
 use alloc::vec;
@@ -64,6 +68,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("smp", kt_smp::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
+        ("ext4_another_lifetime", kt_ext4_another_lifetime_sync::tests()),
+        ("page_cache", kt_page_cache_sync::tests()),
         ("fs_smp", kt_fs_smp::tests()),
         ("net_smp", kt_net_smp::tests()),
         ("fs_fat_smp", kt_fs_fat_smp::tests()),

@@ -2232,6 +2232,23 @@ impl PageCache {
         result
     }
 
+    /// Retry a transient backend admission failure without losing the dirty
+    /// page.  `writeback_pages_run_locked` restores every uncommitted page to
+    /// Dirty before returning `EAGAIN`, so retrying the same range is safe.
+    fn writeback_pages_run_retry_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
+        const MAX_TRANSIENT_RETRIES: usize = 3;
+        let mut attempt = 0;
+        loop {
+            match self.writeback_pages_run_locked(start, count) {
+                Ok(()) => return Ok(()),
+                Err(SyscallErr::EAGAIN) if attempt < MAX_TRANSIENT_RETRIES => {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
         let _gate = self.op_gate.read();
@@ -2264,7 +2281,7 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
@@ -2309,7 +2326,7 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
@@ -2361,7 +2378,7 @@ impl PageCache {
             // writeback_pages_run uses CAS — some pages may have been
             // concurrently consumed by another flusher. Tolerate
             // partial progress and continue.
-            let _ = self.writeback_pages_run_locked(run_start, run_end - run_start + 1);
+            let _ = self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1);
             total += count;
         }
         total
