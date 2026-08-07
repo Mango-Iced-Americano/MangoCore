@@ -36,7 +36,11 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
-        // Regular files: skip wait_io_core() overhead.
-        write_from_user(&file, token, buf, count)
+        // Regular-file writes can transiently observe another_ext4's
+        // metadata transaction gate as EAGAIN.  There is no inode wait queue
+        // for this backend, so keep the blocking write semantics here rather
+        // than leaking the transient contention to userspace (Cargo treats
+        // it as a permanent failed write).
+        wait_io_core(|| write_from_user(&file, token, buf, count), false)
     }
 }

@@ -452,7 +452,22 @@ pub(crate) fn open_file_at(
                 }
             }
             if flags.contains(OpenFlags::O_TRUNC) {
-                target.resize(0).map_err(|e| -(e as isize))?;
+                // another_ext4 deliberately reports metadata-gate contention as
+                // EAGAIN because its transaction guard spans block-device I/O.
+                // O_TRUNC on a regular file is a blocking open operation, so
+                // retry outside the inode/VFS locks instead of exposing that
+                // transient contention to userspace (Cargo treats it as a
+                // permanent "failed to write" error).
+                let ret = wait_io_core(
+                    || match target.resize(0) {
+                        Ok(()) => 0,
+                        Err(error) => -(error as isize),
+                    },
+                    false,
+                );
+                if ret < 0 {
+                    return Err(ret);
+                }
             }
             vfs::File::new_with_metadata(target, _open_flags_to_vfs_flags(flags), md)
                 .map_err(|e| -(e as isize))
@@ -474,12 +489,35 @@ pub(crate) fn open_file_at(
                 effective_mode.remove(vfs::InodeMode::S_ISGID);
             }
 
-            let inode = parent
-                .create_with_attrs(
+            // another_ext4 reports metadata-transaction contention as EAGAIN
+            // while creating a directory entry.  O_CREAT is a blocking open
+            // operation, so retry the create outside VFS locks instead of
+            // exposing that transient contention to userspace build tools.
+            let mut created = None;
+            let ret = wait_io_core(
+                || match parent.create_with_attrs(
                     &leaf,
                     FileType::File,
                     vfs::CreateAttrs { mode: effective_mode, uid, gid: child_gid },
-                )
+                ) {
+                    Ok(inode) => {
+                        created = Some(Ok(inode));
+                        0
+                    }
+                    Err(error) => {
+                        if error != SyscallErr::EAGAIN {
+                            created = Some(Err(error));
+                        }
+                        -(error as isize)
+                    }
+                },
+                false,
+            );
+            if ret < 0 {
+                return Err(ret);
+            }
+            let inode = created
+                .expect("create_with_attrs succeeded without returning an inode")
                 .map_err(|e| -(e as isize))?;
             vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
         }
@@ -542,8 +580,15 @@ pub(crate) fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<A
         if let Err(errno) = check_memfd_truncate_seals(&reopened, 0) {
             return Some(Err(errno));
         }
-        if let Err(e) = inode.resize(0) {
-            return Some(Err(-(e as isize)));
+        let ret = wait_io_core(
+            || match inode.resize(0) {
+                Ok(()) => 0,
+                Err(error) => -(error as isize),
+            },
+            false,
+        );
+        if ret < 0 {
+            return Some(Err(ret));
         }
     }
 
