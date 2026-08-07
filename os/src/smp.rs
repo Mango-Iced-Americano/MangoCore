@@ -347,6 +347,11 @@ const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0'
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
 const STOP_TIMEOUT_SECONDS: usize = 1;
+// Kernel-global mapping publication may run while an AP is handling a long
+// scheduler/idle transition.  Keep the short stop/membarrier deadline for
+// those protocols, but give this sequence/ack protocol its own budget so a
+// slow emulated vCPU is not mistaken for a lost mapping publication.
+const KERNEL_TLB_TIMEOUT_SECONDS: usize = 5;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 
 /// CPU0 等待 AP 停止时唯一可能返回的错误。
@@ -1001,11 +1006,17 @@ fn synchronize_kernel_mapping_mask(
     // 个 pending interrupt 唤醒；若它同时完成 STOP，stopped ack 本身已经
     // 承诺不再访问旧翻译，也可替代本轮 TLB ack。
     let started_at = crate::hal::get_time();
-    let send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
+    let mut send_error = send_ipi_mask(remote, IpiReason::KERNEL_TLB_SYNC).err();
 
     let _irq_guard = IpiWaitIrqGuard::enter();
+    let clock_freq = crate::hal::get_clock_freq();
     let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+        .saturating_add(clock_freq.saturating_mul(KERNEL_TLB_TIMEOUT_SECONDS));
+    // The mailbox reason is level/sequence based and therefore idempotent:
+    // re-issuing the hardware doorbell cannot duplicate a request, while it
+    // repairs a one-shot IPI edge that was coalesced or delayed by QEMU TCG.
+    let kick_interval = (clock_freq / 100).max(1);
+    let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
     let result = 'wait: loop {
         let mut missing = None;
         let stopped = stopped_cpu_mask();
@@ -1032,7 +1043,21 @@ fn synchronize_kernel_mapping_mask(
         let Some((cpu_id, observed)) = missing else {
             break 'wait Ok(());
         };
-        if crate::hal::get_time() >= deadline {
+        let now = crate::hal::get_time();
+        if now >= next_kick {
+            // Keep the original mailbox publication and sequence unchanged;
+            // only retrigger delivery for CPUs that still need an ack.
+            let kick_targets = remote & !stopped;
+            if kick_targets != 0 {
+                if let Err(error) = send_ipi_mask(kick_targets, IpiReason::KERNEL_TLB_SYNC) {
+                    if send_error.is_none() {
+                        send_error = Some(error);
+                    }
+                }
+            }
+            next_kick = now.saturating_add(kick_interval);
+        }
+        if now >= deadline {
             break 'wait Err(KernelTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],
