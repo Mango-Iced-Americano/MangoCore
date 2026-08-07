@@ -677,3 +677,11 @@
 - **修复**: 复位动作表时只移除 handler 非 `SIG_IGN` 的 slot；未设置动作仍表示 `SIG_DFL`，不必物化为完整 64 槽表。
 - **教训**: 排查“exec 后首次 kill/signal 静默停滞”时，先按 `SIG_DFL`、`SIG_IGN`、用户 handler 三种 disposition 核对 exec 前后状态；不能把“handler reset”误实现为“所有 disposition reset”。
 - **相关文件**: `os/src/task/signal/action.rs`
+
+## test-runner 组脚本 exit 126 但手动在 SD 系统内运行正常
+
+- **现象**: 实板 `mode=run` + `mask=0x2000`（buildstorm/cagent）下脚本 `done buildstorm_testcode.sh in /sdcard/glibc exit_code=32256`（=126<<8），但同一脚本在 SD 系统 chroot 内手动 `bash buildstorm_testcode.sh` 成功。
+- **根因**: 组只 `chdir("/sdcard/glibc")` 未 `chroot`，脚本内绝对路径（`/proc`、`/root/.cargo`、`/work/tgoskits`、`/usr/bin`）解析到 initramfs 根而非 SD 根，`sh` 找不到依赖 → 126。
+- **修复**: `run_group_chrooted()`：子进程先 `vf2_mounts::bind_pseudo_filesystems_in(root)`（/proc,/sys,/dev,/dev/shm,/run,/tmp 绑进新根，保证 /sys/kernel/stats 等仍在），再 `chroot(root)` + `chdir(work_dir)`，然后 exec 脚本；父侧 wait/timeout/kill pgid 与 `run_group_in_dir` 完全一致。
+- **教训**: 任何依赖 SD 根 Debian 用户态（rust 工具链/tgoskits/cargo cache）的测试组脚本必须 chroot 进 SD 根执行，chdir 不够；bind pseudo-fs 必须在 chroot 之前完成。QEMU 无 SD 用户态时该组 exit 126 属预期。
+- **相关文件**: `user/src/bin/test_runner/groups/execute.rs`、`user/src/bin/test_runner/vf2_mounts.rs`
