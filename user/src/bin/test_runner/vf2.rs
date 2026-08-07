@@ -1,12 +1,23 @@
+//! VF2 / StarFive VisionFive 2 board SD-root chroot logic (moved from
+//! `init/vf2.rs`).
+//!
+//! The test-runner decides by mode whether to chroot into the SD root:
+//! - `Shell` mode on a real VF2 board: probe /proc/device-tree/model, mount the
+//!   SD root at /newroot, bind pseudo-filesystems in, then chroot + exec
+//!   /sbin/init. This never returns on the board.
+//! - QEMU (model not StarFive) or `Run` mode: `try_boot()` returns immediately
+//!   and the test-runner stays in the initramfs with the SD card at /sdcard.
+
 use alloc::string::String;
 use alloc::vec::Vec;
-use super::mounts;
+use super::vf2_mounts;
 use user_lib::syscall::sys_open;
 use user_lib::{chdir, chroot, close, exec, getdents64, open, println, read, OpenFlags};
 
 const NEW_ROOT: &str = "/newroot\0";
 const ROOT_INIT: &str = "/sbin/init\0";
 const ROOT_SHELL: &str = "/bin/sh\0";
+const RESCUE_SHELL: &str = "/rescue/sh\0";
 const O_DIRECTORY: u32 = 0o200000;
 const DT_BLK: u8 = 6;
 const DIRENT64_HEADER_LEN: usize = 19;
@@ -17,7 +28,10 @@ struct DeviceCandidate {
     rank: usize,
 }
 
-pub(super) fn try_boot() {
+/// Probe the board and chroot into the SD root when this is a VisionFive.
+/// Returns normally (continuing the initramfs) on QEMU or when no SD root is
+/// available.
+pub(crate) fn try_boot() {
     let mut model = [0u8; 256];
     let Some(model) = platform_model(&mut model) else {
         return;
@@ -26,16 +40,19 @@ pub(super) fn try_boot() {
         return;
     }
 
-    println!("[init] VF2 model read: {}", model);
-    println!("[init] VF2 probing /dev for SD root");
+    println!("[test-runner] VF2 model read: {}", model);
+    println!("[test-runner] VF2 probing /dev for SD root");
     let Some(device) = mount_root_device() else {
-        println!("[init] VF2 SD root unavailable; continuing initramfs");
+        println!("[test-runner] VF2 SD root unavailable; continuing initramfs");
         return;
     };
-    println!("[init] VF2 mounted {} at /newroot", device.trim_end_matches('\0'));
-    println!("[init] VF2 bind-mounting pseudo-filesystems into /newroot");
-    if !mounts::bind_pseudo_filesystems_in(NEW_ROOT) {
-        println!("[init] VF2 pseudo-filesystem bind failed; continuing initramfs");
+    println!(
+        "[test-runner] VF2 mounted {} at /newroot",
+        device.trim_end_matches('\0')
+    );
+    println!("[test-runner] VF2 bind-mounting pseudo-filesystems into /newroot");
+    if !vf2_mounts::bind_pseudo_filesystems_in(NEW_ROOT) {
+        println!("[test-runner] VF2 pseudo-filesystem bind failed; continuing initramfs");
         return;
     }
     chroot_to(NEW_ROOT);
@@ -67,8 +84,11 @@ fn is_visionfive_model(model: &str) -> bool {
 fn mount_root_device() -> Option<String> {
     for candidate in discover_root_candidates() {
         let device = alloc::format!("/dev/{}\0", candidate.name);
-        println!("[init] VF2 trying root device {}", device.trim_end_matches('\0'));
-        if mounts::mount_root_filesystem(&device, NEW_ROOT) {
+        println!(
+            "[test-runner] VF2 trying root device {}",
+            device.trim_end_matches('\0')
+        );
+        if vf2_mounts::mount_root_filesystem(&device, NEW_ROOT) {
             return Some(device);
         }
     }
@@ -78,7 +98,7 @@ fn mount_root_device() -> Option<String> {
 fn discover_root_candidates() -> Vec<DeviceCandidate> {
     let fd = sys_open("/dev\0", OpenFlags::RDONLY.bits() | O_DIRECTORY);
     if fd < 0 {
-        println!("[init] VF2 open /dev failed: {}", fd);
+        println!("[test-runner] VF2 open /dev failed: {}", fd);
         return Vec::new();
     }
 
@@ -87,7 +107,7 @@ fn discover_root_candidates() -> Vec<DeviceCandidate> {
     loop {
         let count = getdents64(fd as usize, &mut buffer);
         if count < 0 {
-            println!("[init] VF2 getdents64 /dev failed: {}", count);
+            println!("[test-runner] VF2 getdents64 /dev failed: {}", count);
             break;
         }
         if count == 0 {
@@ -145,35 +165,69 @@ fn device_rank(name: &str, file_type: u8) -> Option<usize> {
     }
 }
 
+/// Fork a rescue shell loop that keeps respawning /rescue/sh forever. Used as
+/// the safety net on all VF2 failure paths.
+pub(crate) fn rescue_forever() -> ! {
+    use user_lib::{exit, fork, sleep, waitpid_wnohang};
+    println!("[test-runner] entering rescue shell");
+    loop {
+        let shell = fork();
+        if shell == 0 {
+            exec(
+                RESCUE_SHELL,
+                &[RESCUE_SHELL.as_ptr(), core::ptr::null()],
+                &[core::ptr::null()],
+            );
+            exit(127);
+        }
+        if shell < 0 {
+            let mut status = 0;
+            while waitpid_wnohang(-1, &mut status) > 0 {}
+            sleep(100);
+            continue;
+        }
+        let mut status = 0;
+        while waitpid_wnohang(shell, &mut status) == 0 {
+            let mut reap = 0;
+            while waitpid_wnohang(-1, &mut reap) > 0 {}
+            sleep(100);
+        }
+    }
+}
+
 fn chroot_to(root: &str) -> ! {
     let ret = chdir("/\0");
     if ret < 0 {
-        println!("[init] VF2 chdir before chroot failed: {}", ret);
-        super::rescue_forever();
+        println!("[test-runner] VF2 chdir before chroot failed: {}", ret);
+        rescue_forever();
     }
     let ret = chroot(root);
     if ret < 0 {
-        println!("[init] VF2 chroot {} failed: {}", root.trim_end_matches('\0'), ret);
-        super::rescue_forever();
+        println!(
+            "[test-runner] VF2 chroot {} failed: {}",
+            root.trim_end_matches('\0'),
+            ret
+        );
+        rescue_forever();
     }
     let ret = chdir("/\0");
     if ret < 0 {
-        println!("[init] VF2 chdir after chroot failed: {}", ret);
-        super::rescue_forever();
+        println!("[test-runner] VF2 chdir after chroot failed: {}", ret);
+        rescue_forever();
     }
 
-    println!("[init] VF2 chroot complete; exec /sbin/init");
+    println!("[test-runner] VF2 chroot complete; exec /sbin/init");
     let ret = exec(
         ROOT_INIT,
         &[ROOT_INIT.as_ptr(), core::ptr::null()],
         &[core::ptr::null()],
     );
-    println!("[init] VF2 exec /sbin/init failed: {}; trying /bin/sh", ret);
+    println!("[test-runner] VF2 exec /sbin/init failed: {}; trying /bin/sh", ret);
     let ret = exec(
         ROOT_SHELL,
         &[ROOT_SHELL.as_ptr(), core::ptr::null()],
         &[core::ptr::null()],
     );
-    println!("[init] VF2 exec /bin/sh failed: {}; entering rescue shell", ret);
-    super::rescue_forever();
+    println!("[test-runner] VF2 exec /bin/sh failed: {}; entering rescue shell", ret);
+    rescue_forever();
 }
