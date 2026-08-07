@@ -988,6 +988,21 @@ fn stats_pagecache_content(
     );
     let _ = writeln!(
         s,
+        "pc_write_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_commit_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COMMIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
         "pc_wb_calls={}",
         read_counter(&crate::task::perf::PC_WRITEBACK_CALLS)
     );
@@ -1149,6 +1164,76 @@ fn stats_blockio_content(
         s,
         "pread_vfs_mode_cycles={}",
         read_counter(&crate::task::perf::PREAD_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "journal_commit_count={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "journal_commit_bytes={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_data_write_bytes={}",
+        read_counter(&crate::task::perf::WB_DATA_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_data_write_cycles={}",
+        read_counter(&crate::task::perf::WB_DATA_WRITE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_alloc_extent_pages={}",
+        read_counter(&crate::task::perf::WB_ALLOC_EXTENT_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_alloc_extent_cycles={}",
+        read_counter(&crate::task::perf::WB_ALLOC_EXTENT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_commit_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_COMMIT_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_staged_blocks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_STAGED_BLOCKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_tx_first={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_TX_FIRST)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_tx_last={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_TX_LAST)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_flush_count={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_FLUSH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_flush_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_FLUSH_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_flush_boundary_count={}",
+        read_counter(&crate::task::perf::WB_FLUSH_BOUNDARY_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "wb_flush_boundary_ticks={}",
+        read_counter(&crate::task::perf::WB_FLUSH_BOUNDARY_TICKS)
     );
     write_str(offset, len, buf, &s)
 }

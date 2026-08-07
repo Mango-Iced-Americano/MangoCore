@@ -90,4 +90,51 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
     fn supports_reliable_flush(&self) -> bool {
         self.device.supports_reliable_flush()
     }
+
+    fn diagnostic_enabled(&self) -> bool {
+        crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+    }
+
+    fn diagnostic_cycles(&self) -> usize {
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+    }
+
+    fn record_journal_commit(&self, bytes: usize) {
+        crate::task::perf::record_journal_commit(bytes);
+    }
+
+    fn record_writeback_data_write(&self, bytes: usize, cycles: usize) {
+        crate::task::perf::record_wb_data_write(bytes, cycles);
+    }
+
+    fn record_writeback_alloc_extent(&self, pages: usize, cycles: usize) {
+        crate::task::perf::record_wb_alloc_extent(pages, cycles);
+    }
+
+    fn record_writeback_journal_commit(
+        &self,
+        transaction_id: u32,
+        staged_blocks: usize,
+        cycles: usize,
+        _reason: another_ext4::JournalCommitReason,
+    ) {
+        crate::task::perf::record_wb_tx_journal_commit(transaction_id, staged_blocks, cycles);
+    }
+
+    fn record_writeback_journal_flush(
+        &self,
+        _transaction_id: u32,
+        _phase: another_ext4::JournalFlushPhase,
+        cycles: usize,
+    ) {
+        crate::task::perf::record_wb_tx_journal_flush(cycles);
+    }
+
+    fn record_writeback_flush_boundary(
+        &self,
+        _reason: another_ext4::JournalCommitReason,
+        cycles: usize,
+    ) {
+        crate::task::perf::record_wb_flush_boundary(cycles);
+    }
 }

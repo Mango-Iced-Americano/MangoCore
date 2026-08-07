@@ -1061,7 +1061,7 @@ impl PageCache {
 
     /// 在页面字节已经复制完成后发布 Dirty；Writeback 并发期间只置
     /// PG_REDIRTIED，完成者会把页面恢复为可重试的 Dirty。
-    fn mark_dirty_after_copy(&self, page_index: usize, entry: &PageEntry) {
+    fn mark_dirty_after_copy(&self, _page_index: usize, entry: &PageEntry) {
         loop {
             let st = entry.state();
             match st {
@@ -1611,13 +1611,28 @@ impl PageCache {
             let page_offset = offset - page_start;
             let sub_len = buf.len().min(PAGE_SIZE - page_offset);
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry =
                 self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
+            perf::record_pc_write_lookup(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(lookup_start),
+            );
+            let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             entry.with_bytes_mut(|dst| {
                 dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
             });
+            perf::record_pc_write_copy(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(copy_start),
+            );
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
+            let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             self.mark_dirty_after_copy(start_page, &entry);
+            perf::record_pc_write_commit(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(commit_start),
+            );
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
@@ -1641,6 +1656,7 @@ impl PageCache {
         let mut pages = 0usize;
         let mut any_full_overwrite = false;
 
+        let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         for page_index in start_page..=end_page {
             let page_start = page_index << PAGE_SIZE_BITS;
             let page_end = page_start + PAGE_SIZE;
@@ -1668,9 +1684,14 @@ impl PageCache {
             });
             total_written += sub_len;
         }
+        perf::record_pc_write_lookup(
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
+        );
 
         // Phase 2: 写入数据（无锁）
         let mut src_offset = 0;
+        let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        let mut commit_cycles = 0usize;
         for (page_index, item) in (start_page..).zip(&copies) {
             let dst_start = item.page_offset;
             item.entry.with_bytes_mut(|dst| {
@@ -1680,12 +1701,21 @@ impl PageCache {
             let became_full = item
                 .entry
                 .mark_valid_and_check_full(item.page_offset, item.sub_len);
+            let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             self.mark_dirty_after_copy(page_index, &item.entry);
+            commit_cycles = commit_cycles.wrapping_add(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(commit_start),
+            );
             if became_full && !item.full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
             src_offset += item.sub_len;
         }
+        perf::record_pc_write_copy(
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
+        );
+        perf::record_pc_write_commit(commit_cycles);
 
         perf::record_pc_write(
             pages,
@@ -1886,6 +1916,7 @@ impl PageCache {
         let end_page = (end - 1) >> PAGE_SIZE_BITS;
         let mut total_written = 0usize;
 
+        let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         for page_index in start_page..=end_page {
             let page_start = page_index << PAGE_SIZE_BITS;
             let write_start = offset.max(page_start);
@@ -1903,12 +1934,17 @@ impl PageCache {
                 full_page_overwrite,
             )?;
             let user_offset = write_start - offset;
+            let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let copied = entry.with_bytes_mut(|dst| {
                 user.read_into_at_nofault(
                     user_offset,
                     &mut dst[page_offset..page_offset + sub_len],
                 )
             });
+            perf::record_pc_write_copy(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(copy_start),
+            );
             let copied = copied.map_err(|_| SyscallErr::EFAULT)?;
             if copied != sub_len {
                 total_written += copied;
@@ -1919,9 +1955,17 @@ impl PageCache {
                 };
             }
             entry.mark_valid(page_offset, copied);
+            let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             self.mark_dirty_after_copy(page_index, &entry);
+            perf::record_pc_write_commit(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(commit_start),
+            );
             total_written += copied;
         }
+        perf::record_pc_write_lookup(
+            perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
+        );
 
         balance_dirty_pages();
         Ok(total_written)

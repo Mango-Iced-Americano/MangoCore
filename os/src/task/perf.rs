@@ -300,6 +300,9 @@ mod enabled {
     pub static PC_WRITE_OVERWRITE: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_EVENTUALLY_FULL: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITE_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_LOOKUP_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_COPY_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static PC_WRITE_COMMIT_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static PC_WRITEBACK_CYCLES_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -312,6 +315,22 @@ mod enabled {
     pub static PREAD_EXT4_PAGE_CACHE_CYCLES: AtomicUsize = AtomicUsize::new(0);
     pub static PREAD_TOTAL_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static PREAD_VFS_MODE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── P0: another_ext4 journal/writeback attribution ──
+    pub static JOURNAL_COMMIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static JOURNAL_COMMIT_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_DATA_WRITE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_DATA_WRITE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_ALLOC_EXTENT_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_ALLOC_EXTENT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_COMMIT_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_STAGED_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_TX_FIRST: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_TX_LAST: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_FLUSH_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_TX_JOURNAL_FLUSH_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_FLUSH_BOUNDARY_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static WB_FLUSH_BOUNDARY_TICKS: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: Writeback Throttling ──
     pub static WB_BG_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -944,6 +963,27 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_pc_write_lookup(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PC_WRITE_LOOKUP_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pc_write_copy(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PC_WRITE_COPY_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pc_write_commit(cycles: usize) {
+        if memory_io_stats_enabled() {
+            PC_WRITE_COMMIT_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_pc_write_eventually_full() {
         if !memory_io_stats_enabled() {
             return;
@@ -1017,6 +1057,67 @@ mod enabled {
         if memory_io_stats_enabled() {
             PREAD_VFS_MODE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
         }
+    }
+
+    #[inline(always)]
+    pub fn record_journal_commit(bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        JOURNAL_COMMIT_COUNT.fetch_add(1, Ordering::Relaxed);
+        JOURNAL_COMMIT_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_data_write(bytes: usize, cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        WB_DATA_WRITE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        WB_DATA_WRITE_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_alloc_extent(pages: usize, cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        WB_ALLOC_EXTENT_PAGES.fetch_add(pages, Ordering::Relaxed);
+        WB_ALLOC_EXTENT_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_tx_journal_commit(transaction_id: u32, staged_blocks: usize, cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let _ = WB_TX_JOURNAL_TX_FIRST.compare_exchange(
+            0,
+            transaction_id as usize,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        WB_TX_JOURNAL_TX_LAST.store(transaction_id as usize, Ordering::Relaxed);
+        WB_TX_JOURNAL_STAGED_BLOCKS.fetch_add(staged_blocks, Ordering::Relaxed);
+        WB_TX_JOURNAL_COMMIT_TICKS.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_tx_journal_flush(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        WB_TX_JOURNAL_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
+        WB_TX_JOURNAL_FLUSH_TICKS.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_wb_flush_boundary(cycles: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        WB_FLUSH_BOUNDARY_COUNT.fetch_add(1, Ordering::Relaxed);
+        WB_FLUSH_BOUNDARY_TICKS.fetch_add(cycles, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -1437,6 +1538,9 @@ mod enabled {
         PC_WRITE_OVERWRITE.store(0, Ordering::Relaxed);
         PC_WRITE_EVENTUALLY_FULL.store(0, Ordering::Relaxed);
         PC_WRITE_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+        PC_WRITE_LOOKUP_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_COPY_CYCLES.store(0, Ordering::Relaxed);
+        PC_WRITE_COMMIT_CYCLES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CALLS.store(0, Ordering::Relaxed);
         PC_WRITEBACK_PAGES.store(0, Ordering::Relaxed);
         PC_WRITEBACK_CYCLES_TOTAL.store(0, Ordering::Relaxed);
@@ -1447,6 +1551,20 @@ mod enabled {
         PREAD_EXT4_PAGE_CACHE_CYCLES.store(0, Ordering::Relaxed);
         PREAD_TOTAL_COUNT.store(0, Ordering::Relaxed);
         PREAD_VFS_MODE_CYCLES.store(0, Ordering::Relaxed);
+        JOURNAL_COMMIT_COUNT.store(0, Ordering::Relaxed);
+        JOURNAL_COMMIT_BYTES.store(0, Ordering::Relaxed);
+        WB_DATA_WRITE_BYTES.store(0, Ordering::Relaxed);
+        WB_DATA_WRITE_CYCLES.store(0, Ordering::Relaxed);
+        WB_ALLOC_EXTENT_PAGES.store(0, Ordering::Relaxed);
+        WB_ALLOC_EXTENT_CYCLES.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_COMMIT_TICKS.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_STAGED_BLOCKS.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_TX_FIRST.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_TX_LAST.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_FLUSH_COUNT.store(0, Ordering::Relaxed);
+        WB_TX_JOURNAL_FLUSH_TICKS.store(0, Ordering::Relaxed);
+        WB_FLUSH_BOUNDARY_COUNT.store(0, Ordering::Relaxed);
+        WB_FLUSH_BOUNDARY_TICKS.store(0, Ordering::Relaxed);
         // Writeback Throttling (P0)
         WB_BG_CALLS.store(0, Ordering::Relaxed);
         WB_THROTTLE_CALLS.store(0, Ordering::Relaxed);
@@ -2481,6 +2599,15 @@ pub fn record_pc_lookup_cycles(_cycles: usize) {}
 pub fn record_pc_write(_pages: usize, _full_overwrite: bool, _cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_pc_write_lookup(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_write_copy(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pc_write_commit(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_pc_write_eventually_full() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2510,6 +2637,25 @@ pub fn record_pread_total_count() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_pread_vfs_mode(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_commit(_bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_data_write(_bytes: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_alloc_extent(_pages: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_tx_journal_commit(_transaction_id: u32, _staged_blocks: usize, _cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_tx_journal_flush(_cycles: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wb_flush_boundary(_cycles: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -2945,6 +3091,15 @@ pub static PC_WRITE_EVENTUALLY_FULL: core::sync::atomic::AtomicUsize =
 pub static PC_WRITE_CYCLES_TOTAL: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_LOOKUP_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_COPY_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static PC_WRITE_COMMIT_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
 pub static PC_WRITEBACK_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
@@ -2974,6 +3129,49 @@ pub static PREAD_TOTAL_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static PREAD_VFS_MODE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_DATA_WRITE_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_DATA_WRITE_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_ALLOC_EXTENT_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_ALLOC_EXTENT_CYCLES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_COMMIT_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_STAGED_BLOCKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_TX_FIRST: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_TX_LAST: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_FLUSH_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_TX_JOURNAL_FLUSH_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_FLUSH_BOUNDARY_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static WB_FLUSH_BOUNDARY_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 // ── Writeback Throttling stubs ──
