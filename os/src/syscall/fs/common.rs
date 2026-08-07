@@ -451,6 +451,7 @@ pub(crate) fn open_file_at(
                     return Err(EACCES);
                 }
             }
+            let mut vfs_flags = _open_flags_to_vfs_flags(flags);
             if flags.contains(OpenFlags::O_TRUNC) {
                 // another_ext4 deliberately reports metadata-gate contention as
                 // EAGAIN because its transaction guard spans block-device I/O.
@@ -468,8 +469,13 @@ pub(crate) fn open_file_at(
                 if ret < 0 {
                     return Err(ret);
                 }
+                // The truncate has already been completed above.  Passing
+                // O_TRUNC into File::open() would perform it a second time,
+                // re-entering another_ext4's metadata gate and leaking a
+                // transient EAGAIN from the otherwise successful open.
+                vfs_flags.remove(vfs::FileFlags::O_TRUNC);
             }
-            vfs::File::new_with_metadata(target, _open_flags_to_vfs_flags(flags), md)
+            vfs::File::new_with_metadata(target, vfs_flags, md)
                 .map_err(|e| -(e as isize))
         }
         Err(errno) if errno == ENOENT => {
@@ -519,7 +525,12 @@ pub(crate) fn open_file_at(
             let inode = created
                 .expect("create_with_attrs succeeded without returning an inode")
                 .map_err(|e| -(e as isize))?;
-            vfs::File::new(inode, _open_flags_to_vfs_flags(flags)).map_err(|e| -(e as isize))
+            // A newly created inode starts at size zero, so O_TRUNC has no
+            // work left for File::open().  Avoid the second metadata
+            // transaction while preserving the userspace open semantics.
+            let mut vfs_flags = _open_flags_to_vfs_flags(flags);
+            vfs_flags.remove(vfs::FileFlags::O_TRUNC);
+            vfs::File::new(inode, vfs_flags).map_err(|e| -(e as isize))
         }
         Err(errno) => Err(errno),
     }
@@ -563,7 +574,11 @@ pub(crate) fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<A
         (file.inode.clone(), file.file_type(), file.memfd_seals())
     };
 
-    let reopened = match vfs::File::new(inode.clone(), _open_flags_to_vfs_flags(flags)) {
+    let mut reopened_flags = _open_flags_to_vfs_flags(flags);
+    // Truncation is performed explicitly below after the memfd seal checks;
+    // do not let inode.open() perform a second truncate transaction.
+    reopened_flags.remove(vfs::FileFlags::O_TRUNC);
+    let reopened = match vfs::File::new(inode.clone(), reopened_flags) {
         Ok(file) => file,
         Err(e) => return Some(Err(-(e as isize))),
     };
