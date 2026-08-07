@@ -182,8 +182,46 @@ impl IndexNode for Ext4Inode {
         }
     }
 
+    fn read_at_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        if self.file_type != FileType::File {
+            return Err(SyscallErr::EINVAL);
+        }
+        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let actual = len.min(dst.len()).min(size.saturating_sub(offset));
+        if actual == 0 {
+            return Ok(0);
+        }
+        let fs = self.fs_arc()?;
+        self.regular_page_cache(&fs)
+            .read_at_user(offset, actual, dst)
+    }
+
+    fn supports_user_buffer_io(&self) -> bool {
+        self.file_type == FileType::File
+    }
+
     super::mutations::writable_data_inode_mutations!();
     super::namespace::writable_namespace_inode_mutations!();
+
+    fn create_with_data(
+        &self,
+        name: &str,
+        file_type: FileType,
+        mode: InodeMode,
+        data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        match file_type {
+            FileType::Pipe | FileType::CharDevice | FileType::BlockDevice | FileType::Socket => {
+                self.mknod(name, mode, data as u64)
+            }
+            _ => self.create(name, file_type, mode),
+        }
+    }
 
     fn open(
         &self,
@@ -199,7 +237,9 @@ impl IndexNode for Ext4Inode {
 
     fn close(&self, _data: MutexGuard<FilePrivateData>) -> Result<(), SyscallErr> {
         drop(_data);
-        self.sync()
+        // close(2) is not a durability barrier; fsync/syncfs/sync provide
+        // the explicit persistence boundary and allow writeback batching.
+        Ok(())
     }
 
     fn find(&self, name: &str) -> Result<Arc<dyn IndexNode>, SyscallErr> {
@@ -258,6 +298,13 @@ impl IndexNode for Ext4Inode {
         let attr = self.attr(&fs)?;
         let file_type = map_file_type(attr.ftype);
         let permissions = InodeMode::from_bits_truncate(u32::from(attr.perm.bits()));
+        let (mtime, ctime) = self
+            .lifetime
+            .cached_times()
+            .unwrap_or((
+                TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?),
+                TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?),
+            ));
         Ok(Metadata {
             dev_id: fs.fs_id(),
             inode_id: self.key.inode_id(),
@@ -270,8 +317,8 @@ impl IndexNode for Ext4Inode {
             blk_size: another_ext4::BLOCK_SIZE,
             blocks: usize::try_from(attr.blocks).map_err(|_| SyscallErr::EFBIG)?,
             atime: TimeSpec::from_s(usize::try_from(attr.atime).map_err(|_| SyscallErr::EFBIG)?),
-            mtime: TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?),
-            ctime: TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?),
+            mtime,
+            ctime,
             file_type,
             mode: InodeMode::from(file_type) | permissions,
             flags: InodeFlags::empty(),
@@ -307,6 +354,10 @@ impl IndexNode for Ext4Inode {
                 attributes,
             )
             .map_err(|error| from_another(error.code()))
+    }
+
+    fn touch_modified(&self) {
+        self.lifetime.cache_modified_time(crate::timer::TimeSpec::now());
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {

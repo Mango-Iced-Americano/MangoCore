@@ -1,0 +1,2 @@
+container=6b17b5297342cc14a02d200db798aae3bf10954110855eaa46b0ca43caa86825
+mount=/home/lzm/projects/MangoCore-smp-final-merge-20260806 -> /app

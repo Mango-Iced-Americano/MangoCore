@@ -6,3 +6,12 @@ smp=cpus=8,sockets=1,cores=8,threads=1
 x0=/tmp/sdcard-rseq-clean.img (copied from testresult/cagent-official/sdcard-rv-pub.img)
 x1=/tmp/rseq-rv/rv64/release/normal/tools/disk.img
 cmdline=mango.mode=normal profile=buildstorm
+
+# another_ext4 layered adaptation follow-up
+branch=smp
+ktest=fs_smp
+core_num=4
+ktest_timeout_ms=10000
+qemu_timeout_s=45
+normal_image=../sdcard-rv.img (official x0 competition role)
+backend=another_ext4

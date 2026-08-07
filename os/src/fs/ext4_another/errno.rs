@@ -1,11 +1,14 @@
 use crate::drivers::block::BlockDeviceError;
 use crate::utils::error::SyscallErr;
 
-pub(crate) const fn from_another(error: another_ext4::ErrCode) -> SyscallErr {
+pub(crate) fn from_another(error: another_ext4::ErrCode) -> SyscallErr {
     match error {
         another_ext4::ErrCode::EPERM => SyscallErr::EPERM,
         another_ext4::ErrCode::ENOENT => SyscallErr::ENOENT,
-        another_ext4::ErrCode::EIO => SyscallErr::EIO,
+        another_ext4::ErrCode::EIO => {
+            log::error!("[ext4_another] BRIDGE EIO: raw={:?}", error);
+            SyscallErr::EIO
+        }
         another_ext4::ErrCode::EAGAIN => SyscallErr::EAGAIN,
         another_ext4::ErrCode::ENXIO => SyscallErr::ENXIO,
         another_ext4::ErrCode::E2BIG => SyscallErr::E2BIG,
@@ -27,6 +30,14 @@ pub(crate) const fn from_another(error: another_ext4::ErrCode) -> SyscallErr {
         another_ext4::ErrCode::ENODATA => SyscallErr::ENODATA,
         another_ext4::ErrCode::ENOTSUP => SyscallErr::EOPNOTSUPP,
     }
+}
+
+/// Preserve the backend error mapping while naming a failing hot-path operation.
+pub(crate) fn from_another_op(error: &another_ext4::Ext4Error, op: &str) -> SyscallErr {
+    if error.code() == another_ext4::ErrCode::EIO {
+        log::error!("[ext4_another] BRIDGE EIO: op={} error={:?}", op, error);
+    }
+    from_another(error.code())
 }
 
 pub(crate) const fn from_block_device(error: BlockDeviceError) -> another_ext4::ErrCode {

@@ -591,6 +591,17 @@ impl PageCache {
         *self.backend.lock() = Some(backend);
     }
 
+    /// Serialize a filesystem durability/truncate operation with ordinary
+    /// page-cache readers, writers, and writeback.  The callback must not
+    /// enter user space or wait on a task while this gate is held.
+    pub fn with_io_gate<F, T>(&self, operation: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _gate = self.op_gate.write();
+        operation()
+    }
+
     /// 关联一个 `IndexNode`（`Weak` 引用，不阻止 inode 回收）。
     pub fn set_inode(&self, inode: Weak<dyn IndexNode>) {
         *self.inode.lock() = Some(inode);
@@ -1796,7 +1807,12 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
-        let _op = self.op_gate.read();
+        let _gate = self.op_gate.read();
+        self.writeback_page_locked(page_index)
+    }
+
+    /// Write back one page while the caller already holds `op_gate`.
+    pub(crate) fn writeback_page_locked(&self, page_index: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let entry = {
             let entries = self.entries.lock();
@@ -1904,7 +1920,12 @@ impl PageCache {
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
     fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
-        let _op = self.op_gate.read();
+        let _gate = self.op_gate.read();
+        self.writeback_pages_run_locked(start, count)
+    }
+
+    /// Batch writeback while the caller already holds `op_gate`.
+    fn writeback_pages_run_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
@@ -2025,6 +2046,12 @@ impl PageCache {
 
     /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
+        let _gate = self.op_gate.read();
+        self.writeback_all_with_io_gate_held()
+    }
+
+    /// Write back all dirty pages while the caller holds `op_gate`.
+    pub(crate) fn writeback_all_with_io_gate_held(&self) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner.dirty_pages.iter().copied().collect()
@@ -2049,13 +2076,23 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
 
     /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
+        let _gate = self.op_gate.read();
+        self.writeback_range_with_io_gate_held(start_index, end_index)
+    }
+
+    /// Write back a range while the caller holds `op_gate`.
+    fn writeback_range_with_io_gate_held(
+        &self,
+        start_index: usize,
+        end_index: usize,
+    ) -> Result<(), SyscallErr> {
         let dirty_indices: Vec<usize> = {
             let inner = self.inner.lock();
             inner
@@ -2084,7 +2121,7 @@ impl PageCache {
                 count += 1;
                 i += 1;
             }
-            self.writeback_pages_run(run_start, run_end - run_start + 1)?;
+            self.writeback_pages_run_locked(run_start, run_end - run_start + 1)?;
         }
         Ok(())
     }
@@ -2100,6 +2137,12 @@ impl PageCache {
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
     /// 达到预算或脏页耗尽时停止。
     pub fn writeback_some_pages(&self, budget: usize) -> usize {
+        let _gate = self.op_gate.read();
+        self.writeback_some_pages_with_io_gate_held(budget)
+    }
+
+    /// Write back up to `budget` pages while the caller holds `op_gate`.
+    fn writeback_some_pages_with_io_gate_held(&self, budget: usize) -> usize {
         if budget == 0 {
             return 0;
         }
@@ -2130,7 +2173,7 @@ impl PageCache {
             // writeback_pages_run uses CAS — some pages may have been
             // concurrently consumed by another flusher. Tolerate
             // partial progress and continue.
-            let _ = self.writeback_pages_run(run_start, run_end - run_start + 1);
+            let _ = self.writeback_pages_run_locked(run_start, run_end - run_start + 1);
             total += count;
         }
         total
@@ -2152,8 +2195,31 @@ impl PageCache {
         new_size: usize,
         persistent: impl FnOnce() -> Result<(), SyscallErr>,
     ) -> Result<(), SyscallErr> {
-        // 写锁与所有普通读写/回写排序；持锁期间不得进入用户态 copy 或等待。
-        let _op = self.op_gate.write();
+        self.with_io_gate(|| self.truncate_with_backend_locked(new_size, persistent))
+    }
+
+    /// Truncate the cache and persist the backend mutation while `op_gate` is
+    /// already held.  The backend callback runs before discarded cache entries
+    /// are removed, so a failed persistent truncate cannot silently lose the
+    /// in-memory tail.
+    pub(crate) fn truncate_with_io_gate_held_and_backend<F>(
+        &self,
+        new_size: usize,
+        persistent: F,
+    ) -> Result<(), SyscallErr>
+    where
+        F: FnOnce() -> Result<(), SyscallErr>,
+    {
+        self.truncate_with_backend_locked(new_size, persistent)
+    }
+
+    fn truncate_with_backend_locked(
+        &self,
+        new_size: usize,
+        persistent: impl FnOnce() -> Result<(), SyscallErr>,
+    ) -> Result<(), SyscallErr> {
+        // The caller holds the write side of op_gate; no user copy or task
+        // wait is permitted in this critical section.
         let hole_start_page = new_size.div_ceil(PAGE_SIZE);
         // Pass A：在移除 PageCache entry 前先 zap 所有仍映射该页的 VMA。fault
         // 若已持 VM 锁会在 op_gate.try_read 处返回 Retry，绝不反向等待；每轮

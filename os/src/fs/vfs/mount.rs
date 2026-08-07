@@ -1513,6 +1513,10 @@ impl IndexNode for MountFSInode {
         self.inner_inode.metadata()
     }
 
+    fn touch_modified(&self) {
+        self.inner_inode.touch_modified();
+    }
+
     fn set_metadata(&self, metadata: &super::Metadata) -> Result<(), SyscallErr> {
         self.ensure_mount_writable()?;
         self.inner_inode.set_metadata(metadata)

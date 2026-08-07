@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::page_cache::PageCache;
+use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
 use super::errno::from_another;
@@ -33,7 +34,13 @@ impl InodeKey {
 
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
+    cached_times: Mutex<Option<(TimeSpec, TimeSpec)>>,
+    timestamp_generation: AtomicUsize,
     page_cache: Mutex<Option<Weak<PageCache>>>,
+    /// Keep dirty cache data reachable until a successful data+metadata sync.
+    /// This closes the write → reopen window where a new VFS inode could
+    /// otherwise recreate a cache from the old on-disk inode size.
+    dirty_page_cache: Mutex<Option<Arc<PageCache>>>,
     reclaim: Mutex<Option<another_ext4::InodeReclaimHandle>>,
     reclaim_error: Mutex<Option<SyscallErr>>,
     pins: AtomicUsize,
@@ -42,11 +49,21 @@ pub(crate) struct InodeLifetime {
     pub(crate) size_generation: AtomicUsize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CachedTimestamps {
+    pub(crate) mtime: TimeSpec,
+    pub(crate) ctime: TimeSpec,
+    pub(crate) generation: usize,
+}
+
 impl InodeLifetime {
     fn new(size: usize) -> Self {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
+            cached_times: Mutex::new(None),
+            timestamp_generation: AtomicUsize::new(0),
             page_cache: Mutex::new(None),
+            dirty_page_cache: Mutex::new(None),
             reclaim: Mutex::new(None),
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
@@ -54,17 +71,70 @@ impl InodeLifetime {
         }
     }
 
+    pub(crate) fn cache_modified_time(&self, now: TimeSpec) {
+        *self.cached_times.lock() = Some((now, now));
+        self.timestamp_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
+        let times = *self.cached_times.lock();
+        times.map(|(mtime, ctime)| CachedTimestamps {
+            mtime,
+            ctime,
+            generation: self.timestamp_generation.load(Ordering::Acquire),
+        })
+    }
+
+    pub(crate) fn finish_timestamp_commit(&self, snapshot: CachedTimestamps) {
+        if self
+            .timestamp_generation
+            .compare_exchange(
+                snapshot.generation,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            *self.cached_times.lock() = None;
+        }
+    }
+
+    pub(crate) fn cached_times(&self) -> Option<(TimeSpec, TimeSpec)> {
+        *self.cached_times.lock()
+    }
+
     pub(crate) fn page_cache(&self) -> Option<Arc<PageCache>> {
-        self.page_cache.lock().as_ref().and_then(Weak::upgrade)
+        self.dirty_page_cache
+            .lock()
+            .clone()
+            .or_else(|| self.page_cache.lock().as_ref().and_then(Weak::upgrade))
     }
 
     pub(crate) fn install_page_cache(&self, cache: Arc<PageCache>) -> Arc<PageCache> {
+        if let Some(existing) = self.page_cache() {
+            return existing;
+        }
         let mut page_cache = self.page_cache.lock();
         if let Some(existing) = page_cache.as_ref().and_then(Weak::upgrade) {
             return existing;
         }
         *page_cache = Some(Arc::downgrade(&cache));
         cache
+    }
+
+    pub(crate) fn retain_dirty_page_cache(&self, cache: &Arc<PageCache>) {
+        let mut dirty_page_cache = self.dirty_page_cache.lock();
+        if dirty_page_cache.is_none() {
+            self.pin();
+            *dirty_page_cache = Some(cache.clone());
+        }
+    }
+
+    pub(crate) fn release_dirty_page_cache(&self) {
+        if self.dirty_page_cache.lock().take().is_some() {
+            self.unpin();
+        }
     }
 
     pub(crate) fn pin(&self) {
@@ -139,25 +209,36 @@ impl Ext4FileSystem {
             .map(|(key, lifetime)| (lifetime.page_cache(), *key, lifetime.clone()))
             .collect();
         let mut committed_generations = Vec::new();
+        let mut committed_timestamps = Vec::new();
         let mut flush_succeeded = false;
         let result = Self::complete_lifetime_sync(
             || {
-                for (maybe_cache, _key, _lifetime) in &all {
-                    if let Some(cache) = maybe_cache {
-                        cache.writeback_all()?;
+                for (maybe_cache, key, lifetime) in &all {
+                    let cache = maybe_cache.as_ref().cloned().or_else(|| lifetime.page_cache());
+                    let mut commit_size = || {
+                        let generation = lifetime.size_generation.load(Ordering::Acquire);
+                        if generation == 0 {
+                            return Ok(());
+                        }
+                        let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
+                        let size = lifetime.logical_size.load(Ordering::Acquire);
+                        self.inner()
+                            .commit_inode_size(id, size as u64, None)
+                            .map_err(|error| from_another(error.code()))?;
+                        if let Some(timestamps) = self.commit_lifetime_timestamps(id, lifetime)? {
+                            committed_timestamps.push((lifetime.clone(), timestamps));
+                        }
+                        committed_generations.push((lifetime.clone(), generation));
+                        Ok(())
+                    };
+                    if let Some(cache) = cache {
+                        cache.with_io_gate(|| {
+                            cache.writeback_all_with_io_gate_held()?;
+                            commit_size()
+                        })?;
+                    } else {
+                        commit_size()?;
                     }
-                }
-                for (_maybe_cache, key, lifetime) in &all {
-                    let generation = lifetime.size_generation.load(Ordering::Acquire);
-                    if generation == 0 {
-                        continue;
-                    }
-                    let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
-                    let size = lifetime.logical_size.load(Ordering::Acquire);
-                    self.inner()
-                        .commit_inode_size(id, size as u64, None)
-                        .map_err(|error| from_another(error.code()))?;
-                    committed_generations.push((lifetime.clone(), generation));
                 }
                 Ok(())
             },
@@ -170,12 +251,17 @@ impl Ext4FileSystem {
         );
         if flush_succeeded {
             for (lifetime, generation) in committed_generations {
-                let _ = lifetime.size_generation.compare_exchange(
+                if lifetime.size_generation.compare_exchange(
                     generation,
                     0,
                     Ordering::AcqRel,
                     Ordering::Acquire,
-                );
+                ).is_ok() {
+                    lifetime.release_dirty_page_cache();
+                }
+            }
+            for (lifetime, timestamps) in committed_timestamps {
+                lifetime.finish_timestamp_commit(timestamps);
             }
         }
         result

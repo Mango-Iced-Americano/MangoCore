@@ -1674,13 +1674,7 @@ impl File {
     }
 
     fn touch_modified(&self) {
-        let Ok(mut metadata) = self.inode.metadata() else {
-            return;
-        };
-        let now = crate::timer::TimeSpec::now();
-        metadata.mtime = now;
-        metadata.ctime = now;
-        let _ = self.inode.set_metadata(&metadata);
+        self.inode.touch_modified();
     }
 
     pub fn offset(&self) -> usize {

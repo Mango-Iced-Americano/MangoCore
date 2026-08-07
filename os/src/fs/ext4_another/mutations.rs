@@ -23,13 +23,12 @@ macro_rules! writable_data_inode_mutations {
             let end = offset
                 .checked_add(actual)
                 .ok_or(crate::utils::error::SyscallErr::EFBIG)?;
-            let inode_id = u32::try_from(self.key.inode_id())
-                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let old_size = self
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let written = self.regular_page_cache(&fs).write_kernel(
+            let cache = self.regular_page_cache(&fs);
+            let written = cache.write_kernel(
                 offset,
                 &buffer[..actual],
                 old_size,
@@ -40,6 +39,7 @@ macro_rules! writable_data_inode_mutations {
             self.lifetime
                 .size_generation
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            self.lifetime.retain_dirty_page_cache(&cache);
             Ok(written)
         }
 
@@ -49,18 +49,35 @@ macro_rules! writable_data_inode_mutations {
             len: usize,
             source: &crate::mm::UserBuffer,
         ) -> Result<usize, crate::utils::error::SyscallErr> {
-            let _fs = self.fs_arc()?;
+            let fs = self.fs_arc()?;
+            match self.file_type {
+                crate::fs::vfs::FileType::Dir => {
+                    return Err(crate::utils::error::SyscallErr::EISDIR)
+                }
+                crate::fs::vfs::FileType::File => {}
+                _ => return Err(crate::utils::error::SyscallErr::EINVAL),
+            }
             let actual = len.min(source.len());
-            let mut buffer = alloc::vec::Vec::new();
-            buffer
-                .try_reserve_exact(actual)
-                .map_err(|_| crate::utils::error::SyscallErr::ENOMEM)?;
-            buffer.resize(actual, 0);
-            let copied = source
-                .read_into(&mut buffer)
-                .map_err(|_| crate::utils::error::SyscallErr::EFAULT)?;
-            let private = spin::Mutex::new(crate::fs::vfs::FilePrivateData::Unused);
-            self.write_at(offset, copied, &buffer[..copied], private.lock())
+            if actual == 0 {
+                return Ok(0);
+            }
+            let cache = self.regular_page_cache(&fs);
+            let old_size = self
+                .lifetime
+                .logical_size
+                .load(core::sync::atomic::Ordering::Acquire);
+            let written = cache.write_at_user(offset, actual, source, old_size)?;
+            let end = offset
+                .checked_add(written)
+                .ok_or(crate::utils::error::SyscallErr::EFBIG)?;
+            self.lifetime
+                .logical_size
+                .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
+            self.lifetime
+                .size_generation
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            self.lifetime.retain_dirty_page_cache(&cache);
+            Ok(written)
         }
 
         fn write_direct(
@@ -93,28 +110,84 @@ macro_rules! writable_data_inode_mutations {
                 crate::fs::vfs::FileType::File => {}
                 _ => return Err(crate::utils::error::SyscallErr::EINVAL),
             }
-            let cache = self.page_cache();
-            if let Some(cache) = cache.as_ref() {
-                cache.writeback_all()?;
-            }
             let inode_id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            fs.inner()
-                .commit_inode_size(inode_id, len as u64, None)
-                .map_err(|error| super::errno::from_another(error.code()))?;
-            if let Some(cache) = cache {
-                cache.truncate(len)?;
+            let old_size = self
+                .lifetime
+                .logical_size
+                .load(core::sync::atomic::Ordering::Acquire);
+            if let Some(cache) = self.page_cache() {
+                cache.with_io_gate(|| {
+                    cache.writeback_all_with_io_gate_held()?;
+                    if len < old_size {
+                        cache.truncate_with_io_gate_held_and_backend(len, || {
+                            fs.inner()
+                                .truncate_inode(inode_id, len as u64)
+                                .map_err(|error| {
+                                    super::errno::from_another_op(&error, "truncate_inode(shrink)")
+                                })
+                        })?;
+                    } else {
+                        fs.inner()
+                            .truncate_inode(inode_id, len as u64)
+                            .map_err(|error| {
+                                super::errno::from_another_op(&error, "truncate_inode(extend)")
+                            })?;
+                    }
+                    Ok::<(), crate::utils::error::SyscallErr>(())
+                })?;
+            } else {
+                fs.inner()
+                    .truncate_inode(inode_id, len as u64)
+                    .map_err(|error| super::errno::from_another(error.code()))?;
             }
             self.lifetime
                 .logical_size
                 .store(len, core::sync::atomic::Ordering::Release);
+            self.lifetime
+                .size_generation
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
             Ok(())
         }
 
         fn sync(&self) -> Result<(), crate::utils::error::SyscallErr> {
             let fs = self.fs_arc()?;
             if let Some(cache) = self.page_cache() {
-                cache.writeback_all()?;
+                return cache.with_io_gate(|| {
+                    let generation = self
+                        .lifetime
+                        .size_generation
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    cache.writeback_all_with_io_gate_held()?;
+                    let id = u32::try_from(self.key.inode_id())
+                        .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
+                    let size = self
+                        .lifetime
+                        .logical_size
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    fs.inner()
+                        .commit_inode_size(id, size as u64, None)
+                        .map_err(|error| super::errno::from_another(error.code()))?;
+                    let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
+                    fs.flush_device()?;
+                    if self
+                        .lifetime
+                        .size_generation
+                        .compare_exchange(
+                            generation,
+                            0,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        self.lifetime.release_dirty_page_cache();
+                    }
+                    if let Some(timestamps) = timestamps {
+                        self.lifetime.finish_timestamp_commit(timestamps);
+                    }
+                    Ok(())
+                });
             }
             let id = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
@@ -129,13 +202,21 @@ macro_rules! writable_data_inode_mutations {
             fs.inner()
                 .commit_inode_size(id, size as u64, None)
                 .map_err(|error| super::errno::from_another(error.code()))?;
-            let _ = self.lifetime.size_generation.compare_exchange(
+            let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
+            let generation_committed = self.lifetime.size_generation.compare_exchange(
                 generation,
                 0,
                 core::sync::atomic::Ordering::AcqRel,
                 core::sync::atomic::Ordering::Acquire,
-            );
-            fs.flush_device()
+            ).is_ok();
+            fs.flush_device()?;
+            if generation_committed {
+                self.lifetime.release_dirty_page_cache();
+            }
+            if let Some(timestamps) = timestamps {
+                self.lifetime.finish_timestamp_commit(timestamps);
+            }
+            Ok(())
         }
 
         fn datasync(&self) -> Result<(), crate::utils::error::SyscallErr> {
