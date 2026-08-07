@@ -6,7 +6,7 @@
 //! - `PageCacheBackend` trait：将 PageCache 桥接到具体的存储后端（块设备、inode 等）
 //! - `PageState` 状态机：Loading → UpToDate ↔ Dirty → Writeback → UpToDate
 //! - 两阶段读写：持锁收集拷贝项，解锁后拷贝到/从用户缓冲区，避免死锁
-//! - 脏页追踪：dirty_pages BTreeSet 跟踪所有脏页
+//! - 脏页追踪：每页原子 dirty 标志扫描脏页
 //! - 回写机制：单页回写 + 范围回写
 //!
 //! # Limitations
@@ -512,28 +512,17 @@ impl PageBytesReadGuard<'_> {
 struct InnerPageCache {
     /// 页面映射: page_index → PageEntry
     pages: BTreeSet<usize>,
-    /// 脏页索引
-    dirty_pages: BTreeSet<usize>,
 }
 
 impl InnerPageCache {
     fn new() -> Self {
         InnerPageCache {
             pages: BTreeSet::new(),
-            dirty_pages: BTreeSet::new(),
         }
     }
 
     fn has_page(&self, index: usize) -> bool {
         self.pages.contains(&index)
-    }
-
-    fn mark_dirty(&mut self, index: usize) {
-        self.dirty_pages.insert(index);
-    }
-
-    fn clear_dirty(&mut self, index: usize) {
-        self.dirty_pages.remove(&index);
     }
 
     fn page_count(&self) -> usize {
@@ -744,12 +733,20 @@ impl PageCache {
 
     /// 检查指定页面索引是否在脏页集合中（需要先持 `inner` 锁）。
     pub fn is_dirty(&self, page_index: usize) -> bool {
-        self.inner.lock().dirty_pages.contains(&page_index)
+        self.entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .is_some_and(|entry| entry.test_flag(PG_DIRTY))
     }
 
     /// 返回当前脏页集合的条目数（全局脏页计数同步更新）。
     pub fn dirty_count(&self) -> usize {
-        self.inner.lock().dirty_pages.len()
+        self.entries
+            .lock()
+            .iter()
+            .filter(|entry| entry.as_ref().is_some_and(|entry| entry.test_flag(PG_DIRTY)))
+            .count()
     }
 
     /// 遍历 `entries` 数组统计非 `None` 条目数（O(n) 扫描，仅供诊断）。
@@ -914,7 +911,26 @@ impl PageCache {
 
     /// 获取所有脏页索引的快照
     pub fn dirty_pages_snapshot(&self) -> alloc::vec::Vec<usize> {
-        self.inner.lock().dirty_pages.iter().copied().collect()
+        self.find_dirty_pages()
+    }
+
+    /// Scan the contiguous entry directory and derive dirty pages from the
+    /// atomic page flags.  Dirty membership is intentionally not duplicated
+    /// in a second mutable index: writeback ownership is claimed by the
+    /// Dirty→Writeback CAS, so a stale index could otherwise resurrect or
+    /// lose a page during concurrent redirty.
+    fn find_dirty_pages(&self) -> Vec<usize> {
+        self.entries
+            .lock()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry
+                    .as_ref()
+                    .filter(|entry| entry.test_flag(PG_DIRTY))
+                    .map(|_| index)
+            })
+            .collect()
     }
 
     // ── 页面获取 ────────────────────────────────────────────────────
@@ -1054,7 +1070,6 @@ impl PageCache {
                     match entry.compare_exchange_state(PageState::UpToDate, PageState::Dirty) {
                         Ok(_) => {
                             GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                            self.inner.lock().mark_dirty(page_index);
                             break;
                         }
                         Err(_) => continue,
@@ -2045,13 +2060,46 @@ impl PageCache {
 
     /// 将指定页面索引加入脏页集合，并原子递增全局脏页计数。
     pub fn mark_page_dirty(&self, page_index: usize) {
-        self.inner.lock().mark_dirty(page_index);
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        if let Some(entry) = entry {
+            let mut raw = entry.flags.load(Ordering::Acquire);
+            loop {
+                if raw & PG_DIRTY != 0 {
+                    return;
+                }
+                let next = raw | PG_UPTODATE | PG_DIRTY;
+                match entry
+                    .flags
+                    .compare_exchange(raw, next, Ordering::AcqRel, Ordering::Acquire)
+                {
+                    Ok(_) => {
+                        GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                    Err(current) => raw = current,
+                }
+            }
+        }
     }
 
     /// 从脏页集合移除该索引，并原子递减全局脏页计数（写回完成后调用）。
     pub fn mark_page_writeback(&self, page_index: usize) {
-        let mut inner = self.inner.lock();
-        inner.clear_dirty(page_index);
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned()
+        {
+            if entry.test_and_clear_flag(PG_DIRTY) {
+                GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 
     // ── 回写 ─────────────────────────────────────────────────────────
@@ -2094,7 +2142,6 @@ impl PageCache {
             Ok(_) => {
                 GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
-                self.inner.lock().clear_dirty(page_index);
             }
             Err(_) => {
                 perf::record_pc_writeback(
@@ -2115,7 +2162,6 @@ impl PageCache {
                 entry.set_state(PageState::Dirty);
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                self.inner.lock().mark_dirty(page_index);
                 return Err(error);
             }
             // data 读锁是 file page 的线性化点：Dirty→Writeback 后先在同一
@@ -2133,7 +2179,6 @@ impl PageCache {
                         crate::task::perf::record_wb_redirty();
                         entry.set_state(PageState::Dirty);
                         GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                        self.inner.lock().mark_dirty(page_index);
                     } else {
                         entry.set_state(PageState::UpToDate);
                     }
@@ -2145,7 +2190,6 @@ impl PageCache {
                     entry.set_state(PageState::Dirty);
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                     GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                    self.inner.lock().mark_dirty(page_index);
                     Err(e)
                 }
             }
@@ -2153,7 +2197,6 @@ impl PageCache {
             if entry.test_and_clear_flag(PG_REDIRTIED) {
                 entry.set_state(PageState::Dirty);
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                self.inner.lock().mark_dirty(page_index);
             } else {
                 entry.set_state(PageState::UpToDate);
             }
@@ -2207,31 +2250,19 @@ impl PageCache {
             return Ok(());
         }
 
-        // Clear dirty_pages entries under lock
-        {
-            let mut inner = self.inner.lock();
-            for (idx, _) in &page_slices {
-                inner.clear_dirty(*idx);
-            }
-        }
-
         let restore_dirty = |pages: &[(usize, Arc<PageEntry>)]| {
-            let mut inner = self.inner.lock();
             for (idx, entry) in pages {
                 entry.test_and_clear_flag(PG_REDIRTIED);
                 entry.set_state(PageState::Dirty);
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_sub(1, Ordering::Relaxed);
-                inner.mark_dirty(*idx);
             }
         };
         let complete_writeback = |pages: &[(usize, Arc<PageEntry>)]| {
-            let mut inner = self.inner.lock();
             for (idx, entry) in pages {
                 if entry.test_and_clear_flag(PG_REDIRTIED) {
                     entry.set_state(PageState::Dirty);
                     GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-                    inner.mark_dirty(*idx);
                 } else {
                     entry.set_state(PageState::UpToDate);
                 }
@@ -2323,10 +2354,7 @@ impl PageCache {
 
     /// Write back all dirty pages while the caller holds `op_gate`.
     pub(crate) fn writeback_all_with_io_gate_held(&self) -> Result<(), SyscallErr> {
-        let dirty_indices: Vec<usize> = {
-            let inner = self.inner.lock();
-            inner.dirty_pages.iter().copied().collect()
-        };
+        let dirty_indices = self.find_dirty_pages();
 
         if dirty_indices.is_empty() {
             return Ok(());
@@ -2364,14 +2392,11 @@ impl PageCache {
         start_index: usize,
         end_index: usize,
     ) -> Result<(), SyscallErr> {
-        let dirty_indices: Vec<usize> = {
-            let inner = self.inner.lock();
-            inner
-                .dirty_pages
-                .range(start_index..=end_index)
-                .copied()
-                .collect()
-        };
+        let dirty_indices: Vec<usize> = self
+            .find_dirty_pages()
+            .into_iter()
+            .filter(|index| *index >= start_index && *index <= end_index)
+            .collect();
 
         if dirty_indices.is_empty() {
             return Ok(());
@@ -2417,10 +2442,7 @@ impl PageCache {
         if budget == 0 {
             return 0;
         }
-        let dirty_indices: Vec<usize> = {
-            let inner = self.inner.lock();
-            inner.dirty_pages.iter().copied().collect()
-        };
+        let dirty_indices = self.find_dirty_pages();
         if dirty_indices.is_empty() {
             return 0;
         }
@@ -2519,7 +2541,6 @@ impl PageCache {
                         GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                     }
                     inner.pages.remove(&page_index);
-                    inner.dirty_pages.remove(&page_index);
                 }
             }
             let offset_in_page = new_size & (PAGE_SIZE - 1);
@@ -2565,7 +2586,6 @@ impl PageCache {
                     GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 }
                 inner.pages.remove(&page_index);
-                inner.dirty_pages.remove(&page_index);
             }
         }
     }
@@ -2593,9 +2613,13 @@ impl PageCache {
         let _op = self.op_gate.write();
         // 先检查范围内是否有脏页
         {
-            let inner = self.inner.lock();
+            let entries = self.entries.lock();
             for page_index in start_index..end_index {
-                if inner.dirty_pages.contains(&page_index) {
+                if entries
+                    .get(page_index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|entry| entry.test_flag(PG_DIRTY))
+                {
                     return Err(SyscallErr::EBUSY);
                 }
             }
@@ -2610,7 +2634,6 @@ impl PageCache {
             if entries[page_index].is_some() {
                 entries[page_index] = None;
                 inner.pages.remove(&page_index);
-                inner.dirty_pages.remove(&page_index);
                 invalidated += 1;
             }
         }
