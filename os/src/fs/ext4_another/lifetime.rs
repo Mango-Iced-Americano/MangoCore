@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
@@ -34,7 +34,10 @@ impl InodeKey {
 
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
-    cached_times: Mutex<Option<(TimeSpec, TimeSpec)>>,
+    /// Packed seconds/nanoseconds published atomically by the write path.
+    /// Dirty flags remain the publication guard for metadata readers.
+    pub(crate) cached_mtime: AtomicU64,
+    pub(crate) cached_ctime: AtomicU64,
     mtime_dirty: AtomicBool,
     ctime_dirty: AtomicBool,
     timestamp_generation: AtomicUsize,
@@ -60,16 +63,27 @@ pub(crate) struct InodeLifetime {
 
 #[derive(Clone, Copy)]
 pub(crate) struct CachedTimestamps {
-    pub(crate) mtime: TimeSpec,
-    pub(crate) ctime: TimeSpec,
+    mtime: u64,
+    ctime: u64,
     pub(crate) generation: usize,
 }
 
+impl CachedTimestamps {
+    pub(crate) fn mtime(self) -> TimeSpec {
+        unpack_timestamp(self.mtime)
+    }
+
+    pub(crate) fn ctime(self) -> TimeSpec {
+        unpack_timestamp(self.ctime)
+    }
+}
+
 impl InodeLifetime {
-    fn new(size: usize) -> Self {
+    fn new(size: usize, mtime: TimeSpec, ctime: TimeSpec) -> Self {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
-            cached_times: Mutex::new(None),
+            cached_mtime: AtomicU64::new(pack_timestamp(mtime)),
+            cached_ctime: AtomicU64::new(pack_timestamp(ctime)),
             mtime_dirty: AtomicBool::new(false),
             ctime_dirty: AtomicBool::new(false),
             timestamp_generation: AtomicUsize::new(0),
@@ -86,10 +100,12 @@ impl InodeLifetime {
     }
 
     pub(crate) fn cache_modified_time(&self, now: TimeSpec) {
-        *self.cached_times.lock() = Some((now, now));
+        let packed = pack_timestamp(now);
+        self.cached_ctime.store(packed, Ordering::Relaxed);
+        self.cached_mtime.store(packed, Ordering::Relaxed);
+        self.timestamp_generation.fetch_add(1, Ordering::Release);
         self.mtime_dirty.store(true, Ordering::Release);
         self.ctime_dirty.store(true, Ordering::Release);
-        self.timestamp_generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
@@ -98,10 +114,9 @@ impl InodeLifetime {
         {
             return None;
         }
-        let times = *self.cached_times.lock();
-        times.map(|(mtime, ctime)| CachedTimestamps {
-            mtime,
-            ctime,
+        Some(CachedTimestamps {
+            mtime: self.cached_mtime.load(Ordering::Relaxed),
+            ctime: self.cached_ctime.load(Ordering::Relaxed),
             generation: self.timestamp_generation.load(Ordering::Acquire),
         })
     }
@@ -117,20 +132,25 @@ impl InodeLifetime {
         )
             .is_ok()
         {
-            // Recheck the generation while holding the timestamp mutex.  A
-            // writer may have raced with the CAS and installed a newer pair;
-            // never clear that newer snapshot as part of the old commit.
-            let mut cached = self.cached_times.lock();
+            // Recheck after the CAS. A writer may have raced with the commit;
+            // never clear the newer dirty snapshot as part of the old one.
             if self.timestamp_generation.load(Ordering::Acquire) == 0 {
-                *cached = None;
                 self.mtime_dirty.store(false, Ordering::Release);
                 self.ctime_dirty.store(false, Ordering::Release);
             }
         }
     }
 
-    pub(crate) fn cached_times(&self) -> Option<(TimeSpec, TimeSpec)> {
-        *self.cached_times.lock()
+    pub(crate) fn cached_mtime(&self) -> Option<TimeSpec> {
+        self.mtime_dirty
+            .load(Ordering::Acquire)
+            .then(|| unpack_timestamp(self.cached_mtime.load(Ordering::Relaxed)))
+    }
+
+    pub(crate) fn cached_ctime(&self) -> Option<TimeSpec> {
+        self.ctime_dirty
+            .load(Ordering::Acquire)
+            .then(|| unpack_timestamp(self.cached_ctime.load(Ordering::Relaxed)))
     }
 
     pub(crate) fn inode_flags(&self) -> InodeFlags {
@@ -219,6 +239,21 @@ impl InodeLifetime {
     }
 }
 
+fn pack_timestamp(time: TimeSpec) -> u64 {
+    let seconds = u32::try_from(time.tv_sec).unwrap_or(u32::MAX);
+    let nanoseconds = u32::try_from(time.tv_nsec).unwrap_or(u32::MAX);
+    (u64::from(seconds) << 32) | u64::from(nanoseconds)
+}
+
+fn unpack_timestamp(timestamp: u64) -> TimeSpec {
+    let seconds = usize::try_from(timestamp >> 32).unwrap_or(usize::MAX);
+    let nanoseconds = u32::try_from(timestamp & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    TimeSpec {
+        tv_sec: seconds,
+        tv_nsec: usize::try_from(nanoseconds).unwrap_or(usize::MAX),
+    }
+}
+
 impl Ext4FileSystem {
     pub(crate) fn inode_key(&self, inode_id: u32) -> Result<InodeKey, SyscallErr> {
         let attr = self
@@ -229,11 +264,17 @@ impl Ext4FileSystem {
         Ok(InodeKey::new(self.fs_id(), inode_id, attr.generation))
     }
 
-    pub(crate) fn lifetime(&self, key: InodeKey, size: usize) -> Arc<InodeLifetime> {
+    pub(crate) fn lifetime(
+        &self,
+        key: InodeKey,
+        size: usize,
+        mtime: TimeSpec,
+        ctime: TimeSpec,
+    ) -> Arc<InodeLifetime> {
         let mut lifetimes = self.lifetimes.lock();
         let lifetime = lifetimes
             .entry(key)
-            .or_insert_with(|| Arc::new(InodeLifetime::new(size)))
+            .or_insert_with(|| Arc::new(InodeLifetime::new(size, mtime, ctime)))
             .clone();
         lifetime.pin();
         lifetime
@@ -252,7 +293,11 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .entry(key)
-            .or_insert_with(|| Arc::new(InodeLifetime::new(0)))
+            .or_insert_with(|| Arc::new(InodeLifetime::new(
+                0,
+                TimeSpec::new(),
+                TimeSpec::new(),
+            )))
             .clone();
         *lifetime.reclaim.lock() = Some(handle);
         Ok(())

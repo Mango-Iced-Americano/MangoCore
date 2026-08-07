@@ -117,11 +117,11 @@ impl Ext4FileSystem {
                 inode_id,
                 another_ext4::SetAttr {
                     mtime: Some(
-                        u32::try_from(timestamps.mtime.tv_sec)
+                        u32::try_from(timestamps.mtime().tv_sec)
                             .map_err(|_| SyscallErr::EFBIG)?,
                     ),
                     ctime: Some(
-                        u32::try_from(timestamps.ctime.tv_sec)
+                        u32::try_from(timestamps.ctime().tv_sec)
                             .map_err(|_| SyscallErr::EFBIG)?,
                     ),
                     ..Default::default()

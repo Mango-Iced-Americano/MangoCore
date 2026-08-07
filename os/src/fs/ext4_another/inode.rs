@@ -85,7 +85,9 @@ impl Ext4Inode {
         let file_type = map_file_type(attr.ftype);
         let size = usize::try_from(attr.size).map_err(|_| SyscallErr::EFBIG)?;
         let key = InodeKey::new(fs.fs_id(), inode_id, attr.generation);
-        let lifetime = fs.lifetime(key, size);
+        let mtime = TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?);
+        let ctime = TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?);
+        let lifetime = fs.lifetime(key, size, mtime, ctime);
         Ok(Arc::new_cyclic(|self_ref| Self {
             owner,
             key,
@@ -314,13 +316,12 @@ impl IndexNode for Ext4Inode {
         let attr = self.attr(&fs)?;
         let file_type = map_file_type(attr.ftype);
         let permissions = InodeMode::from_bits_truncate(u32::from(attr.perm.bits()));
-        let (mtime, ctime) = self
-            .lifetime
-            .cached_times()
-            .unwrap_or((
-                TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?),
-                TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?),
-            ));
+        let mtime = self.lifetime.cached_mtime().unwrap_or(
+            TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?)
+        );
+        let ctime = self.lifetime.cached_ctime().unwrap_or(
+            TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?)
+        );
         Ok(Metadata {
             dev_id: fs.fs_id(),
             inode_id: self.key.inode_id(),
