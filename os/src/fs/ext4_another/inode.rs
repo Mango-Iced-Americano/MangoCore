@@ -191,14 +191,30 @@ impl IndexNode for Ext4Inode {
         if self.file_type != FileType::File {
             return Err(SyscallErr::EINVAL);
         }
+        let logical_size_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         let size = self.lifetime.logical_size.load(Ordering::Acquire);
         let actual = len.min(dst.len()).min(size.saturating_sub(offset));
+        crate::task::perf::record_pread_ext4_logical_size(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .wrapping_sub(logical_size_start),
+        );
         if actual == 0 {
             return Ok(0);
         }
         let fs = self.fs_arc()?;
-        self.regular_page_cache(&fs)
-            .read_at_user(offset, actual, dst)
+        let page_cache_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        let result = self
+            .regular_page_cache(&fs)
+            .read_at_user(offset, actual, dst);
+        crate::task::perf::record_pread_ext4_page_cache(
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                .wrapping_sub(page_cache_start),
+        );
+        result
     }
 
     fn supports_user_buffer_io(&self) -> bool {

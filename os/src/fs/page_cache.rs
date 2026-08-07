@@ -1694,6 +1694,8 @@ impl PageCache {
             return Ok(0);
         }
 
+        perf::record_pread_total_count();
+
         // Keep the user copy outside PageCache's operation gate, but avoid a
         // second kernel bounce buffer.  The page plan owns Arc<PageEntry>s,
         // so each page remains alive while UserBuffer validates/copies it.
@@ -1705,27 +1707,56 @@ impl PageCache {
             let page_start = start_page << PAGE_SIZE_BITS;
             let page_offset = offset - page_start;
             let sub_len = count.min(PAGE_SIZE - page_offset);
+            let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry = self.get_page_for_read(start_page)?;
+            perf::record_pc_read_lookup_cycles(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(lookup_start),
+            );
+            let valid_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             self.ensure_fully_valid(start_page)?;
+            perf::record_pc_read_valid_fill_cycles(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(valid_start),
+            );
             drop(_op);
+            let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let copied = entry.with_bytes(|src| {
                 user.write_from_at_nofault(0, &src[page_offset..page_offset + sub_len])
             })
             .map_err(|_| SyscallErr::EFAULT)?;
+            perf::record_pread_uaccess(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(uaccess_start),
+            );
+            perf::record_pc_read_copy_cycles(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(uaccess_start),
+            );
             return (copied == sub_len)
-                .then_some(copied)
+                .then_some({
+                    perf::record_pc_read_user(1);
+                    copied
+                })
                 .ok_or(SyscallErr::EFAULT);
         }
 
         let mut retried = false;
         loop {
             let op = self.op_gate.read();
+            let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let plan = self.lookup_read_range_fast(offset, count, start_page, end_page);
+            perf::record_pc_read_lookup_cycles(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(lookup_start),
+            );
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 drop(op);
                 let mut cursor = user.write_cursor();
                 let mut copied_total = 0;
+                let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 for item in &plan.copies {
+                    let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                     let copied = item.entry.with_bytes(|src| {
                         cursor.try_write_from_nofault(
                             &src[item.page_offset..item.page_offset + item.len],
@@ -1735,8 +1766,17 @@ impl PageCache {
                     if copied != item.len {
                         return Err(SyscallErr::EFAULT);
                     }
+                    perf::record_pread_uaccess(
+                        perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                            .wrapping_sub(uaccess_start),
+                    );
                     copied_total += copied;
                 }
+                perf::record_pc_read_copy_cycles(
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                        .wrapping_sub(copy_start),
+                );
+                perf::record_pc_read_user(end_page - start_page + 1);
                 return Ok(copied_total);
             }
             drop(op);
@@ -1747,6 +1787,7 @@ impl PageCache {
                 // single-page path without allocating a full bounce buffer.
                 let mut cursor = user.write_cursor();
                 let mut copied_total = 0;
+                let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 for page_index in start_page..=end_page {
                     let page_start = page_index << PAGE_SIZE_BITS;
                     let read_start = offset.max(page_start);
@@ -1755,7 +1796,13 @@ impl PageCache {
                         continue;
                     }
                     let entry = self.get_page_for_read(page_index)?;
+                    let valid_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                     self.ensure_fully_valid(page_index)?;
+                    perf::record_pc_read_valid_fill_cycles(
+                        perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                            .wrapping_sub(valid_start),
+                    );
+                    let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                     let copied = entry.with_bytes(|src| {
                         cursor.try_write_from_nofault(
                             &src[read_start - page_start..read_end - page_start],
@@ -1766,19 +1813,38 @@ impl PageCache {
                     if copied != expected {
                         return Err(SyscallErr::EFAULT);
                     }
+                    perf::record_pread_uaccess(
+                        perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                            .wrapping_sub(uaccess_start),
+                    );
                     copied_total += copied;
                 }
+                perf::record_pc_read_copy_cycles(
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                        .wrapping_sub(copy_start),
+                );
+                perf::record_pc_read_user(end_page - start_page + 1);
                 return Ok(copied_total);
             }
 
             if !plan.needs_valid_fill.is_empty() {
                 let _op = self.op_gate.read();
+                let valid_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 for page_index in plan.needs_valid_fill {
                     self.ensure_fully_valid(page_index)?;
                 }
+                perf::record_pc_read_valid_fill_cycles(
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                        .wrapping_sub(valid_start),
+                );
             }
             if !plan.miss_runs.is_empty() {
+                let miss_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 self.fill_miss_runs(&plan.miss_runs)?;
+                perf::record_pc_read_miss_fill_cycles(
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                        .wrapping_sub(miss_start),
+                );
             }
             retried = true;
         }
