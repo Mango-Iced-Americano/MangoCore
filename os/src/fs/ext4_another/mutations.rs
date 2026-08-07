@@ -27,7 +27,7 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let cache = self.regular_page_cache(&fs);
+            let cache = self.regular_page_cache(&fs)?;
             let written = cache.write_kernel(
                 offset,
                 &buffer[..actual],
@@ -61,7 +61,7 @@ macro_rules! writable_data_inode_mutations {
             if actual == 0 {
                 return Ok(0);
             }
-            let cache = self.regular_page_cache(&fs);
+            let cache = self.regular_page_cache(&fs)?;
             let old_size = self
                 .lifetime
                 .logical_size

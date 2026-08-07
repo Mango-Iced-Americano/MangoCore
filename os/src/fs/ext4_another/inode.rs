@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::{any::Any, convert::TryFrom, fmt, sync::atomic::Ordering};
-use spin::{Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, Once};
 
 use crate::fs::{
     page_cache::PageCache,
@@ -26,7 +26,9 @@ pub(crate) struct Ext4Inode {
     file_type: FileType,
     self_ref: Mutex<Weak<Ext4Inode>>,
     lifetime: Arc<InodeLifetime>,
-    page_cache: Mutex<Option<Arc<PageCache>>>,
+    /// Once initialization prevents concurrent first access from creating
+    /// multiple backends for the same inode; completed access is lock-free.
+    page_cache: Once<Result<Arc<PageCache>, SyscallErr>>,
 }
 
 /// Filesystem ownership for an inode.
@@ -94,7 +96,7 @@ impl Ext4Inode {
             file_type,
             self_ref: Mutex::new(self_ref.clone()),
             lifetime,
-            page_cache: Mutex::new(None),
+            page_cache: Once::new(),
         }))
     }
 
@@ -116,23 +118,22 @@ impl Ext4Inode {
             .ok_or(SyscallErr::EIO)
     }
 
-    fn regular_page_cache(&self, fs: &Arc<Ext4FileSystem>) -> Arc<PageCache> {
-        if let Some(cache) = self.page_cache.lock().clone() {
-            return cache;
+    fn regular_page_cache(&self, fs: &Arc<Ext4FileSystem>) -> Result<&Arc<PageCache>, SyscallErr> {
+        match self.page_cache.call_once(|| {
+            if let Some(cache) = self.lifetime.page_cache() {
+                return Ok(cache);
+            }
+            let cache = PageCache::new();
+            cache.set_backend(Arc::new(AnotherExt4PageCacheBackend::new(
+                fs.clone(),
+                self.key,
+                self.lifetime.clone(),
+            )));
+            Ok(self.lifetime.install_page_cache(cache))
+        }) {
+            Ok(cache) => Ok(cache),
+            Err(error) => Err(*error),
         }
-        if let Some(cache) = self.lifetime.page_cache() {
-            let mut page_cache = self.page_cache.lock();
-            return page_cache.get_or_insert(cache).clone();
-        }
-        let cache = PageCache::new();
-        cache.set_backend(Arc::new(AnotherExt4PageCacheBackend::new(
-            fs.clone(),
-            self.key,
-            self.lifetime.clone(),
-        )));
-        let cache = self.lifetime.install_page_cache(cache);
-        let mut page_cache = self.page_cache.lock();
-        page_cache.get_or_insert(cache).clone()
     }
 
     fn read_regular(
@@ -147,7 +148,7 @@ impl Ext4Inode {
         if actual == 0 {
             return Ok(0);
         }
-        self.regular_page_cache(fs)
+        self.regular_page_cache(fs)?
             .read_kernel(offset, &mut buffer[..actual])
     }
 }
@@ -210,7 +211,7 @@ impl IndexNode for Ext4Inode {
             crate::task::perf::STATS_PROFILE_MEMORY_IO,
         );
         let result = self
-            .regular_page_cache(&fs)
+            .regular_page_cache(&fs)?
             .read_at_user(offset, actual, dst);
         crate::task::perf::record_pread_ext4_page_cache(
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
@@ -393,7 +394,9 @@ impl IndexNode for Ext4Inode {
         if self.file_type != FileType::File {
             return None;
         }
-        self.fs_arc().ok().map(|fs| self.regular_page_cache(&fs))
+        self.fs_arc()
+            .ok()
+            .and_then(|fs| self.regular_page_cache(&fs).ok().cloned())
     }
 
     fn as_any_ref(&self) -> &dyn Any {
