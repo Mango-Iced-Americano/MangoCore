@@ -44,6 +44,18 @@ const DIRTY_THROTTLE: usize = 16384;
 const WB_BATCH_PAGES: usize = 256;
 /// 节流时的最大写回页数
 const WB_BG_MAX_PAGES: usize = 256;
+/// Maximum retries for transient backend admission (`EAGAIN`) during writeback.
+/// Retries happen after the page has been claimed, so writers cannot observe a
+/// half-published Dirty/Writeback transition.
+const WRITEBACK_RETRY_LIMIT: usize = 100;
+
+fn yield_writeback_retry() {
+    if crate::task::current_task().is_some() {
+        crate::task::suspend_current_and_run_next();
+    } else {
+        core::hint::spin_loop();
+    }
+}
 
 /// 全局脏页计数快照（用于诊断）
 pub fn global_dirty_pages() -> usize {
@@ -1026,6 +1038,22 @@ impl PageCache {
                     .map(|_| index)
             })
             .collect()
+    }
+
+    fn has_transient_pages(&self, start: usize, end: usize) -> bool {
+        let entries = self.entries.lock();
+        if entries.is_empty() || start >= entries.len() {
+            return false;
+        }
+        let end = end.min(entries.len().saturating_sub(1));
+        if start > end {
+            return false;
+        }
+        entries[start..=end].iter().any(|entry| {
+            entry.as_ref().is_some_and(|entry| {
+                matches!(entry.state(), PageState::Loading | PageState::Writeback)
+            })
+        })
     }
 
     // ── 页面获取 ────────────────────────────────────────────────────
@@ -2282,12 +2310,11 @@ impl PageCache {
 
     /// 将单个脏页通过 `backend` 写回存储介质；若页面已为 `UpToDate` 则跳过。
     pub fn writeback_page(&self, page_index: usize) -> Result<(), SyscallErr> {
-        let _gate = self.op_gate.read();
-        self.writeback_page_locked(page_index)
+        self.writeback_page_impl(page_index)
     }
 
-    /// Write back one page while the caller already holds `op_gate`.
-    pub(crate) fn writeback_page_locked(&self, page_index: usize) -> Result<(), SyscallErr> {
+    /// Write back one page after claiming its Dirty → Writeback state.
+    fn writeback_page_impl(&self, page_index: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         let entry = {
             let entries = self.entries.lock();
@@ -2337,7 +2364,11 @@ impl PageCache {
             // 锁内只收集 TLB，实际 shootdown 由 AddressSpace 解锁后执行。
             let snapshot = entry.read_bytes();
             self.mkclean_page(page_index, false);
-            let result = backend.write_page(page_index, snapshot.bytes());
+            let result = self.writeback_backend_page_with_retry(
+                backend.as_ref(),
+                page_index,
+                snapshot.bytes(),
+            );
             drop(snapshot);
             match result {
                 Ok(_) => {
@@ -2373,18 +2404,52 @@ impl PageCache {
         result
     }
 
+    fn writeback_backend_page_with_retry(
+        &self,
+        backend: &dyn PageCacheBackend,
+        page_index: usize,
+        page: &[u8],
+    ) -> Result<usize, SyscallErr> {
+        for attempt in 0..WRITEBACK_RETRY_LIMIT {
+            match backend.write_page(page_index, page) {
+                Err(SyscallErr::EAGAIN) if attempt + 1 < WRITEBACK_RETRY_LIMIT => {
+                    yield_writeback_retry();
+                }
+                result => return result,
+            }
+        }
+        Err(SyscallErr::EAGAIN)
+    }
+
+    fn writeback_backend_pages_with_retry(
+        &self,
+        backend: &dyn PageCacheBackend,
+        start_index: usize,
+        pages: &[&[u8]],
+    ) -> Result<usize, SyscallErr> {
+        for attempt in 0..WRITEBACK_RETRY_LIMIT {
+            match backend.write_pages(start_index, pages) {
+                Err(SyscallErr::EAGAIN) if attempt + 1 < WRITEBACK_RETRY_LIMIT => {
+                    yield_writeback_retry();
+                }
+                result => return result,
+            }
+        }
+        Err(SyscallErr::EAGAIN)
+    }
+
     /// 批量写回一段连续的脏页
     ///
     /// `start..start+count` 范围内只对实际标记为 Dirty 的页面执行写回；
     /// 非 Dirty 的页面被跳过。批次中至少一个页面被写入时，调用
     /// `backend.write_pages()` 批量提交；否则直接返回 Ok。
     fn writeback_pages_run(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
-        let _gate = self.op_gate.read();
-        self.writeback_pages_run_locked(start, count)
+        self.writeback_pages_run_impl(start, count)
     }
 
-    /// Batch writeback while the caller already holds `op_gate`.
-    fn writeback_pages_run_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
+    /// Batch writeback after claiming each page; backend I/O runs without
+    /// `op_gate` so a backend may re-enter this cache safely.
+    fn writeback_pages_run_impl(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
 
         // 第一阶段：持有 entries 锁，收集 Dirty 页面，CAS 为 Writeback
@@ -2456,7 +2521,7 @@ impl PageCache {
                     let guards: Vec<PageBytesReadGuard<'_>> =
                         run.iter().map(|(_, entry)| entry.read_bytes()).collect();
                     let slices: Vec<&[u8]> = guards.iter().map(PageBytesReadGuard::bytes).collect();
-                    backend.write_pages(run[0].0, &slices)
+                    self.writeback_backend_pages_with_retry(backend.as_ref(), run[0].0, &slices)
                 };
                 // 所有 data-read guard 已释放，之后才允许进入 inner 完成状态提交。
                 match write_result {
@@ -2483,16 +2548,16 @@ impl PageCache {
     }
 
     /// Retry a transient backend admission failure without losing the dirty
-    /// page.  `writeback_pages_run_locked` restores every uncommitted page to
-    /// Dirty before returning `EAGAIN`, so retrying the same range is safe.
+    /// page.  The implementation restores every uncommitted page to Dirty
+    /// before returning `EAGAIN`, so retrying the same range is safe.
     fn writeback_pages_run_retry_locked(&self, start: usize, count: usize) -> Result<(), SyscallErr> {
-        const MAX_TRANSIENT_RETRIES: usize = 3;
         let mut attempt = 0;
         loop {
-            match self.writeback_pages_run_locked(start, count) {
+            match self.writeback_pages_run_impl(start, count) {
                 Ok(()) => return Ok(()),
-                Err(SyscallErr::EAGAIN) if attempt < MAX_TRANSIENT_RETRIES => {
+                Err(SyscallErr::EAGAIN) if attempt + 1 < WRITEBACK_RETRY_LIMIT => {
                     attempt += 1;
+                    yield_writeback_retry();
                 }
                 Err(error) => return Err(error),
             }
@@ -2501,78 +2566,101 @@ impl PageCache {
 
     /// 收集当前所有脏页索引并按连续 run 分组，逐 run 写回。
     pub fn writeback_all(&self) -> Result<(), SyscallErr> {
-        let _gate = self.op_gate.read();
-        self.writeback_all_with_io_gate_held()
+        for attempt in 0..WRITEBACK_RETRY_LIMIT {
+            let dirty_indices = self.find_dirty_pages();
+            if dirty_indices.is_empty() {
+                if !self.has_transient_pages(0, usize::MAX) {
+                    return Ok(());
+                }
+                if attempt + 1 < WRITEBACK_RETRY_LIMIT {
+                    yield_writeback_retry();
+                    continue;
+                }
+                return Err(SyscallErr::EAGAIN);
+            }
+
+            let mut i = 0;
+            while i < dirty_indices.len() {
+                let run_start = dirty_indices[i];
+                let mut run_end = run_start;
+                let mut count = 1;
+                i += 1;
+                while i < dirty_indices.len()
+                    && count < Self::MAX_WRITEBACK_PAGES
+                    && dirty_indices[i] == run_end + 1
+                {
+                    run_end = dirty_indices[i];
+                    count += 1;
+                    i += 1;
+                }
+                self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
+            }
+            if attempt + 1 < WRITEBACK_RETRY_LIMIT {
+                yield_writeback_retry();
+            }
+        }
+        Err(SyscallErr::EAGAIN)
     }
 
-    /// Write back all dirty pages while the caller holds `op_gate`.
-    pub(crate) fn writeback_all_with_io_gate_held(&self) -> Result<(), SyscallErr> {
-        let dirty_indices = self.find_dirty_pages();
-
-        if dirty_indices.is_empty() {
-            return Ok(());
-        }
-
-        // 将连续的脏页分组为 run，按批次调用 writeback_pages_run
-        let mut i = 0;
-        while i < dirty_indices.len() {
-            let run_start = dirty_indices[i];
-            let mut run_end = run_start;
-            let mut count = 1;
-            i += 1;
-            while i < dirty_indices.len()
-                && count < Self::MAX_WRITEBACK_PAGES
-                && dirty_indices[i] == run_end + 1
-            {
-                run_end = dirty_indices[i];
-                count += 1;
-                i += 1;
+    /// Drain writeback before taking the exclusive I/O gate. Ordinary writers
+    /// share the read side, so a writer may redirty a page after an earlier
+    /// pass; recheck under the exclusive gate before a metadata mutation.
+    pub(crate) fn writeback_all_before_io_gate(&self) -> Result<(), SyscallErr> {
+        for attempt in 0..WRITEBACK_RETRY_LIMIT {
+            self.writeback_all()?;
+            let pending = self.with_io_gate(|| {
+                !self.find_dirty_pages().is_empty() || self.has_transient_pages(0, usize::MAX)
+            });
+            if !pending {
+                return Ok(());
             }
-            self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
+            if attempt + 1 < WRITEBACK_RETRY_LIMIT {
+                yield_writeback_retry();
+            }
         }
-        Ok(())
+        Err(SyscallErr::EAGAIN)
     }
 
     /// 筛选出 `[start_index, end_index]` 范围内的脏页，按连续 run 分组写回。
     pub fn writeback_range(&self, start_index: usize, end_index: usize) -> Result<(), SyscallErr> {
-        let _gate = self.op_gate.read();
-        self.writeback_range_with_io_gate_held(start_index, end_index)
-    }
-
-    /// Write back a range while the caller holds `op_gate`.
-    fn writeback_range_with_io_gate_held(
-        &self,
-        start_index: usize,
-        end_index: usize,
-    ) -> Result<(), SyscallErr> {
-        let dirty_indices: Vec<usize> = self
-            .find_dirty_pages()
-            .into_iter()
-            .filter(|index| *index >= start_index && *index <= end_index)
-            .collect();
-
-        if dirty_indices.is_empty() {
-            return Ok(());
-        }
-
-        // 将连续的脏页分组为 run，按批次调用 writeback_pages_run
-        let mut i = 0;
-        while i < dirty_indices.len() {
-            let run_start = dirty_indices[i];
-            let mut run_end = run_start;
-            let mut count = 1;
-            i += 1;
-            while i < dirty_indices.len()
-                && count < Self::MAX_WRITEBACK_PAGES
-                && dirty_indices[i] == run_end + 1
-            {
-                run_end = dirty_indices[i];
-                count += 1;
-                i += 1;
+        for attempt in 0..WRITEBACK_RETRY_LIMIT {
+            let dirty_indices: Vec<usize> = self
+                .find_dirty_pages()
+                .into_iter()
+                .filter(|index| *index >= start_index && *index <= end_index)
+                .collect();
+            if dirty_indices.is_empty() {
+                if !self.has_transient_pages(start_index, end_index) {
+                    return Ok(());
+                }
+                if attempt + 1 < WRITEBACK_RETRY_LIMIT {
+                    yield_writeback_retry();
+                    continue;
+                }
+                return Err(SyscallErr::EAGAIN);
             }
-            self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
+
+            let mut i = 0;
+            while i < dirty_indices.len() {
+                let run_start = dirty_indices[i];
+                let mut run_end = run_start;
+                let mut count = 1;
+                i += 1;
+                while i < dirty_indices.len()
+                    && count < Self::MAX_WRITEBACK_PAGES
+                    && dirty_indices[i] == run_end + 1
+                {
+                    run_end = dirty_indices[i];
+                    count += 1;
+                    i += 1;
+                }
+                self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
+            }
+            if attempt + 1 < WRITEBACK_RETRY_LIMIT {
+                yield_writeback_retry();
+            }
         }
-        Ok(())
+        Err(SyscallErr::EAGAIN)
     }
 
     /// 请求下一次合作式 writeback worker 回写此缓存的脏页。
@@ -2586,12 +2674,6 @@ impl PageCache {
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
     /// 达到预算或脏页耗尽时停止。
     pub fn writeback_some_pages(&self, budget: usize) -> usize {
-        let _gate = self.op_gate.read();
-        self.writeback_some_pages_with_io_gate_held(budget)
-    }
-
-    /// Write back up to `budget` pages while the caller holds `op_gate`.
-    fn writeback_some_pages_with_io_gate_held(&self, budget: usize) -> usize {
         if budget == 0 {
             return 0;
         }
@@ -2641,6 +2723,7 @@ impl PageCache {
         new_size: usize,
         persistent: impl FnOnce() -> Result<(), SyscallErr>,
     ) -> Result<(), SyscallErr> {
+        self.writeback_all_before_io_gate()?;
         self.with_io_gate(|| self.truncate_with_backend_locked(new_size, persistent))
     }
 

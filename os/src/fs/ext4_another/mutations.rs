@@ -117,8 +117,8 @@ macro_rules! writable_data_inode_mutations {
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
             if let Some(cache) = self.page_cache() {
+                cache.writeback_all_before_io_gate()?;
                 cache.with_io_gate(|| {
-                    cache.writeback_all_with_io_gate_held()?;
                     if len < old_size {
                         cache.truncate_with_io_gate_held_and_backend(len, || {
                             fs.inner()
@@ -153,12 +153,12 @@ macro_rules! writable_data_inode_mutations {
         fn sync(&self) -> Result<(), crate::utils::error::SyscallErr> {
             let fs = self.fs_arc()?;
             if let Some(cache) = self.page_cache() {
+                cache.writeback_all_before_io_gate()?;
                 return cache.with_io_gate(|| {
                     let generation = self
                         .lifetime
                         .size_generation
                         .load(core::sync::atomic::Ordering::Acquire);
-                    cache.writeback_all_with_io_gate_held()?;
                     let id = u32::try_from(self.key.inode_id())
                         .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
                     let size = self

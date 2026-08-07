@@ -341,8 +341,8 @@ impl Ext4FileSystem {
                         Ok(())
                     };
                     if let Some(cache) = cache {
+                        cache.writeback_all_before_io_gate()?;
                         cache.with_io_gate(|| {
-                            cache.writeback_all_with_io_gate_held()?;
                             commit_size()
                         })?;
                     } else {
