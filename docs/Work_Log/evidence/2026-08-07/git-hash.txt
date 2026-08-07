@@ -1,0 +1,3 @@
+commit=f22933caea2bb7d87073fcbf28a8f1cbab3043c9
+branch=smp
+working-tree=dirty (pre-existing SMP/docs/image changes intentionally excluded from rseq commit)

@@ -1,0 +1,5 @@
+BUILDSTORM_TOOLCHAIN=observed
+BUILDSTORM_MINIBUILD=observed
+BUILDSTORM_COMPILE=not observed (tg-xtask pre-build remained in 446-crate compilation)
+unsupported-293=not observed in all three QEMU logs
+unsupported-430=observed (set_mempolicy_home_node, unchanged scope)

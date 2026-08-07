@@ -1,0 +1,8 @@
+arch=rv64
+profile=normal
+kernel=/tmp/rseq-rv/rv64/release/normal/kernel/kernel-rv
+memory=8G
+smp=cpus=8,sockets=1,cores=8,threads=1
+x0=/tmp/sdcard-rseq-clean.img (copied from testresult/cagent-official/sdcard-rv-pub.img)
+x1=/tmp/rseq-rv/rv64/release/normal/tools/disk.img
+cmdline=mango.mode=normal profile=buildstorm
