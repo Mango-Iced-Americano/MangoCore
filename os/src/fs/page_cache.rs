@@ -568,6 +568,19 @@ impl RetryWait for PageCacheFaultWait {
 }
 
 impl PageCache {
+    /// Build a lock-outside retry token for a file-backed page fault.
+    ///
+    /// File mappings may observe a page in `Writeback` while the writeback
+    /// worker still owns the page-cache gate.  The fault handler runs under
+    /// the address-space lock, so it must return a retry token instead of
+    /// translating this transient state into `EFAULT`.
+    pub(crate) fn filemap_fault_wait(self: &Arc<Self>, page_index: usize) -> Arc<dyn RetryWait> {
+        Arc::new(PageCacheFaultWait {
+            cache: Arc::clone(self),
+            page_index,
+        })
+    }
+
     /// 创建一个不含 backend 和 inode 关联的空 PageCache，自动注册到全局列表。
     pub fn new() -> Arc<Self> {
         let pc = Arc::new(PageCache {

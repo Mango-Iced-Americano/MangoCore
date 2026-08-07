@@ -118,11 +118,11 @@ impl PageFaultHandler {
                 map_lazy_zero_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
             // 文件映射页首次读取/执行：直接映射文件页缓存。
-            FaultAction::FileBackedRead => filemap_read_fault(area, mapper, ctx),
+            FaultAction::FileBackedRead => return filemap_read_fault(area, mapper, ctx),
             // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
             FaultAction::FileBackedSharedWrite => return filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
-            FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
+            FaultAction::FileBackedWrite => return filemap_private_fault(area, mapper, ctx),
             // 压缩匿名页再次访问：解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {

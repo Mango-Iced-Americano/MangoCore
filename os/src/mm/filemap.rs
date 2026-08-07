@@ -80,37 +80,53 @@ pub(super) fn filemap_private_fault<T: PageTable>(
     area: &mut Vma,
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
+) -> FaultOutcome {
     let _pf_start = crate::task::perf::perf_time_now();
-    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
-    let file_offset = area.vm_file_offset(ctx.vpn)?;
-    let file_size = check_within_file(inode.as_ref(), file_offset)?;
+    let inode = match area.vm_file() {
+        Some(inode) => inode,
+        None => return FaultOutcome::Error(MemoryError::NotMapped),
+    };
+    let file_offset = match area.vm_file_offset(ctx.vpn) {
+        Ok(offset) => offset,
+        Err(error) => return FaultOutcome::Error(error),
+    };
+    let file_size = match check_within_file(inode.as_ref(), file_offset) {
+        Ok(size) => size,
+        Err(error) => return FaultOutcome::Error(error),
+    };
 
-    let pc = inode
-        .ensure_page_cache()
-        .ok_or(MemoryError::BackingStoreFailure)?;
+    let pc = match inode.ensure_page_cache() {
+        Some(pc) => pc,
+        None => return FaultOutcome::Error(MemoryError::BackingStoreFailure),
+    };
     let page_index = file_offset >> PAGE_SIZE_BITS;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // 先填充未发布页，再安装用户 PTE。若先 map 再 copy，同一 MM 的其它 CPU
     // 可能在内核写入期间访问该页，既暴露半成品数据也破坏 Rust 独占性。
-    let allocated_ppn = area.alloc_one_zeroed_unmapped(ctx.vpn)?;
+    let allocated_ppn = match area.alloc_one_zeroed_unmapped(ctx.vpn) {
+        Ok(ppn) => ppn,
+        Err(error) => return FaultOutcome::Error(error),
+    };
     let _copy_start = crate::task::perf::perf_time_now();
     let copy_result = unsafe {
         // Safety: frame 已登记在当前 VMA，但尚未安装 PTE；地址空间写锁保证
         // 没有其它 fault 路径取得它，因此本路径独占目标页。
         allocated_ppn.with_bytes_mut(|dst| {
             pc.copy_page_for_private(page_index, dst, file_size)
-                .map_err(map_pc_error)
         })
     };
     if let Err(error) = copy_result {
         area.remove_unmapped_frame(ctx.vpn);
-        return Err(error);
+        return if error == SyscallErr::EAGAIN {
+            FaultOutcome::Retry(pc.filemap_fault_wait(page_index))
+        } else {
+            FaultOutcome::Error(map_pc_error(error))
+        };
     }
     if let Err(error) = area.map_existing_in_memory(mapper, ctx.vpn) {
         area.remove_unmapped_frame(ctx.vpn);
-        return Err(error);
+        return FaultOutcome::Error(error);
     }
     let copy_ticks = crate::task::perf::perf_time_now().wrapping_sub(_copy_start);
     crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS
@@ -119,7 +135,10 @@ pub(super) fn filemap_private_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, mapper, ctx, allocated_ppn)
+    match verify_filemap_fault(area, mapper, ctx, allocated_ppn) {
+        Ok(pa) => FaultOutcome::Completed(pa),
+        Err(error) => FaultOutcome::Error(error),
+    }
 }
 
 /// 处理文件映射页的读/执行 fault。
@@ -132,19 +151,31 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     area: &mut Vma,
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
-) -> Result<PhysAddr, MemoryError> {
+) -> FaultOutcome {
     let _pf_start = crate::task::perf::perf_time_now();
-    let inode = area.vm_file().ok_or(MemoryError::NotMapped)?;
-    let file_offset = area.vm_file_offset(ctx.vpn)?;
-    let file_size = check_within_file(inode.as_ref(), file_offset)?;
+    let inode = match area.vm_file() {
+        Some(inode) => inode,
+        None => return FaultOutcome::Error(MemoryError::NotMapped),
+    };
+    let file_offset = match area.vm_file_offset(ctx.vpn) {
+        Ok(offset) => offset,
+        Err(error) => return FaultOutcome::Error(error),
+    };
+    let file_size = match check_within_file(inode.as_ref(), file_offset) {
+        Ok(size) => size,
+        Err(error) => return FaultOutcome::Error(error),
+    };
 
-    let pc = inode
-        .ensure_page_cache()
-        .ok_or(MemoryError::BackingStoreFailure)?;
+    let pc = match inode.ensure_page_cache() {
+        Some(pc) => pc,
+        None => return FaultOutcome::Error(MemoryError::BackingStoreFailure),
+    };
     let page_index = file_offset >> PAGE_SIZE_BITS;
-    let cache_frame = pc
-        .frame_for_filemap_read(page_index, file_size)
-        .map_err(map_pc_error)?;
+    let cache_frame = match pc.frame_for_filemap_read(page_index, file_size) {
+        Ok(frame) => frame,
+        Err(SyscallErr::EAGAIN) => return FaultOutcome::Retry(pc.filemap_fault_wait(page_index)),
+        Err(error) => return FaultOutcome::Error(map_pc_error(error)),
+    };
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
@@ -156,14 +187,14 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         area.vm_perm()
     };
 
-    area.inner
-        .alloc_in_memory(ctx.vpn, cache_frame)
-        .map_err(|_| MemoryError::AlreadyAllocated)?;
+    if area.inner.alloc_in_memory(ctx.vpn, cache_frame).is_err() {
+        return FaultOutcome::Error(MemoryError::AlreadyAllocated);
+    }
 
     let _map_start = crate::task::perf::perf_time_now();
     if let Err(err) = mapper.map_user_page(ctx.vpn, cache_ppn, map_perm) {
         area.inner.remove_in_memory(&ctx.vpn);
-        return Err(err);
+        return FaultOutcome::Error(err);
     }
     pc.map_page(page_index);
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
@@ -174,7 +205,10 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         crate::task::perf::perf_time_now().wrapping_sub(_pf_start),
         core::sync::atomic::Ordering::Relaxed,
     );
-    verify_filemap_fault(area, mapper, ctx, cache_ppn)
+    match verify_filemap_fault(area, mapper, ctx, cache_ppn) {
+        Ok(pa) => FaultOutcome::Completed(pa),
+        Err(error) => FaultOutcome::Error(error),
+    }
 }
 
 /// 处理 `MAP_SHARED` 文件页的写 fault。
