@@ -22,7 +22,9 @@ pub fn run_group_chrooted(environ: &[*const u8], chroot_root: &str, work_dir: &s
         if !crate::runner::vf2_mounts::bind_pseudo_filesystems_in(chroot_root) {
             println!("[test-runner] {}: pseudo-fs bind into {} incomplete; continuing (script self-mounts /proc)", group, chroot_root.trim_end_matches('\0'));
         }
+        if chdir("/\0") < 0 { println!("[test-runner] {}: chdir / before chroot failed", group); exit(126); }
         if chroot(chroot_root) < 0 { println!("[test-runner] {}: chroot {} failed", group, chroot_root.trim_end_matches('\0')); exit(126); }
+        if chdir("/\0") < 0 { println!("[test-runner] {}: chdir / after chroot failed", group); exit(126); }
         if chdir(work_dir) < 0 { println!("[test-runner] {}: chdir {} failed", group, work_dir.trim_end_matches('\0')); exit(126); }
         let shell = "/bin/bash\0"; let command = if diag { format!("echo 0 > /sys/kernel/stats/stats_on; echo memory_io > /sys/kernel/stats/profile; echo 1 > /sys/kernel/stats/reset; echo 1 > /sys/kernel/stats/stats_on; /bin/bash ./{}; status=$?; echo 0 > /sys/kernel/stats/stats_on; echo '[initproc] [diag] === stats {}-{} ==='; cat /sys/kernel/stats/blockio; echo '[initproc] [diag] === stats {}-{} end ==='; exit $status\0", script, group, suffix, group, suffix) } else { format!("./{}\0", script) }; let dash_c = "-c\0"; if diag { exec(shell, &[shell.as_ptr(), dash_c.as_ptr(), command.as_ptr(), core::ptr::null()], environ); } else { exec(shell, &[shell.as_ptr(), command.as_ptr(), core::ptr::null()], environ); } exit(127); }
     let start = get_time() as u64; let mut status = 0;
