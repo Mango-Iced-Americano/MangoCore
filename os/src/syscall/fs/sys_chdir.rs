@@ -57,12 +57,13 @@ pub fn sys_chdir(path: *const u8) -> isize {
         }
         Err(errno) => return errno,
     };
-    let working_path = if let Some(root_inode) = root_inode.as_ref() {
+    let working_path = if root_inode.is_some() {
         // Absolute paths are relative to the process root after chroot(2).
-        // Prefer the inode-derived path so a pre-existing stale cache cannot
-        // reintroduce the global mount prefix into FsStatus.working_path.
-        crate::fs::process_visible_path(&target.inode, Some(root_inode))
-            .unwrap_or_else(|_| normalize_cwd(&old_path, &path))
+        // Path lookup above already validated the target; avoid rebuilding a
+        // global absolute path here because mount-parent walks can block on
+        // chrooted BuildStorm workspaces. The cached path is purely visible
+        // process state and is normalized against the old visible cwd.
+        normalize_cwd(&old_path, &path)
     } else {
         target
             .inode

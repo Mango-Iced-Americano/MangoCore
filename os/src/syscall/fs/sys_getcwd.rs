@@ -12,17 +12,22 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
             fs_lock.root_inode.clone(),
         )
     };
-    // `absolute_path()` is global-VFS-relative.  Convert it at the process
-    // root boundary before exposing it to user space; on a transient VFS
-    // lookup failure retain the already validated cached path.
-    let working_dir = match crate::fs::process_visible_path(&cwd_inode, root_inode.as_ref()) {
-        Ok(visible_path) => {
-            if visible_path != cached_path {
-                fs_ref.lock().working_path = visible_path.clone();
+    // Inside a chroot the cached path is already maintained in the process
+    // namespace by chdir/fchdir.  Walking the global VFS parent chain here
+    // can cross the chroot mount and block BuildStorm's shell while it merely
+    // updates PWD.  Keep the namespace-local value instead.
+    let working_dir = if root_inode.is_some() {
+        cached_path
+    } else {
+        match cwd_inode.absolute_path() {
+            Ok(visible_path) => {
+                if visible_path != cached_path {
+                    fs_ref.lock().working_path = visible_path.clone();
+                }
+                visible_path
             }
-            visible_path
+            Err(_) => cached_path,
         }
-        Err(_) => cached_path,
     };
     // ERANGE must be checked BEFORE buffer validation:
     // Linux returns ERANGE if buffer is too small, even if buf is partially invalid
