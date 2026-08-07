@@ -11,6 +11,8 @@ use crate::kernel_tests::runner::KernelTest;
 #[cfg(feature = "ext4_another_backend")]
 mod fixtures;
 #[cfg(feature = "ext4_another_backend")]
+mod mapped_overwrite;
+#[cfg(feature = "ext4_another_backend")]
 mod media;
 #[cfg(feature = "ext4_another_backend")]
 mod ownership;
@@ -28,6 +30,22 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
     {
         if crate::drivers::block::get_block_device(0).is_none() {
             return vec![
+                KernelTest::skip(
+                    "ext4_another::fully_mapped_overwrite_uses_fast_path",
+                    "requires disk-backed another_ext4 fixture",
+                ),
+                KernelTest::skip(
+                    "ext4_another::pure_overwrite_performs_no_allocation",
+                    "requires disk-backed another_ext4 fixture",
+                ),
+                KernelTest::skip(
+                    "ext4_another::sparse_write_retains_fallback",
+                    "requires disk-backed another_ext4 fixture",
+                ),
+                KernelTest::skip(
+                    "ext4_another::extending_write_retains_allocation",
+                    "requires disk-backed another_ext4 fixture",
+                ),
                 KernelTest::skip(
                     "ext4_another::fsync_and_syncfs_surface_flush_failures",
                     "requires disk-backed another_ext4 fixture",
@@ -95,6 +113,22 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
             ];
         }
         return vec![
+            KernelTest::new(
+                "ext4_another::fully_mapped_overwrite_uses_fast_path",
+                mapped_overwrite::test_fully_mapped_overwrite_uses_fast_path,
+            ),
+            KernelTest::new(
+                "ext4_another::pure_overwrite_performs_no_allocation",
+                mapped_overwrite::test_pure_overwrite_performs_no_allocation,
+            ),
+            KernelTest::new(
+                "ext4_another::sparse_write_retains_fallback",
+                mapped_overwrite::test_sparse_write_retains_fallback,
+            ),
+            KernelTest::new(
+                "ext4_another::extending_write_retains_allocation",
+                mapped_overwrite::test_extending_write_retains_allocation,
+            ),
             KernelTest::new(
                 "ext4_another::fsync_and_syncfs_surface_flush_failures",
                 sync::test_fsync_and_syncfs_surface_flush_failures,
