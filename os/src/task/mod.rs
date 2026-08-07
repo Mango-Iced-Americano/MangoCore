@@ -94,8 +94,8 @@ pub use sleep::{
     wake_realtime_abstime_sleepers_after_clock_set,
 };
 pub use task::{
-    any_seccomp_enabled, FsStatus, RobustList, Rusage, SeccompFilterInsn, TaskControlBlock,
-    TaskStatus, UtsNamespace,
+    any_seccomp_enabled, FsStatus, RobustList, RseqRegistration, Rusage, SeccompFilterInsn,
+    TaskControlBlock, TaskStatus, UtsNamespace,
 };
 
 /// 返回指定 CPU 的精确 runqueue 长度，供诊断和 SMP focused test 使用。

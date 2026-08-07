@@ -22,6 +22,7 @@ TaskControlBlock
         ├── sched ABI state
         ├── rlimit / credentials / capability
         ├── robust futex / clear_child_tid
+        ├── per-thread rseq registration
         └── timers / rusage / seccomp
 ```
 

@@ -42,6 +42,7 @@ tags: [syscall, table, reference]
 | 221, 281 | `execve`, `execveat` | `syscall/process/exec.rs` |
 | 260 | `wait4` | `syscall/process/lifecycle.rs` |
 | 268 | `setns` | `syscall/process/clone.rs` |
+| 293 | `rseq` | `syscall/process/rseq.rs` |
 | 99-100 | `set_robust_list`, `get_robust_list` | `syscall/process/lifecycle.rs` |
 
 ## Futex、信号、pidfd 与 ptrace

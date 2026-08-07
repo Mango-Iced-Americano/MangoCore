@@ -59,6 +59,18 @@ pub struct SeccompFilterInsn {
     pub k: u32,
 }
 
+/// Per-thread rseq registration state.
+///
+/// The user-owned rseq area remains in the task's address space; this record
+/// only tracks the registration so the syscall can reject duplicate
+/// registrations and validate unregistration requests.
+#[derive(Clone, Copy, Debug)]
+pub struct RseqRegistration {
+    pub addr: usize,
+    pub len: usize,
+    pub sig: u32,
+}
+
 fn default_task_comm() -> [u8; 16] {
     let mut comm = [0u8; 16];
     comm[..8].copy_from_slice(b"initproc");
@@ -346,6 +358,8 @@ pub struct TaskControlBlockInner {
     pub clear_child_tid: usize,
     /// 鲁棒列表，用于管理鲁棒互斥锁
     pub robust_list: RobustList,
+    /// 本线程注册的 rseq 用户区；rseq 注册状态不跨 clone/exec 继承。
+    pub rseq: Option<RseqRegistration>,
     /// 资源使用情况
     pub rusage: Rusage,
     /// 任务的时钟信息
@@ -1358,6 +1372,7 @@ impl TaskControlBlock {
                 seccomp_filter: Vec::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
+                rseq: None,
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 pending_oom_kill: false,
@@ -1484,6 +1499,7 @@ impl TaskControlBlock {
                 seccomp_filter: Vec::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
+                rseq: None,
                 rusage: Rusage::new(),
                 clock: ProcClock::new(),
                 pending_oom_kill: false,
@@ -1542,6 +1558,7 @@ impl TaskControlBlock {
             inner.clear_child_tid = 0;
             inner.robust_list = RobustList::default();
             inner.signal_stack = SignalStack::disabled();
+            inner.rseq = None;
         }
         self.user_stack_allocated.store(true, Ordering::Relaxed);
 
@@ -2021,6 +2038,7 @@ impl TaskControlBlock {
                 clock: ProcClock::new(),
                 clear_child_tid: 0,
                 robust_list: RobustList::default(),
+                rseq: None,
                 sigmask: parent_inner.sigmask,
                 sigmask_to_restore: None,
                 // compute

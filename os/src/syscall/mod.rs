@@ -268,6 +268,7 @@ pub fn syscall_name(id: usize) -> &'static str {
         SYSCALL_FACCESSAT2 => "faccessat2",
         SYSCALL_MEMBARRIER => "membarrier",
         SYSCALL_STATX => "statx",
+        SYSCALL_RSEQ => "rseq",
         SYSCALL_SYNCFS => "syncfs",
         SYSCALL_SETNS => "setns",
         SYSCALL_GETRANDOM => "getrandom",
@@ -844,6 +845,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
             args[4] as *mut u8,
         ),
+        SYSCALL_RSEQ => sys_rseq(args[0], args[1] as u32, args[2], args[3] as u32),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0],
             args[1] as *const u8,

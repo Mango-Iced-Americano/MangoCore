@@ -238,6 +238,7 @@ pub const SYSCALL_PKEY_MPROTECT: usize = 288;
 pub const SYSCALL_PKEY_ALLOC: usize = 289;
 pub const SYSCALL_PKEY_FREE: usize = 290;
 pub const SYSCALL_STATX: usize = 291;
+pub const SYSCALL_RSEQ: usize = 293;
 pub const SYSCALL_SETNS: usize = 268;
 pub const SYSCALL_SYNCFS: usize = 306;
 pub const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;

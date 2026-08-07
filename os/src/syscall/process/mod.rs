@@ -8,6 +8,7 @@ mod keyring;
 mod lifecycle;
 mod misc;
 mod mm;
+mod rseq;
 mod signal;
 mod time;
 
@@ -53,6 +54,7 @@ pub use mm::{
     sys_munmap, sys_pkey_alloc, sys_pkey_free, sys_pkey_mprotect, sys_remap_file_pages,
     sys_sbrk,
 };
+pub use rseq::sys_rseq;
 #[cfg(feature = "riscv")]
 pub use mm::sys_riscv_flush_icache;
 pub use signal::{
