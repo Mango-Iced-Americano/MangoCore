@@ -675,6 +675,10 @@ pub struct PageCache {
     /// `MS_ASYNC` 发布的合作式写回请求。发布者不执行 I/O；reclaim worker 在锁外
     /// 消费请求并复用正常 writeback 状态机。
     async_writeback_requested: AtomicBool,
+    /// Generation for mutations that discard cache entries. Batch backend I/O
+    /// runs without `op_gate`; this guard prevents stale publication after a
+    /// concurrent truncate/invalidate.
+    mutation_generation: AtomicUsize,
 }
 
 struct PageCacheFaultWait {
@@ -725,6 +729,7 @@ impl PageCache {
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
             async_writeback_requested: AtomicBool::new(false),
+            mutation_generation: AtomicUsize::new(0),
         });
         register_page_cache(&pc);
         pc
@@ -1454,10 +1459,10 @@ impl PageCache {
     /// Fill contiguous missing page runs using backend.read_page().
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
-        // Publish-after-I/O must serialize with truncate. Otherwise a read
-        // started before backend truncation could publish stale pages after
-        // truncate already pruned the cache.
-        let _op = self.op_gate.write();
+        // Backend I/O runs outside op_gate so a backend can re-enter this
+        // cache.  The generation check before publication prevents stale
+        // pages from being published after truncate/invalidate.
+        let generation = self.mutation_generation.load(Ordering::Acquire);
         let backend = self.backend().ok_or(SyscallErr::EIO)?;
         let backend_npages = backend.npages();
 
@@ -1481,6 +1486,10 @@ impl PageCache {
                 }
                 entry.valid_mask.store(VALID_ALL, Ordering::Release);
                 perf::record_pc_miss();
+            }
+
+            if generation != self.mutation_generation.load(Ordering::Acquire) {
+                return Err(SyscallErr::EAGAIN);
             }
 
             // 3. Publish: insert into entries (only if slot still empty)
@@ -2106,10 +2115,10 @@ impl PageCache {
             return Ok(0);
         }
 
-        // Readahead uses the same publish-after-I/O pattern as batch misses.
-        // Order it against truncate so old backend data cannot be published
-        // after cache pruning has completed.
-        let _op = self.op_gate.write();
+        // Readahead uses the same lock-free backend phase as batch misses so
+        // a backend callback can re-enter this cache.  Generation validation
+        // prevents stale pages from being published after truncate.
+        let generation = self.mutation_generation.load(Ordering::Acquire);
 
         let backend = match self.backend() {
             Some(b) => b,
@@ -2161,6 +2170,10 @@ impl PageCache {
             if p.index >= backend_npages {
                 p.entry.with_bytes_mut(|bytes| bytes.fill(0));
             }
+        }
+
+        if generation != self.mutation_generation.load(Ordering::Acquire) {
+            return Err(SyscallErr::EAGAIN);
         }
 
         // Phase 4: 标记 UpToDate 并插入到 entries
@@ -2653,6 +2666,7 @@ impl PageCache {
     ) -> Result<(), SyscallErr> {
         // The caller holds the write side of op_gate; no user copy or task
         // wait is permitted in this critical section.
+        self.mutation_generation.fetch_add(1, Ordering::AcqRel);
         let hole_start_page = new_size.div_ceil(PAGE_SIZE);
         // Pass A：在移除 PageCache entry 前先 zap 所有仍映射该页的 VMA。fault
         // 若已持 VM 锁会在 op_gate.try_read 处返回 Retry，绝不反向等待；每轮
@@ -2751,6 +2765,7 @@ impl PageCache {
         end_index: usize,
     ) -> Result<usize, SyscallErr> {
         let _op = self.op_gate.write();
+        self.mutation_generation.fetch_add(1, Ordering::AcqRel);
         // 先检查范围内是否有脏页
         {
             let entries = self.entries.lock();
