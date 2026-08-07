@@ -166,7 +166,10 @@ impl InodeLifetime {
         // writer that advanced size_generation before reaching this method.
         let already_pinned = self.dirty_cache_pinned.load(Ordering::Acquire);
         let mut dirty_page_cache = self.dirty_page_cache.lock();
-        if already_pinned && dirty_page_cache.is_some() {
+        if dirty_page_cache.is_some() {
+            if !already_pinned {
+                self.dirty_cache_pinned.store(true, Ordering::Release);
+            }
             return;
         }
         if dirty_page_cache.is_none() {
