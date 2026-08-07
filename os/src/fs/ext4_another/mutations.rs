@@ -181,7 +181,7 @@ macro_rules! writable_data_inode_mutations {
                         )
                         .is_ok()
                     {
-                        self.lifetime.release_dirty_page_cache(generation);
+                        self.lifetime.release_dirty_page_cache();
                     }
                     if let Some(timestamps) = timestamps {
                         self.lifetime.finish_timestamp_commit(timestamps);
@@ -211,7 +211,7 @@ macro_rules! writable_data_inode_mutations {
             ).is_ok();
             fs.flush_device()?;
             if generation_committed {
-                self.lifetime.release_dirty_page_cache(generation);
+                self.lifetime.release_dirty_page_cache();
             }
             if let Some(timestamps) = timestamps {
                 self.lifetime.finish_timestamp_commit(timestamps);

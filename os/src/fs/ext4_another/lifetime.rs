@@ -199,14 +199,14 @@ impl InodeLifetime {
         }
     }
 
-    pub(crate) fn release_dirty_page_cache(&self, committed_generation: usize) {
+    pub(crate) fn release_dirty_page_cache(&self) {
         let mut dirty_page_cache = self.dirty_page_cache.lock();
-        self.last_release_generation
-            .store(committed_generation, Ordering::Relaxed);
-        // The mutex synchronizes with retain_dirty_page_cache. A writer that
-        // advanced the generation while this sync was completing will either
-        // make this check fail or repin immediately after the release.
-        if self.size_generation.load(Ordering::Acquire) == 0
+        // The caller has already reset size_generation with a successful CAS.
+        // Compare against the last released generation so a writer racing
+        // after that CAS keeps the dirty cache pinned for the next sync.
+        let generation = self.size_generation.load(Ordering::Acquire);
+        if dirty_page_cache.is_some()
+            && generation == self.last_release_generation.load(Ordering::Relaxed)
             && dirty_page_cache.take().is_some()
         {
             self.dirty_cache_pinned.store(false, Ordering::Release);
@@ -366,7 +366,7 @@ impl Ext4FileSystem {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ).is_ok() {
-                    lifetime.release_dirty_page_cache(generation);
+                    lifetime.release_dirty_page_cache();
                 }
             }
             for (lifetime, timestamps) in committed_timestamps {

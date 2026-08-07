@@ -1,8 +1,10 @@
 use super::common::*;
 
 pub fn sys_sync() -> isize {
+    // Linux sync(2) returns success even when one writeback attempt fails;
+    // the error remains observable through a later fsync/syncfs boundary.
     if let Err(error) = crate::fs::flush_all_page_caches() {
-        return -(error as isize);
+        log::error!("sys_sync: flush_all_page_caches failed: {:?}", error);
     }
     // Collect live ext4 instances, then flush metadata cache without holding the registry lock
     let mut guard = crate::fs::ext4::ext4fs::EXT4_REGISTRY.lock();
@@ -14,7 +16,7 @@ pub fn sys_sync() -> isize {
     }
     #[cfg(feature = "ext4_another_backend")]
     if let Err(error) = crate::fs::ext4_another::sync_all_instances() {
-        return -(error as isize);
+        log::error!("sys_sync: another_ext4 global sync failed: {:?}", error);
     }
     SUCCESS
 }

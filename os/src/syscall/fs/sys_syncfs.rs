@@ -13,13 +13,9 @@ pub fn sys_syncfs(fd: usize) -> isize {
     }
     drop(fd_table);
 
-    // Flush all page caches (global, but correct for single-fs system)
-    if let Err(error) = crate::fs::flush_all_page_caches() {
-        return -(error as isize);
-    }
-
-    // Flush ext4 metadata caches for the filesystem containing this fd.
-    // Must unwrap MountFSInode to reach the real Ext4FileSystem.
+    // Resolve the filesystem selected by this fd before choosing the sync
+    // contract. another_ext4 owns its PageCache/lifetime barrier and must not
+    // be preceded by a global flush of unrelated filesystems.
     let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
     let fs = inode.fs();
     #[cfg(feature = "ext4_another_backend")]
@@ -31,6 +27,11 @@ pub fn sys_syncfs(fd: usize) -> isize {
             Ok(()) => SUCCESS,
             Err(error) => -(error as isize),
         };
+    }
+    // Preserve the existing legacy paths outside the another_ext4 backend.
+    if let Err(error) = crate::fs::flush_all_page_caches() {
+        log::error!("sys_syncfs: flush_all_page_caches failed: {:?}", error);
+        return -(error as isize);
     }
     if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
         ext4.flush_metadata_cache();

@@ -532,6 +532,11 @@ impl PageEntry {
         if mask == 0 {
             return self.is_fully_valid();
         }
+        // valid_mask only gains bits, so a range that is already fully valid
+        // cannot transition again; avoid an unnecessary AMO on the hot path.
+        if self.valid_mask.load(Ordering::Relaxed) & mask == mask {
+            return false;
+        }
         let old = self.valid_mask.fetch_or(mask, Ordering::Release);
         if old & mask == mask {
             return false;
@@ -2184,19 +2189,39 @@ impl PageCache {
             return Ok(0);
         }
 
-        // Phase 2: entry data 锁把 direct-map mutable view 限定在单页 I/O 内。
-        for pending_page in &pending {
-            if pending_page.index < backend_npages {
+        // Phase 2: group contiguous misses and let the backend perform one
+        // logical read_pages call per run. The temporary staging buffer keeps
+        // PageEntry data locks short and permits the backend I/O to remain
+        // outside op_gate/entries locks.
+        let mut cursor = 0;
+        while cursor < pending.len() {
+            if pending[cursor].index >= backend_npages {
+                pending[cursor].entry.with_bytes_mut(|bytes| bytes.fill(0));
+                cursor += 1;
+                continue;
+            }
+            let run_begin = cursor;
+            cursor += 1;
+            while cursor < pending.len()
+                && pending[cursor].index < backend_npages
+                && pending[cursor].index == pending[cursor - 1].index + 1
+            {
+                cursor += 1;
+            }
+            let run_len = cursor - run_begin;
+            let mut staging = Vec::new();
+            staging
+                .try_reserve_exact(run_len * PAGE_SIZE)
+                .map_err(|_| SyscallErr::ENOMEM)?;
+            staging.resize(run_len * PAGE_SIZE, 0);
+            let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
+            backend.read_pages(pending[run_begin].index, &mut buffers)?;
+            drop(buffers);
+            for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
+                let start = offset * PAGE_SIZE;
                 pending_page
                     .entry
-                    .with_bytes_mut(|buf| backend.read_page(pending_page.index, buf))?;
-            }
-        }
-
-        // Phase 3: 零填充超出 backend npages 的页面（sparse file holes）
-        for p in &pending {
-            if p.index >= backend_npages {
-                p.entry.with_bytes_mut(|bytes| bytes.fill(0));
+                    .with_bytes_mut(|buf| buf.copy_from_slice(&staging[start..start + PAGE_SIZE]));
             }
         }
 
@@ -2673,13 +2698,13 @@ impl PageCache {
     ///
     /// 用于后台合作式写回：收集连续脏页 run，持锁收集 → 解锁 → I/O。
     /// 达到预算或脏页耗尽时停止。
-    pub fn writeback_some_pages(&self, budget: usize) -> usize {
+    pub fn writeback_some_pages(&self, budget: usize) -> Result<usize, SyscallErr> {
         if budget == 0 {
-            return 0;
+            return Ok(0);
         }
         let dirty_indices = self.find_dirty_pages();
         if dirty_indices.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         let mut total = 0;
@@ -2699,12 +2724,12 @@ impl PageCache {
                 i += 1;
             }
             // writeback_pages_run uses CAS — some pages may have been
-            // concurrently consumed by another flusher. Tolerate
-            // partial progress and continue.
-            let _ = self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1);
+            // concurrently consumed by another flusher. Preserve backend
+            // errors instead of silently dropping them from background sync.
+            self.writeback_pages_run_retry_locked(run_start, run_end - run_start + 1)?;
             total += count;
         }
-        total
+        Ok(total)
     }
 
     // ── 截断与失效 ──────────────────────────────────────────────────
@@ -2921,7 +2946,13 @@ pub fn maybe_background_writeback() {
         } else {
             remaining.min(WB_BATCH_PAGES)
         };
-        let written = pc.writeback_some_pages(page_budget);
+        let written = match pc.writeback_some_pages(page_budget) {
+            Ok(written) => written,
+            Err(error) => {
+                log::error!("page-cache background writeback failed: {:?}", error);
+                0
+            }
+        };
         remaining = remaining.saturating_sub(written);
     }
 
@@ -2959,7 +2990,13 @@ pub fn balance_dirty_pages() {
         drop(reg);
 
         for pc in &caches {
-            let written = pc.writeback_some_pages(WB_BATCH_PAGES);
+            let written = match pc.writeback_some_pages(WB_BATCH_PAGES) {
+                Ok(written) => written,
+                Err(error) => {
+                    log::error!("page-cache throttle writeback failed: {:?}", error);
+                    0
+                }
+            };
             if written > 0 {
                 break;
             }
