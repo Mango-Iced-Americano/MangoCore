@@ -14,7 +14,9 @@ pub fn sys_syncfs(fd: usize) -> isize {
     drop(fd_table);
 
     // Flush all page caches (global, but correct for single-fs system)
-    crate::fs::flush_all_page_caches();
+    if let Err(error) = crate::fs::flush_all_page_caches() {
+        return -(error as isize);
+    }
 
     // Flush ext4 metadata caches for the filesystem containing this fd.
     // Must unwrap MountFSInode to reach the real Ext4FileSystem.

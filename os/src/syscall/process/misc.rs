@@ -21,7 +21,9 @@ pub fn sys_shutdown() -> isize {
     info!("[sys_shutdown] flushing page caches and ext4 metadata...");
     #[cfg(feature = "ext4_another_backend")]
     crate::fs::ext4_another::shutdown_all_instances();
-    flush_all_page_caches();
+    if let Err(error) = flush_all_page_caches() {
+        log::error!("[sys_shutdown] page-cache writeback failed: {:?}", error);
+    }
     info!("[sys_shutdown] flushing all ext4 instances...");
     let mut guard = EXT4_REGISTRY.lock();
     let live: alloc::vec::Vec<_> = guard.iter().filter_map(|w| w.upgrade()).collect();

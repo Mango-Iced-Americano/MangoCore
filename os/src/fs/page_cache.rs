@@ -108,15 +108,34 @@ pub fn register_page_cache(pc: &Arc<PageCache>) {
     PAGE_CACHE_REGISTRY.lock().push(Arc::downgrade(pc));
 }
 
-pub fn flush_all_page_caches() {
-    PAGE_CACHE_REGISTRY.lock().retain(|weak| {
-        if let Some(pc) = weak.upgrade() {
-            let _ = pc.writeback_all();
-            true
-        } else {
-            false
+pub fn flush_all_page_caches() -> Result<(), SyscallErr> {
+    // Never execute backend I/O while holding the global registry lock.  A
+    // backend may re-enter PageCache registration or another cache during
+    // writeback; keeping the lock across that call turns a transient
+    // contention into a global deadlock.
+    let page_caches: Vec<Arc<PageCache>> = {
+        let mut registry = PAGE_CACHE_REGISTRY.lock();
+        let mut page_caches = Vec::new();
+        registry.retain(|weak| match weak.upgrade() {
+            Some(pc) => {
+                page_caches.push(pc);
+                true
+            }
+            None => false,
+        });
+        page_caches
+    };
+
+    let mut first_error = None;
+    for page_cache in page_caches {
+        if let Err(error) = page_cache.writeback_all() {
+            log::error!("flush_all_page_caches: writeback failed: {:?}", error);
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
         }
-    });
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Evict clean pages from all registered caches using clock/second-chance.
@@ -1642,12 +1661,89 @@ impl PageCache {
         if count == 0 {
             return Ok(0);
         }
-        let mut bounce = Vec::new();
-        bounce.try_reserve(count).map_err(|_| SyscallErr::ENOMEM)?;
-        bounce.resize(count, 0);
-        let read = self.read_kernel(offset, &mut bounce)?;
-        user.write_from_at(0, &bounce[..read])
-            .map_err(|_| SyscallErr::EFAULT)
+
+        // Keep the user copy outside PageCache's operation gate, but avoid a
+        // second kernel bounce buffer.  The page plan owns Arc<PageEntry>s,
+        // so each page remains alive while UserBuffer validates/copies it.
+        let end = offset.checked_add(count).ok_or(SyscallErr::EFBIG)?;
+        let start_page = offset >> PAGE_SIZE_BITS;
+        let end_page = (end - 1) >> PAGE_SIZE_BITS;
+        if start_page == end_page {
+            let _op = self.op_gate.read();
+            let page_start = start_page << PAGE_SIZE_BITS;
+            let page_offset = offset - page_start;
+            let sub_len = count.min(PAGE_SIZE - page_offset);
+            let entry = self.get_page_for_read(start_page)?;
+            self.ensure_fully_valid(start_page)?;
+            let copied = entry.with_bytes(|src| {
+                user.write_from_at(0, &src[page_offset..page_offset + sub_len])
+            })
+            .map_err(|_| SyscallErr::EFAULT)?;
+            return (copied == sub_len)
+                .then_some(copied)
+                .ok_or(SyscallErr::EFAULT);
+        }
+
+        let mut retried = false;
+        loop {
+            let op = self.op_gate.read();
+            let plan = self.lookup_read_range_fast(offset, count, start_page, end_page);
+            if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
+                let mut cursor = user.write_cursor();
+                let mut copied_total = 0;
+                for item in &plan.copies {
+                    let copied = item.entry.with_bytes(|src| {
+                        cursor.try_write_from(&src[item.page_offset..item.page_offset + item.len])
+                    })
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                    if copied != item.len {
+                        return Err(SyscallErr::EFAULT);
+                    }
+                    copied_total += copied;
+                }
+                return Ok(copied_total);
+            }
+            drop(op);
+
+            if retried {
+                // A concurrent PageCache mutation can invalidate the batch
+                // plan; resolve the remaining pages through the existing
+                // single-page path without allocating a full bounce buffer.
+                let mut cursor = user.write_cursor();
+                let mut copied_total = 0;
+                for page_index in start_page..=end_page {
+                    let page_start = page_index << PAGE_SIZE_BITS;
+                    let read_start = offset.max(page_start);
+                    let read_end = end.min(page_start.saturating_add(PAGE_SIZE));
+                    if read_end <= read_start {
+                        continue;
+                    }
+                    let entry = self.get_page_for_read(page_index)?;
+                    self.ensure_fully_valid(page_index)?;
+                    let copied = entry.with_bytes(|src| {
+                        cursor.try_write_from(&src[read_start - page_start..read_end - page_start])
+                    })
+                    .map_err(|_| SyscallErr::EFAULT)?;
+                    let expected = read_end - read_start;
+                    if copied != expected {
+                        return Err(SyscallErr::EFAULT);
+                    }
+                    copied_total += copied;
+                }
+                return Ok(copied_total);
+            }
+
+            if !plan.needs_valid_fill.is_empty() {
+                let _op = self.op_gate.read();
+                for page_index in plan.needs_valid_fill {
+                    self.ensure_fully_valid(page_index)?;
+                }
+            }
+            if !plan.miss_runs.is_empty() {
+                self.fill_miss_runs(&plan.miss_runs)?;
+            }
+            retried = true;
+        }
     }
 
     /// 先在全部 FS/PageCache 锁外复制用户数据，再写入 PageCache。

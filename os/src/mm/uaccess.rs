@@ -958,6 +958,16 @@ pub struct UserBuffer {
     access: UserAccess,
 }
 
+/// Sequential writer for PageCache read plans.
+///
+/// PageCache produces chunks in logical order.  Retaining the current logical
+/// offset avoids rebuilding a temporary kernel buffer for every read chunk and
+/// gives the user-copy layer one monotonic cursor to validate.
+pub struct UserBufferWriteCursor<'a> {
+    buffer: &'a mut UserBuffer,
+    offset: usize,
+}
+
 impl UserBuffer {
     /// 只登记虚拟地址范围，不在构造阶段再次 fault-in。
     ///
@@ -1022,6 +1032,13 @@ impl UserBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    pub fn write_cursor(&mut self) -> UserBufferWriteCursor<'_> {
+        UserBufferWriteCursor {
+            buffer: self,
+            offset: 0,
+        }
     }
 
     /// 从用户缓冲区读取到内核 slice。
@@ -1178,6 +1195,21 @@ impl UserBuffer {
             }
         }
         Ok(copied)
+    }
+}
+
+impl UserBufferWriteCursor<'_> {
+    /// Copy the next sequential source chunk to the user buffer.
+    pub fn try_write_from(&mut self, src: &[u8]) -> Result<usize, isize> {
+        let copied = self.buffer.write_from_at(self.offset, src)?;
+        self.offset = self.offset.saturating_add(copied);
+        Ok(copied)
+    }
+
+    /// Lossy convenience form for callers that already treat a short copy as
+    /// an error; new kernel paths should use `try_write_from`.
+    pub fn write_from(&mut self, src: &[u8]) -> usize {
+        self.try_write_from(src).unwrap_or(0)
     }
 }
 
