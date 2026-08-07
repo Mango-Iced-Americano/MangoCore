@@ -8,7 +8,7 @@
 |------|-----|
 | 语言 | Rust `nightly-2026-05-10`（单一根目录工具链合同） |
 | 架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-linux-gnu` |
-| syscall | 约 218 个（新增时同步更新本节） |
+| syscall | 约 219 个（新增时同步更新本节） |
 | 功能 | ext4/fat32/tmpfs/ramfs/procfs、smoltcp TCP/UDP/RAW/Unix、virtio 块/网卡、SV39 虚拟内存、SysV IPC、epoll/eventfd/signalfd/pidfd、POSIX timer |
 | 设计参考 | [DragonOS](https://github.com/DragonOS-Community/DragonOS)（VFS/MountFS 架构）+ Linux 6.6 语义 |
 | 验证 | 使用 Make facade：`make check ARCH=<rv64|la64> PROFILE=<normal|regression>`、`make lint`、编译与 QEMU 集成测试 |
