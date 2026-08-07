@@ -29,9 +29,15 @@ fn fd_content_fn(
             // to avoid potential deadlocks with VFS operations.
             let inode = file.inode.clone();
             drop(guard);
-            match inode.absolute_path() {
+            let root_inode = task.fs().lock().root_inode.clone();
+            match crate::fs::process_visible_path(&inode, root_inode.as_ref()) {
                 Ok(p) => p,
-                Err(_) => format!("/proc/{}/fd/{}", pid, fd),
+                // Descriptors opened before chroot (for example /dev/tty)
+                // may legitimately point outside the process root. Preserve
+                // their global target rather than fabricating a proc path.
+                Err(_) => inode
+                    .absolute_path()
+                    .unwrap_or_else(|_| format!("/proc/{}/fd/{}", pid, fd)),
             }
         }
         None => String::new(),

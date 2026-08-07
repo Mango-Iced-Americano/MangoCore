@@ -21,12 +21,18 @@ pub fn sys_fchdir(fd: usize) -> isize {
     if !has_search_access(&meta, uid, fsgid, &groups) {
         return EACCES;
     }
-    let working_path = inode.absolute_path().ok();
+    let fs_ref = task.process.fs();
+    let (old_path, root_inode) = {
+        let lock = fs_ref.lock();
+        (lock.working_path.clone(), lock.root_inode.clone())
+    };
+    let working_path = crate::fs::process_visible_path(&inode, root_inode.as_ref())
+        .ok()
+        .or_else(|| Some(old_path));
     let file = match vfs::File::new(inode, vfs::FileFlags::O_RDONLY) {
         Ok(f) => f,
         Err(e) => return -(e as isize),
     };
-    let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
     lock.working_inode = file;
     if let Some(path) = working_path {

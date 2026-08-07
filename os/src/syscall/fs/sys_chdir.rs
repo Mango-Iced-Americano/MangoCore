@@ -16,10 +16,14 @@ pub fn sys_chdir(path: *const u8) -> isize {
     }
 
     // 克隆当前 cwd 状态后释放锁，避免在 find/open 持锁
-    let (cwd_inode, old_path) = {
+    let (cwd_inode, old_path, root_inode) = {
         let fs_ref = task.process.fs();
         let lock = fs_ref.lock();
-        (lock.working_inode.clone(), lock.working_path.clone())
+        (
+            lock.working_inode.clone(),
+            lock.working_path.clone(),
+            lock.root_inode.clone(),
+        )
     };
 
     // Check search permission on each parent directory component
@@ -53,10 +57,18 @@ pub fn sys_chdir(path: *const u8) -> isize {
         }
         Err(errno) => return errno,
     };
-    let working_path = target
-        .inode
-        .absolute_path()
-        .unwrap_or_else(|_| normalize_cwd(&old_path, &path));
+    let working_path = if let Some(root_inode) = root_inode.as_ref() {
+        // Absolute paths are relative to the process root after chroot(2).
+        // Prefer the inode-derived path so a pre-existing stale cache cannot
+        // reintroduce the global mount prefix into FsStatus.working_path.
+        crate::fs::process_visible_path(&target.inode, Some(root_inode))
+            .unwrap_or_else(|_| normalize_cwd(&old_path, &path))
+    } else {
+        target
+            .inode
+            .absolute_path()
+            .unwrap_or_else(|_| normalize_cwd(&old_path, &path))
+    };
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
     lock.working_inode = target;

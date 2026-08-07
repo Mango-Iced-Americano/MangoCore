@@ -448,6 +448,14 @@
 - **教训**: `sys_getcwd` 走的是 `FsStatus::working_path` 缓存（`cb9053a4` 引入），与 VFS 路径解析是两条独立链路。修复 `sys_getcwd` 不等于修复 VFS 层 ".." 语义。任何依赖 `find("..")` 的调用链都可能是下一个受害者。
 - **相关文件**: `os/src/syscall/fs.rs` (sys_getcwd), `os/src/fs/vfs/mount.rs` (do_find, lookup_dotdot)
 
+### chroot 后 bindgen/libclang 头文件缺失先查 `/proc/<pid>/fd` 路径
+
+- **现象**: 进程已经能在 chroot 内打开源码，Cargo 也能打印正确的 workspace 根目录，但 bindgen/libclang 报相对头文件（例如 `ctypes.h`）不存在；同一镜像中的普通 Rust 文件读取可能正常。
+- **根因**: VFS 的 `absolute_path()` 是全局挂载树路径，`/proc/<pid>/fd/*` 若直接返回它，会把 chroot 外的挂载前缀（例如 `/sdcard/...`）泄漏给 `realpath`/fd 重开路径。`FsStatus.working_path` 也可能在 `chdir`/`fchdir` 时缓存该全局前缀。
+- **修复**: 统一按进程 `root_inode` 将 inode 路径转换为 root-relative；`getcwd`、`/proc/<pid>/fd/*` 和 cwd 缓存必须共用该转换。不要只修 `sys_getcwd`，也不要硬编码某个挂载点名称。
+- **验证**: 在临时镜像中先确认 `current_dir`、`canonicalize("ctypes.h")` 和 `readlink("/proc/self/fd/<fd>")` 的路径；随后以 8 核/8G profile=buildstorm 重跑，区分路径修复与镜像 ext4 journal replay 的启动延迟。
+- **相关文件**: `os/src/fs/mod.rs`, `os/src/fs/procfs/pid/fd.rs`, `os/src/syscall/fs/sys_getcwd.rs`, `os/src/syscall/fs/sys_chdir.rs`, `os/src/syscall/fs/sys_fchdir.rs`
+
 ### init stage-1 后无输出先查首个外部等待点
 
 - **现象**: QEMU 日志完成 net/block/mount 后停在 `[init] MangoCore stage-1 boot (initramfs mode)`，没有后续 bind mount 或 initproc 输出。

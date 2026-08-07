@@ -49,6 +49,41 @@ use core::sync::atomic::Ordering;
 pub use dirent::Dirent;
 use lazy_static::*;
 
+/// Convert a VFS-global inode path into the path visible from a process root.
+///
+/// `IndexNode::absolute_path()` walks the global mount tree, while a process
+/// that called `chroot(2)` must not expose the mount prefix outside its jail
+/// through `getcwd(2)` or `/proc/<pid>/fd/*`.  Keep this conversion in one
+/// place so those interfaces do not drift apart.
+pub fn process_visible_path(
+    inode: &Arc<dyn IndexNode>,
+    root_inode: Option<&Arc<dyn IndexNode>>,
+) -> Result<String, crate::utils::error::SyscallErr> {
+    let global_path = inode.absolute_path()?;
+    let Some(root_inode) = root_inode else {
+        return Ok(global_path);
+    };
+
+    if Arc::ptr_eq(inode, root_inode) {
+        return Ok(String::from("/"));
+    }
+
+    let root_path = root_inode.absolute_path()?;
+    let root_prefix = root_path.trim_end_matches('/');
+    if root_prefix.is_empty() {
+        return Ok(global_path);
+    }
+    if let Some(suffix) = global_path.strip_prefix(root_prefix) {
+        if suffix.is_empty() {
+            return Ok(String::from("/"));
+        }
+        if suffix.starts_with('/') {
+            return Ok(String::from(suffix));
+        }
+    }
+    Err(crate::utils::error::SyscallErr::ENOENT)
+}
+
 /// Adapt a physical device to a filesystem's native block unit and mount mode.
 pub fn adapt_filesystem_device(
     device: Arc<dyn BlockDevice>,
