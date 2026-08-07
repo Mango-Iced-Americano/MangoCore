@@ -1206,6 +1206,15 @@ impl UserBufferWriteCursor<'_> {
         Ok(copied)
     }
 
+    /// Copy to the next chunk without faulting user pages.  Page-cache I/O
+    /// uses this after the syscall entry has faulted the complete buffer in,
+    /// so VM fault handling never re-enters while a cache lock is held.
+    pub(crate) fn try_write_from_nofault(&mut self, src: &[u8]) -> Result<usize, isize> {
+        let copied = self.buffer.write_from_at_nofault(self.offset, src)?;
+        self.offset = self.offset.saturating_add(copied);
+        Ok(copied)
+    }
+
     /// Lossy convenience form for callers that already treat a short copy as
     /// an error; new kernel paths should use `try_write_from`.
     pub fn write_from(&mut self, src: &[u8]) -> usize {

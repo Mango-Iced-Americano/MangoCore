@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::fs::page_cache::PageCache;
@@ -35,6 +35,8 @@ impl InodeKey {
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
     cached_times: Mutex<Option<(TimeSpec, TimeSpec)>>,
+    mtime_dirty: AtomicBool,
+    ctime_dirty: AtomicBool,
     timestamp_generation: AtomicUsize,
     page_cache: Mutex<Option<Weak<PageCache>>>,
     /// Keep dirty cache data reachable until a successful data+metadata sync.
@@ -61,6 +63,8 @@ impl InodeLifetime {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
             cached_times: Mutex::new(None),
+            mtime_dirty: AtomicBool::new(false),
+            ctime_dirty: AtomicBool::new(false),
             timestamp_generation: AtomicUsize::new(0),
             page_cache: Mutex::new(None),
             dirty_page_cache: Mutex::new(None),
@@ -73,10 +77,17 @@ impl InodeLifetime {
 
     pub(crate) fn cache_modified_time(&self, now: TimeSpec) {
         *self.cached_times.lock() = Some((now, now));
+        self.mtime_dirty.store(true, Ordering::Release);
+        self.ctime_dirty.store(true, Ordering::Release);
         self.timestamp_generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
+        if !self.mtime_dirty.load(Ordering::Acquire)
+            && !self.ctime_dirty.load(Ordering::Acquire)
+        {
+            return None;
+        }
         let times = *self.cached_times.lock();
         times.map(|(mtime, ctime)| CachedTimestamps {
             mtime,
@@ -93,10 +104,18 @@ impl InodeLifetime {
                 0,
                 Ordering::AcqRel,
                 Ordering::Acquire,
-            )
+        )
             .is_ok()
         {
-            *self.cached_times.lock() = None;
+            // Recheck the generation while holding the timestamp mutex.  A
+            // writer may have raced with the CAS and installed a newer pair;
+            // never clear that newer snapshot as part of the old commit.
+            let mut cached = self.cached_times.lock();
+            if self.timestamp_generation.load(Ordering::Acquire) == 0 {
+                *cached = None;
+                self.mtime_dirty.store(false, Ordering::Release);
+                self.ctime_dirty.store(false, Ordering::Release);
+            }
         }
     }
 
@@ -217,18 +236,25 @@ impl Ext4FileSystem {
                     let cache = maybe_cache.as_ref().cloned().or_else(|| lifetime.page_cache());
                     let mut commit_size = || {
                         let generation = lifetime.size_generation.load(Ordering::Acquire);
-                        if generation == 0 {
+                        let timestamps = lifetime.dirty_timestamps();
+                        if generation == 0 && timestamps.is_none() {
                             return Ok(());
                         }
                         let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
-                        let size = lifetime.logical_size.load(Ordering::Acquire);
-                        self.inner()
-                            .commit_inode_size(id, size as u64, None)
-                            .map_err(|error| from_another(error.code()))?;
-                        if let Some(timestamps) = self.commit_lifetime_timestamps(id, lifetime)? {
-                            committed_timestamps.push((lifetime.clone(), timestamps));
+                        if generation != 0 {
+                            let size = lifetime.logical_size.load(Ordering::Acquire);
+                            self.inner()
+                                .commit_inode_size(id, size as u64, None)
+                                .map_err(|error| from_another(error.code()))?;
                         }
-                        committed_generations.push((lifetime.clone(), generation));
+                        if timestamps.is_some() {
+                            if let Some(committed) = self.commit_lifetime_timestamps(id, lifetime)? {
+                                committed_timestamps.push((lifetime.clone(), committed));
+                            }
+                        }
+                        if generation != 0 {
+                            committed_generations.push((lifetime.clone(), generation));
+                        }
                         Ok(())
                     };
                     if let Some(cache) = cache {

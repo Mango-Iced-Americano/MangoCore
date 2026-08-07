@@ -13,6 +13,8 @@ pub fn sys_sync() -> isize {
         fs.flush_metadata_cache();
     }
     #[cfg(feature = "ext4_another_backend")]
-    crate::fs::ext4_another::sync_all_instances();
+    if let Err(error) = crate::fs::ext4_another::sync_all_instances() {
+        return -(error as isize);
+    }
     SUCCESS
 }

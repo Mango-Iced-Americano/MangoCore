@@ -18,7 +18,7 @@ use crate::utils::error::SyscallErr;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use super::vfs::IndexNode;
@@ -61,13 +61,13 @@ const VALID_SEG_SHIFT: usize = 9;
 /// 每页的 segment 数量（4096 / 512 = 8）
 const VALID_SEG_COUNT: usize = PAGE_SIZE >> VALID_SEG_SHIFT;
 /// 所有 segment 均有效的掩码（8 segments = 0xFF）
-const VALID_ALL: u8 = 0xFF;
+const VALID_ALL: u32 = 0xFF;
 
 /// 根据页面在文件中的位置计算初始 valid_mask。
 /// 页面超出旧 EOF → VALID_ALL（零填充即有效数据）；
 /// 页面跨越 EOF → 仅超出部分为有效零填充；
 /// 页面在旧文件内 → 0（数据尚未从后端加载）。
-fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u8 {
+fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u32 {
     let page_start = page_index * PAGE_SIZE;
     if page_start >= old_file_size {
         return VALID_ALL; // entirely beyond EOF → all zeros = valid
@@ -83,7 +83,7 @@ fn initial_valid_mask(page_index: usize, old_file_size: usize) -> u8 {
 
 /// 计算 [page_offset, page_offset+len) 区间覆盖的 segment 位掩码
 /// 部分覆盖的 segment 也会被标记为有效
-fn mask_for_range(page_offset: usize, len: usize) -> u8 {
+fn mask_for_range(page_offset: usize, len: usize) -> u32 {
     if len == 0 {
         return 0;
     }
@@ -94,11 +94,7 @@ fn mask_for_range(page_offset: usize, len: usize) -> u8 {
         return 0;
     }
     let count = seg_end - seg_start;
-    let low_mask: u8 = if count == 8 {
-        u8::MAX
-    } else {
-        (1u8 << count) - 1
-    };
+    let low_mask: u32 = (1u32 << count) - 1;
     low_mask << seg_start
 }
 
@@ -277,10 +273,16 @@ pub trait PageCacheBackend: Send + Sync {
 
 // ── PageEntry flags ──────────────────────────────────────────────────────
 
-/// PageEntry flags 位定义
-pub const PG_REFERENCED: u8 = 1 << 0;
+/// PageEntry flags 位定义。状态与重入标志放在同一个原子字中，避免
+/// `state`/`flags` 两次发布在写回竞态下相互覆盖。
+const PG_LOCKED: u32 = 1 << 0;
+const PG_UPTODATE: u32 = 1 << 1;
+const PG_DIRTY: u32 = 1 << 2;
+const PG_WRITEBACK: u32 = 1 << 3;
+const PG_ERROR: u32 = 1 << 4;
+pub const PG_REFERENCED: u32 = 1 << 5;
 /// 页面在写回期间被再次标记为脏（写回完成后应恢复为 Dirty）
-pub const PG_REDIRTIED: u8 = 1 << 1;
+pub const PG_REDIRTIED: u32 = 1 << 6;
 
 // ── PageEntry ────────────────────────────────────────────────────────────
 
@@ -291,13 +293,11 @@ struct PageEntry {
     page: Arc<FrameTracker>,
     /// 保护该页 frame bytes；entries/inner 解锁后才允许获取。
     data: RwLock<()>,
-    /// 页面状态
-    state: AtomicU8,
+    /// 页面状态和引用/重入标志的原子集合。
+    flags: AtomicU32,
     /// 部分写入有效性位掩码：每 bit 对应 512B segment，1=已写入/有效
     /// 初始值取决于创建方式：populate → VALID_ALL，zero-fill → 0
-    valid_mask: AtomicU8,
-    /// 通用标志位（目前仅 PG_REFERENCED），供 clock eviction 使用
-    flags: AtomicU8,
+    valid_mask: AtomicU32,
     /// 已安装到用户页表的 file-backed PTE 数量。
     ///
     /// 该计数只作为 rmap/unmap 的快速判定；真正的 VMA→VA 定位由 PageCache
@@ -311,71 +311,101 @@ impl PageEntry {
         PageEntry {
             page,
             data: RwLock::new(()),
-            state: AtomicU8::new(state as u8),
-            valid_mask: AtomicU8::new(VALID_ALL),
-            flags: AtomicU8::new(0),
+            flags: AtomicU32::new(Self::flags_for_state(state)),
+            valid_mask: AtomicU32::new(VALID_ALL),
             map_count: AtomicUsize::new(0),
         }
     }
 
     /// 创建一个带指定 valid_mask 的页面条目（跳过后端读取）
     /// 用于页面超出旧 EOF 的场景：valid_mask=VALID_ALL 表示全零页即有效
-    fn new_with_valid_mask(page: Arc<FrameTracker>, valid_mask: u8) -> Self {
+    fn new_with_valid_mask(page: Arc<FrameTracker>, valid_mask: u32) -> Self {
         PageEntry {
             page,
             data: RwLock::new(()),
-            state: AtomicU8::new(PageState::UpToDate as u8),
-            valid_mask: AtomicU8::new(valid_mask),
-            flags: AtomicU8::new(0),
+            flags: AtomicU32::new(PG_UPTODATE),
+            valid_mask: AtomicU32::new(valid_mask),
             map_count: AtomicUsize::new(0),
         }
     }
 
     fn state(&self) -> PageState {
-        Self::decode_state(self.state.load(Ordering::Acquire))
+        Self::decode_state(self.flags.load(Ordering::Acquire))
     }
 
     fn set_state(&self, state: PageState) {
-        self.state.store(state as u8, Ordering::Release);
-    }
-
-    fn decode_state(raw: u8) -> PageState {
-        match raw {
-            0 => PageState::Loading,
-            1 => PageState::UpToDate,
-            2 => PageState::Dirty,
-            3 => PageState::Writeback,
-            4 => PageState::Error,
-            _ => PageState::Error,
+        let state_flags = Self::flags_for_state(state);
+        let mut old = self.flags.load(Ordering::Acquire);
+        loop {
+            let desired = state_flags | (old & (PG_REFERENCED | PG_REDIRTIED));
+            match self
+                .flags
+                .compare_exchange(old, desired, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(current) => old = current,
+            }
         }
     }
 
-    fn state_raw(&self) -> u8 {
-        self.state.load(Ordering::Acquire)
+    const fn flags_for_state(state: PageState) -> u32 {
+        match state {
+            PageState::Loading => PG_LOCKED,
+            PageState::UpToDate => PG_UPTODATE,
+            PageState::Dirty => PG_UPTODATE | PG_DIRTY,
+            PageState::Writeback => PG_UPTODATE | PG_WRITEBACK | PG_LOCKED,
+            PageState::Error => PG_ERROR,
+        }
     }
 
-    /// CAS the state field. Returns Ok(previous) on success, Err(current) on failure.
-    fn compare_exchange_state(&self, old: u8, new: u8) -> Result<u8, u8> {
-        self.state
-            .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
+    fn decode_state(flags: u32) -> PageState {
+        if flags & PG_ERROR != 0 {
+            PageState::Error
+        } else if flags & PG_LOCKED != 0 && flags & PG_UPTODATE == 0 {
+            PageState::Loading
+        } else if flags & PG_WRITEBACK != 0 {
+            PageState::Writeback
+        } else if flags & PG_DIRTY != 0 {
+            PageState::Dirty
+        } else {
+            PageState::UpToDate
+        }
+    }
+
+    /// CAS a decoded state while preserving orthogonal referenced/redirtied bits.
+    fn compare_exchange_state(&self, old: PageState, new: PageState) -> Result<u32, u32> {
+        let mut raw = self.flags.load(Ordering::Acquire);
+        loop {
+            if Self::decode_state(raw) != old {
+                return Err(raw);
+            }
+            let desired = Self::flags_for_state(new) | (raw & (PG_REFERENCED | PG_REDIRTIED));
+            match self
+                .flags
+                .compare_exchange(raw, desired, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(previous) => return Ok(previous),
+                Err(current) => raw = current,
+            }
+        }
     }
 
     // ── Page flags ──────────────────────────────────────────────────
 
-    fn set_flag(&self, flag: u8) {
+    fn set_flag(&self, flag: u32) {
         self.flags.fetch_or(flag, Ordering::Release);
     }
 
-    fn clear_flag(&self, flag: u8) {
+    fn clear_flag(&self, flag: u32) {
         self.flags.fetch_and(!flag, Ordering::Release);
     }
 
-    fn test_flag(&self, flag: u8) -> bool {
+    fn test_flag(&self, flag: u32) -> bool {
         (self.flags.load(Ordering::Acquire) & flag) != 0
     }
 
     /// Test-and-clear a flag atomically. Returns true if the flag was set.
-    fn test_and_clear_flag(&self, flag: u8) -> bool {
+    fn test_and_clear_flag(&self, flag: u32) -> bool {
         let old = self.flags.fetch_and(!flag, Ordering::AcqRel);
         (old & flag) != 0
     }
@@ -401,6 +431,9 @@ impl PageEntry {
             return self.is_fully_valid();
         }
         let old = self.valid_mask.fetch_or(mask, Ordering::Release);
+        if old & mask == mask {
+            return false;
+        }
         (old | mask) == VALID_ALL
     }
 
@@ -1014,12 +1047,11 @@ impl PageCache {
     /// PG_REDIRTIED，完成者会把页面恢复为可重试的 Dirty。
     fn mark_dirty_after_copy(&self, page_index: usize, entry: &PageEntry) {
         loop {
-            let raw = entry.state_raw();
-            let st = PageEntry::decode_state(raw);
+            let st = entry.state();
             match st {
                 PageState::Dirty => break,
                 PageState::UpToDate => {
-                    match entry.compare_exchange_state(raw, PageState::Dirty as u8) {
+                    match entry.compare_exchange_state(PageState::UpToDate, PageState::Dirty) {
                         Ok(_) => {
                             GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
                             self.inner.lock().mark_dirty(page_index);
@@ -1650,7 +1682,7 @@ impl PageCache {
 
     // ── UserBuffer 读写 ──────────────────────────────────────────────
 
-    /// 通过有界 kernel bounce 读取；PageCache 锁只覆盖 kernel buffer。
+    /// 直接把 PageCache 页面复制到用户缓冲区，不经过 kernel bounce buffer。
     pub(crate) fn read_at_user(
         &self,
         offset: usize,
@@ -1675,8 +1707,9 @@ impl PageCache {
             let sub_len = count.min(PAGE_SIZE - page_offset);
             let entry = self.get_page_for_read(start_page)?;
             self.ensure_fully_valid(start_page)?;
+            drop(_op);
             let copied = entry.with_bytes(|src| {
-                user.write_from_at(0, &src[page_offset..page_offset + sub_len])
+                user.write_from_at_nofault(0, &src[page_offset..page_offset + sub_len])
             })
             .map_err(|_| SyscallErr::EFAULT)?;
             return (copied == sub_len)
@@ -1689,11 +1722,14 @@ impl PageCache {
             let op = self.op_gate.read();
             let plan = self.lookup_read_range_fast(offset, count, start_page, end_page);
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
+                drop(op);
                 let mut cursor = user.write_cursor();
                 let mut copied_total = 0;
                 for item in &plan.copies {
                     let copied = item.entry.with_bytes(|src| {
-                        cursor.try_write_from(&src[item.page_offset..item.page_offset + item.len])
+                        cursor.try_write_from_nofault(
+                            &src[item.page_offset..item.page_offset + item.len],
+                        )
                     })
                     .map_err(|_| SyscallErr::EFAULT)?;
                     if copied != item.len {
@@ -1721,7 +1757,9 @@ impl PageCache {
                     let entry = self.get_page_for_read(page_index)?;
                     self.ensure_fully_valid(page_index)?;
                     let copied = entry.with_bytes(|src| {
-                        cursor.try_write_from(&src[read_start - page_start..read_end - page_start])
+                        cursor.try_write_from_nofault(
+                            &src[read_start - page_start..read_end - page_start],
+                        )
                     })
                     .map_err(|_| SyscallErr::EFAULT)?;
                     let expected = read_end - read_start;
@@ -1746,7 +1784,10 @@ impl PageCache {
         }
     }
 
-    /// 先在全部 FS/PageCache 锁外复制用户数据，再写入 PageCache。
+    /// 直接从用户缓冲区复制到 PageCache 页面，不分配临时 kernel buffer。
+    ///
+    /// `UserBuffer` 在 syscall 入口已经完成 fault-in；这里使用 no-fault
+    /// copy，避免在 PageCache 的操作门和页面写锁内触发缺页处理。
     pub(crate) fn write_at_user(
         &self,
         offset: usize,
@@ -1758,13 +1799,51 @@ impl PageCache {
         if count == 0 {
             return Ok(0);
         }
-        let mut bounce = Vec::new();
-        bounce.try_reserve(count).map_err(|_| SyscallErr::ENOMEM)?;
-        bounce.resize(count, 0);
-        let copied = user
-            .read_into_at(0, &mut bounce)
-            .map_err(|_| SyscallErr::EFAULT)?;
-        self.write_kernel(offset, &bounce[..copied], old_size)
+        let _op = self.op_gate.read();
+        let end = offset.checked_add(count).ok_or(SyscallErr::EFBIG)?;
+        let start_page = offset >> PAGE_SIZE_BITS;
+        let end_page = (end - 1) >> PAGE_SIZE_BITS;
+        let mut total_written = 0usize;
+
+        for page_index in start_page..=end_page {
+            let page_start = page_index << PAGE_SIZE_BITS;
+            let write_start = offset.max(page_start);
+            let write_end = end.min(page_start.saturating_add(PAGE_SIZE));
+            let sub_len = write_end.saturating_sub(write_start);
+            if sub_len == 0 {
+                continue;
+            }
+
+            let page_offset = write_start - page_start;
+            let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
+            let entry = self.get_page_for_write_populate(
+                page_index,
+                Some(old_size),
+                full_page_overwrite,
+            )?;
+            let user_offset = write_start - offset;
+            let copied = entry.with_bytes_mut(|dst| {
+                user.read_into_at_nofault(
+                    user_offset,
+                    &mut dst[page_offset..page_offset + sub_len],
+                )
+            });
+            let copied = copied.map_err(|_| SyscallErr::EFAULT)?;
+            if copied != sub_len {
+                total_written += copied;
+                return if total_written == 0 {
+                    Err(SyscallErr::EFAULT)
+                } else {
+                    Ok(total_written)
+                };
+            }
+            entry.mark_valid(page_offset, copied);
+            self.mark_dirty_after_copy(page_index, &entry);
+            total_written += copied;
+        }
+
+        balance_dirty_pages();
+        Ok(total_written)
     }
 
     // ── 顺序读预取 (readahead) ─────────────────────────────────────────
@@ -1945,7 +2024,7 @@ impl PageCache {
         };
 
         // CAS Dirty → Writeback
-        match entry.compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8) {
+        match entry.compare_exchange_state(PageState::Dirty, PageState::Writeback) {
             Ok(_) => {
                 GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 GLOBAL_WRITEBACK_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -2045,7 +2124,7 @@ impl PageCache {
             for i in start..end {
                 if let Some(entry) = &entries[i] {
                     match entry
-                        .compare_exchange_state(PageState::Dirty as u8, PageState::Writeback as u8)
+                        .compare_exchange_state(PageState::Dirty, PageState::Writeback)
                     {
                         Ok(_) => {
                             GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);

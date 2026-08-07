@@ -132,8 +132,8 @@ impl Ext4FileSystem {
     }
 }
 
-/// Sync every live another_ext4 instance without exposing per-instance errors to `sync(2)`.
-pub(crate) fn sync_all_instances() {
+/// Sync every live another_ext4 instance and report the first persistence error.
+pub(crate) fn sync_all_instances() -> Result<(), SyscallErr> {
     let live = {
         let mut registry = EXT4_REGISTRY.lock();
         let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
@@ -141,6 +141,7 @@ pub(crate) fn sync_all_instances() {
         live
     };
 
+    let mut first_error = None;
     for fs in live {
         if let Err(error) = fs.sync_all() {
             log::error!(
@@ -148,8 +149,12 @@ pub(crate) fn sync_all_instances() {
                 fs.fs_id(),
                 error
             );
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
         }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Shutdown every live another_ext4 instance: sync data, then clear
