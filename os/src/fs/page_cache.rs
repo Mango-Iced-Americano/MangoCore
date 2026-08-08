@@ -659,6 +659,12 @@ struct WriteStageCycles {
 
 // ── PageCache ────────────────────────────────────────────────────────────
 
+/// 单次 backend.read_pages() 批次的页数上限（1 MiB staging）。
+///
+/// 约束后端 read_pages 的 staging 堆分配大小；与 `fill_miss_runs`
+/// 中的 local const 保持一致（不可超过后端 MAX_BATCH_PAGES 上限）。
+const MAX_BATCH_PAGES: usize = 256;
+
 /// 页面缓存
 ///
 /// 为 inode 提供页面级别的缓存，管理内存中的文件数据副本。
@@ -2015,12 +2021,14 @@ impl PageCache {
                 i += 1;
                 continue;
             }
-            // 收集一个连续 run
+            // 收集一个连续 run，按 MAX_BATCH_PAGES 分片（超出即开启下一子批），
+            // 与 fill_miss_runs 一致，避免越过后端 read_pages 的批次上限。
             let run_start = pending[i].index;
             let mut run_bufs: Vec<&mut [u8]> = Vec::new();
             while i < pending.len()
                 && pending[i].index < backend_npages
                 && pending[i].index == run_start + run_bufs.len()
+                && run_bufs.len() < MAX_BATCH_PAGES
             {
                 // SAFETY: 我们拥有这些帧的唯一可变引用
                 unsafe {

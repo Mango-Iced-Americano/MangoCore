@@ -72,8 +72,8 @@ pub struct Connected {
     /// the newly published state without a socket-to-socket lock dependency.
     pub recv_waiters: Arc<EventWaitQueue>,
     pub send_waiters: Arc<EventWaitQueue>,
-    peer_recv_waiters: Arc<EventWaitQueue>,
-    peer_send_waiters: Arc<EventWaitQueue>,
+    pub(super) peer_recv_waiters: Arc<EventWaitQueue>,
+    pub(super) peer_send_waiters: Arc<EventWaitQueue>,
 }
 
 impl core::fmt::Debug for Connected {

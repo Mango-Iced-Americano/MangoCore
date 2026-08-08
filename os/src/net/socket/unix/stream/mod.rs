@@ -537,6 +537,31 @@ impl Socket for UnixStreamSocket {
 
 impl Drop for UnixStreamSocket {
     fn drop(&mut self) {
+        let peer = {
+            let inner = self.inner.lock();
+            match &*inner {
+                Inner::Connected(conn) => Some((
+                    conn.peer_rx.clone(),
+                    conn.rx.clone(),
+                    conn.peer_recv_waiters.clone(),
+                    conn.peer_send_waiters.clone(),
+                )),
+                Inner::Init(_) | Inner::Listener(_) => None,
+            }
+        };
+        if let Some((peer_rx, rx, peer_recv_waiters, peer_send_waiters)) = peer {
+            peer_rx.lock().set_send_shutdown();
+            rx.lock().set_recv_shutdown();
+            peer_recv_waiters.notify_events_all(
+                EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM | EPollEvent::EPOLLHUP,
+            );
+            peer_send_waiters.notify_events_all(
+                EPollEvent::EPOLLOUT
+                    | EPollEvent::EPOLLWRNORM
+                    | EPollEvent::EPOLLERR
+                    | EPollEvent::EPOLLHUP,
+            );
+        }
         let (abstract_name, path_name) = {
             let abstract_name = {
                 let inner = self.inner.lock();

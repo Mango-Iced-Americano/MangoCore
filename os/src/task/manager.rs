@@ -957,6 +957,7 @@ impl WaitQueue {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
     /// 清理所有失效 `Weak` 条目，返回清理数量。
     pub fn compact_stale(&mut self) -> usize {
         let before = self.inner.len();
