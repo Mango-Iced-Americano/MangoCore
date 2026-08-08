@@ -3804,9 +3804,25 @@ impl NewFileSystem for Ext4FileSystem {
         }
     }
 
-    fn on_umount(&self) -> Result<(), SyscallErr> {
-        crate::fs::page_cache::flush_all_page_caches()?;
+    fn sync(&self) -> Result<(), SyscallErr> {
+        // Snapshot the instance-local registry before I/O. The registry uses
+        // Weak references, so stale inode caches are pruned without extending
+        // their lifetime and no registry lock crosses backend writeback.
+        let page_caches: alloc::vec::Vec<_> = {
+            let mut registry = self.page_caches.lock();
+            let live = registry.values().filter_map(Weak::upgrade).collect();
+            registry.retain(|_, cache| cache.strong_count() > 0);
+            live
+        };
+        for page_cache in page_caches {
+            page_cache.writeback_all()?;
+        }
         self.flush_metadata_cache();
+        Ok(())
+    }
+
+    fn on_umount(&self) -> Result<(), SyscallErr> {
+        self.sync()?;
         // Evict stale dentry/Weak caches to release table entries, name strings,
         // and stale Weak allocations. children are Weak — clearing them does NOT
         // drop the underlying inode objects (Arc handles that via refcount).

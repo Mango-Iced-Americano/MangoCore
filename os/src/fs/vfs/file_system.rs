@@ -136,6 +136,16 @@ pub trait FileSystem: Any + Send + Sync + Debug {
         FsPermissionPolicy::Dac
     }
 
+    /// Persist dirty data and metadata belonging to this filesystem instance.
+    ///
+    /// The fallback preserves the historical global PageCache behavior for
+    /// filesystems that do not yet keep an instance-local cache registry.
+    /// Persistent backends should override this method so `syncfs(2)` does
+    /// not flush unrelated mounts.
+    fn sync(&self) -> Result<(), SyscallErr> {
+        crate::fs::page_cache::flush_all_page_caches()
+    }
+
     /// 卸载后回调。
     ///
     /// 后端必须在所有必要的写回和资源脱钩都成功后才返回

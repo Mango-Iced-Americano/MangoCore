@@ -202,6 +202,12 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 PageCache 不对后端 `EAGAIN` 做固定次数轮询，防止跨层重试放大 CPU 消耗并掩盖错误
 归属。
 
+PageCache 的直接 UserBuffer 接口采用全有或全无的描述符长度契约：当请求长度大于
+UserBuffer 可访问长度时，读写都必须在加载页面、获取写 lease 或修改脏页状态之前返回
+`EFAULT`，不能静默缩短请求并报告部分成功。后端写回返回 `EAGAIN` 时，PageCache 恢复
+Dirty 状态并把错误返回给本次调用者；是否等待事务 admission 事件由后端适配层负责，
+PageCache 本身不轮询后端。
+
 ## 回收机制
 
 回收由调度器循环的 reclaim hook 驱动（`maybe_reclaim_fs_caches`），每 THROTTLE=64 tick 执行一次。

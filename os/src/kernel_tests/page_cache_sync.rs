@@ -7,6 +7,7 @@ use spin::Mutex;
 use crate::config::PAGE_SIZE;
 use crate::fs::{flush_all_page_caches, registry_stats, PageCache, PageCacheBackend};
 use crate::kernel_tests::runner::KernelTest;
+use crate::mm::{UserBufferReader, UserBufferWriter};
 use crate::utils::error::SyscallErr;
 
 fn frame_first_byte(frame: &crate::mm::Frame) -> u8 {
@@ -159,8 +160,12 @@ pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
             1_000,
         ),
         KernelTest::new(
-            "page_cache::writeback_retries_transient_eagain",
-            test_writeback_retries_transient_eagain,
+            "page_cache::writeback_preserves_dirty_on_backend_eagain",
+            test_writeback_preserves_dirty_on_backend_eagain,
+        ),
+        KernelTest::new(
+            "page_cache::user_io_rejects_short_buffer_before_mutation",
+            test_user_io_rejects_short_buffer_before_mutation,
         ),
         KernelTest::new(
             "page_cache::read_backend_reentry_does_not_deadlock",
@@ -194,7 +199,7 @@ fn test_global_flush_releases_registry_before_writeback() -> Result<(), &'static
     Ok(())
 }
 
-fn test_writeback_retries_transient_eagain() -> Result<(), &'static str> {
+fn test_writeback_preserves_dirty_on_backend_eagain() -> Result<(), &'static str> {
     let cache = PageCache::new();
     let backend = Arc::new(TransientBackend {
         writes: AtomicUsize::new(0),
@@ -204,14 +209,74 @@ fn test_writeback_retries_transient_eagain() -> Result<(), &'static str> {
         .write_kernel(0, &[0xa5; PAGE_SIZE], 0)
         .map_err(|_| "PageCache setup write failed")?;
 
+    for expected_attempts in 1..=3 {
+        match cache.writeback_all() {
+            Err(SyscallErr::EAGAIN) => {}
+            Err(_) => return Err("writeback returned the wrong backend error"),
+            Ok(()) => return Err("PageCache hid backend admission failure"),
+        }
+        if backend.writes.load(Ordering::SeqCst) != expected_attempts {
+            return Err("PageCache polled the backend after EAGAIN");
+        }
+        if !cache.is_dirty(0) {
+            return Err("backend EAGAIN lost the dirty page");
+        }
+    }
+
     cache
         .writeback_all()
-        .map_err(|_| "writeback did not retry transient EAGAIN")?;
+        .map_err(|_| "explicit writeback retry did not succeed")?;
     if backend.writes.load(Ordering::SeqCst) != 4 {
-        return Err("writeback retry count was incorrect");
+        return Err("explicit writeback retry count was incorrect");
     }
     if !cache.dirty_pages_snapshot().is_empty() {
         return Err("successful retry left the page dirty");
+    }
+    Ok(())
+}
+
+fn test_user_io_rejects_short_buffer_before_mutation() -> Result<(), &'static str> {
+    let cache = PageCache::new();
+    cache.set_backend(Arc::new(TransientBackend {
+        writes: AtomicUsize::new(3),
+    }));
+    cache
+        .write_kernel(0, &[0xa5; PAGE_SIZE], 0)
+        .map_err(|_| "PageCache setup write failed")?;
+    let state_before = cache.state_of(0);
+    let dirty_before = cache.dirty_count();
+
+    // A zero-length descriptor needs no userspace mapping. Requesting one
+    // byte through it exercises the all-or-error length contract without
+    // exposing kernel memory as a fake user pointer.
+    let token = crate::task::current_user_token();
+    let source = UserBufferReader::new(token, core::ptr::null(), 0)
+        .map_err(|_| "failed to create empty source descriptor")?
+        .into_user_buffer();
+    match cache.write_at_user(0, 1, &source, PAGE_SIZE) {
+        Err(SyscallErr::EFAULT) => {}
+        _ => return Err("short UserBuffer source was not rejected with EFAULT"),
+    }
+    if cache.state_of(0) != state_before || cache.dirty_count() != dirty_before {
+        return Err("short UserBuffer source changed cached page state");
+    }
+    let frame = cache
+        .frame_for_read(0)
+        .map_err(|_| "short UserBuffer source made page unreadable")?;
+    if frame_first_byte(&crate::mm::Frame::InMemory(frame)) != 0xa5 {
+        return Err("short UserBuffer source changed cached payload");
+    }
+
+    let empty_cache = PageCache::new();
+    let mut destination = UserBufferWriter::new(token, core::ptr::null_mut(), 0)
+        .map_err(|_| "failed to create empty destination descriptor")?
+        .into_user_buffer();
+    match empty_cache.read_at_user(0, 1, &mut destination) {
+        Err(SyscallErr::EFAULT) => {}
+        _ => return Err("short UserBuffer destination was not rejected with EFAULT"),
+    }
+    if empty_cache.cached_page_count() != 0 {
+        return Err("short UserBuffer destination populated PageCache state");
     }
     Ok(())
 }

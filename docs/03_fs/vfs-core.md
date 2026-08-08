@@ -227,12 +227,18 @@ pub trait FileSystem: Any + Send + Sync + Debug {
     fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<SuperBlock, SyscallErr>;
     fn support_readahead(&self) -> bool;
     fn permission_policy(&self) -> FsPermissionPolicy;
+    fn sync(&self) -> Result<(), SyscallErr>;
     fn on_umount(&self) -> Result<(), SyscallErr>;
     fn as_any_ref(&self) -> &dyn Any;
 }
 ```
 
 `root_inode` 是路径解析的起点。`info` 返回 FsInfo（块设备 ID / 最大文件名长度 / 特性列表）。`super_block` 和 `statfs` 提供 statfs 系统调用所需信息。
+
+`sync()` 是文件系统实例级持久化入口。`syncfs(2)` 只负责从 fd 解析所属
+`FileSystem` 并调用该接口，不在 syscall 层识别具体后端。持久化后端应覆盖默认实现，
+使用自己的 PageCache registry、journal 和块设备 flush 顺序；尚未提供实例级 registry
+的后端暂时回退到全局 PageCache flush，以保持原有兼容语义。
 
 `on_umount()` 是可失败的 teardown 事务：具体后端只有在数据/元数据写回、journal/cache
 停止和 C/设备注册表脱钩全部成功后才返回 `Ok(())`。`BackendLifecycle` 使用

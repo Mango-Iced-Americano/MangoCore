@@ -321,6 +321,10 @@ impl FileSystem for Ext4FileSystem {
         }
     }
 
+    fn sync(&self) -> Result<(), SyscallErr> {
+        self.sync_all()
+    }
+
     fn on_umount(&self) -> Result<(), SyscallErr> {
         if self.read_only {
             return Ok(());

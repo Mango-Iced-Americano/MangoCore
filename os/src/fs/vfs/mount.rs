@@ -2425,6 +2425,10 @@ impl FileSystem for MountFS {
         self.lifecycle.fs().support_readahead()
     }
 
+    fn sync(&self) -> Result<(), SyscallErr> {
+        self.lifecycle.fs().sync()
+    }
+
     fn as_any_ref(&self) -> &dyn core::any::Any {
         self
     }

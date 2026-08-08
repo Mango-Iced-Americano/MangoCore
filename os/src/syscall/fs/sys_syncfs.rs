@@ -13,29 +13,13 @@ pub fn sys_syncfs(fd: usize) -> isize {
     }
     drop(fd_table);
 
-    // Resolve the filesystem selected by this fd before choosing the sync
-    // contract. another_ext4 owns its PageCache/lifetime barrier and must not
-    // be preceded by a global flush of unrelated filesystems.
+    // Resolve the filesystem selected by this fd and delegate the durability
+    // contract through VFS. Backends with instance-local registries avoid a
+    // global flush; legacy backends retain the default compatibility path.
     let inode = vfs::MountFSInode::unwrap_inode(&file.inode);
     let fs = inode.fs();
-    #[cfg(feature = "ext4_another_backend")]
-    if let Some(ext4) = fs
-        .as_any_ref()
-        .downcast_ref::<crate::fs::ext4_another::Ext4FileSystem>()
-    {
-        return match ext4.sync_all() {
-            Ok(()) => SUCCESS,
-            Err(error) => -(error as isize),
-        };
+    match fs.sync() {
+        Ok(()) => SUCCESS,
+        Err(error) => -(error as isize),
     }
-    // Preserve the existing legacy paths outside the another_ext4 backend.
-    if let Err(error) = crate::fs::flush_all_page_caches() {
-        log::error!("sys_syncfs: flush_all_page_caches failed: {:?}", error);
-        return -(error as isize);
-    }
-    if let Some(ext4) = fs.as_any_ref().downcast_ref::<crate::fs::ext4::ext4fs::Ext4FileSystem>() {
-        ext4.flush_metadata_cache();
-    }
-
-    SUCCESS
 }

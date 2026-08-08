@@ -198,7 +198,10 @@ impl IndexNode for Ext4Inode {
         let logical_size_start =
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         let size = self.lifetime.logical_size.load(Ordering::Acquire);
-        let actual = len.min(dst.len()).min(size.saturating_sub(offset));
+        let actual = len.min(size.saturating_sub(offset));
+        if actual > dst.len() {
+            return Err(SyscallErr::EFAULT);
+        }
         crate::task::perf::record_pread_ext4_logical_size(
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                 .wrapping_sub(logical_size_start),

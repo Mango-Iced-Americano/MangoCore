@@ -1913,10 +1913,13 @@ impl PageCache {
         len: usize,
         user: &mut crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        let count = len.min(user.len()).min(crate::hal::IO_CHUNK_SIZE);
-        if count == 0 {
+        if len > user.len() {
+            return Err(SyscallErr::EFAULT);
+        }
+        if len == 0 {
             return Ok(0);
         }
+        let count = len;
 
         perf::record_pread_total_count();
 
@@ -2085,10 +2088,16 @@ impl PageCache {
         user: &crate::mm::UserBuffer,
         old_size: usize,
     ) -> Result<usize, SyscallErr> {
-        let count = len.min(user.len()).min(crate::hal::IO_CHUNK_SIZE);
-        if count == 0 {
+        // Reject the complete operation before acquiring any page write lease.
+        // Silently truncating to the source descriptor can otherwise dirty a
+        // prefix and report success for an invalid direct-I/O request.
+        if len > user.len() {
+            return Err(SyscallErr::EFAULT);
+        }
+        if len == 0 {
             return Ok(0);
         }
+        let count = len;
         let _op = self.op_gate.read();
         let end = offset.checked_add(count).ok_or(SyscallErr::EFBIG)?;
         let start_page = offset >> PAGE_SIZE_BITS;

@@ -486,19 +486,27 @@ impl FileSystem for Ext4FileSystem {
         FsPermissionPolicy::Dac
     }
 
+    fn sync(&self) -> Result<(), SyscallErr> {
+        // PageCache backend completion includes lwext4's lower cache flush.
+        // Clone the per-filesystem cache set so neither registry nor C gate is
+        // held while block I/O runs.
+        let caches: alloc::vec::Vec<_> = self.page_caches.lock().values().cloned().collect();
+        for cache in caches {
+            cache.writeback_all()?;
+        }
+        Ok(())
+    }
+
     fn on_umount(&self) -> Result<(), SyscallErr> {
         // The registry intentionally holds dirty PageCaches after dentry/file
         // eviction.  Drain this filesystem's caches before stopping lwext4;
         // never hold the registry lock across block I/O.
-        let caches: alloc::vec::Vec<_> = self.page_caches.lock().values().cloned().collect();
-        for cache in caches {
-            if let Err(error) = cache.writeback_all() {
-                log::error!(
-                    "[lwext4] refusing umount after PageCache writeback failure: {:?}",
-                    error
-                );
-                return Err(error);
-            }
+        if let Err(error) = self.sync() {
+            log::error!(
+                "[lwext4] refusing umount after PageCache writeback failure: {:?}",
+                error
+            );
+            return Err(error);
         }
         // lwext4_umount first disables its internal write-back cache, then
         // stops the journal and detaches the block device.  Preserve all VFS

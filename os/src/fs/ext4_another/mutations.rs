@@ -53,8 +53,10 @@ macro_rules! writable_data_inode_mutations {
                 crate::fs::vfs::FileType::File => {}
                 _ => return Err(crate::utils::error::SyscallErr::EINVAL),
             }
-            let actual = len.min(source.len());
-            if actual == 0 {
+            if len > source.len() {
+                return Err(crate::utils::error::SyscallErr::EFAULT);
+            }
+            if len == 0 {
                 return Ok(0);
             }
             let cache = self.regular_page_cache(&fs)?;
@@ -62,7 +64,7 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let written = cache.write_at_user(offset, actual, source, old_size)?;
+            let written = cache.write_at_user(offset, len, source, old_size)?;
             let end = offset
                 .checked_add(written)
                 .ok_or(crate::utils::error::SyscallErr::EFBIG)?;
