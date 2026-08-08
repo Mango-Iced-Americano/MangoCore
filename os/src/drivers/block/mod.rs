@@ -1,5 +1,8 @@
 mod block_dev;
 mod descriptor;
+// `loop` 是 Rust 关键字，模块名为 loop_dev，实际文件为 loop.rs
+#[path = "loop.rs"]
+mod loop_dev;
 pub mod partition;
 mod sata_blk;
 #[cfg(target_arch = "riscv64")]
@@ -11,6 +14,7 @@ pub mod virtio_blk_pci;
 pub mod virtio_dma_pool;
 pub(crate) use block_dev::validate_block_buffer_length;
 pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceNameStyle, BlockDeviceResult};
+pub use loop_dev::LoopBlockDevice;
 pub use descriptor::{
     BlockDeviceDescriptor, BlockDeviceName, BlockDeviceNameError, BlockDeviceNode,
     BlockDeviceNumber,

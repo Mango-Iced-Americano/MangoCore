@@ -1,10 +1,15 @@
-//! L3 tests for the lwext4 block-adapter boundary.
+//! L3 tests for the lwext4 block-adapter boundary and the loop-mounted
+//! ktest test disks.
 //!
 //! Zero-drive ktest deliberately keeps block-bridge coverage independent of
-//! PID1 and external image topology; mounted-filesystem cases live separately.
+//! PID1 and external image topology. The real-disk tests additionally exercise
+//! the initramfs-embedded loop disks (`/test-ext` ext4, `/test-fat` FAT32)
+//! through the VFS, mounting and unmounting them per test.
 
 #[path = "ext4/block_device.rs"]
 mod block_device;
+#[path = "ext4/real_disk.rs"]
+mod real_disk;
 #[cfg(feature = "ext4_lwext4_backend")]
 #[path = "ext4/byte_bridge.rs"]
 mod byte_bridge;
@@ -21,12 +26,16 @@ use crate::kernel_tests::runner::KernelTest;
 pub fn tests() -> Vec<KernelTest> {
     let mut tests = vec![
         KernelTest::new(
-            "ext4::memblk_read_write",
-            block_device::test_memblk_read_write,
+            "ext4::mountpoint_exists",
+            real_disk::test_ext4_mountpoint_exists,
         ),
         KernelTest::new(
-            "ext4::memblk_isolation",
-            block_device::test_memblk_isolation,
+            "ext4::create_write_read_remove",
+            real_disk::test_ext4_create_write_read_remove,
+        ),
+        KernelTest::new(
+            "ext4::fat32_create_write_read_remove",
+            real_disk::test_fat32_create_write_read_remove,
         ),
     ];
     #[cfg(feature = "ext4_lwext4_backend")]

@@ -118,17 +118,19 @@ pub fn run_from_bootargs_in_task(config: &crate::bootargs::BootConfig) {
     let results = runner::run_tests_return(config, &all_tests());
     if results.failed > 0 {
         crate::println!(
-            "\x1b[31m# results: {} passed, {} failed, {} total\x1b[0m",
+            "\x1b[31m# results: {} passed, {} failed, {} skipped, {} total\x1b[0m",
             results.passed,
             results.failed,
+            results.skipped,
             results.total,
         );
         crate::println!("\x1b[31m[KTEST RESULT: FAIL]\x1b[0m");
     } else {
         crate::println!(
-            "\x1b[32m# results: {} passed, {} failed, {} total\x1b[0m",
+            "\x1b[32m# results: {} passed, {} failed, {} skipped, {} total\x1b[0m",
             results.passed,
             results.failed,
+            results.skipped,
             results.total,
         );
         crate::println!("\x1b[32m[KTEST RESULT: PASS]\x1b[0m");

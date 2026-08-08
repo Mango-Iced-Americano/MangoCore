@@ -75,6 +75,7 @@ fn arch_name() -> &'static str {
 pub struct TestResults {
     pub passed: usize,
     pub failed: usize,
+    pub skipped: usize,
     pub total: usize,
 }
 
@@ -122,6 +123,7 @@ pub fn run_tests_return(
         return TestResults {
             passed: 0,
             failed: 0,
+            skipped: 0,
             total: 0,
         };
     }
@@ -144,6 +146,7 @@ pub fn run_tests_return(
     let mut test_num: usize = 1;
     let mut passed: usize = 0;
     let mut failed: usize = 0;
+    let mut skipped: usize = 0;
 
     for _rep in 0..config.repeat {
         for test in &selected {
@@ -168,6 +171,17 @@ pub fn run_tests_return(
                     );
                     passed += 1;
                 }
+                Err(reason) if reason.starts_with("SKIP:") => {
+                    crate::println!(
+                        "{}ok{} {} {} # SKIP {}",
+                        COLOR_YELLOW,
+                        COLOR_RESET,
+                        test_num,
+                        test.name,
+                        reason
+                    );
+                    skipped += 1;
+                }
                 Err(reason) => {
                     crate::println!(
                         "{}not ok{} {} {}",
@@ -184,13 +198,15 @@ pub fn run_tests_return(
 
                     if config.failfast {
                         crate::println!(
-                            "# failfast: stopping after {} passed, {} failed",
+                            "# failfast: stopping after {} passed, {} failed, {} skipped",
                             passed,
-                            failed
+                            failed,
+                            skipped
                         );
                         return TestResults {
                             passed,
                             failed,
+                            skipped,
                             total: total_tests,
                         };
                     }
@@ -215,6 +231,7 @@ pub fn run_tests_return(
     TestResults {
         passed,
         failed,
+        skipped,
         total: total_tests,
     }
 }
@@ -232,20 +249,22 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 
     if results.failed > 0 {
         crate::println!(
-            "{}# results: {} passed, {} failed, {} total{}",
+            "{}# results: {} passed, {} failed, {} skipped, {} total{}",
             COLOR_RED,
             results.passed,
             results.failed,
+            results.skipped,
             results.total,
             COLOR_RESET
         );
         shutdown_failure();
     } else {
         crate::println!(
-            "{}# results: {} passed, {} failed, {} total{}",
+            "{}# results: {} passed, {} failed, {} skipped, {} total{}",
             COLOR_GREEN,
             results.passed,
             results.failed,
+            results.skipped,
             results.total,
             COLOR_RESET
         );

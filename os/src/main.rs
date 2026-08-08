@@ -140,6 +140,8 @@ pub fn rust_main(hart_id: usize, dtb_paddr: usize) -> ! {
         // Network always initialised: Unix sockets, eventfd, epoll, futex
         // all depend on NET_INTERFACE being up regardless of NIC presence.
         net::config::init();
+        // initramfs 内嵌的 ktest loop 测试磁盘不再在启动时挂载；
+        // 由各 ktest 用例按需 mount → run → unmount（缺失时 SKIP）。
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();

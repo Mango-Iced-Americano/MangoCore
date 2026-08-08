@@ -359,6 +359,41 @@ pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
 }
 
+/// 挂载 initramfs 内嵌的单个 ktest 测试磁盘。
+///
+/// 把 initramfs 中的磁盘镜像文件（如 `test-ext.img`）包装为
+/// [`crate::drivers::block::LoopBlockDevice`]，挂载到 VFS_ROOT 下的
+/// `mount_point`。不注册到全局 BLOCK_DEVICES，仅作为挂载文件系统。
+///
+/// 由 ktest 用例自行调用（mount → run → unmount），不再在启动时批量挂载。
+/// 失败时返回 `&'static str` 错误，磁盘未嵌入或挂载失败时调用方应当把
+/// 用例标记为 SKIP 而不是 FAIL。
+pub fn mount_test_disk(
+    disk_file: &str,
+    mount_point: &str,
+) -> Result<Arc<self::vfs::MountFS>, &'static str> {
+    let root = vfs_root();
+    let root_inode = root.mountpoint_root_inode();
+    let inode = root_inode
+        .find(disk_file)
+        .map_err(|_| "ktest test disk file not found in initramfs")?;
+    let device: Arc<dyn BlockDevice> =
+        Arc::new(crate::drivers::block::LoopBlockDevice::new(inode));
+    let mfs = mount_block_fs(&root, &device, mount_point, "loop")
+        .ok_or("ktest mount of test disk failed")?;
+    println!("[ktest] mounted /{} (loop)", mount_point);
+    Ok(mfs)
+}
+
+/// 卸载 ktest 用例挂载的测试磁盘（`umount_force` 包装）。
+///
+/// 测试盘的文件系统后端由 ramfs inode 提供，卸载仅从挂载树摘除并释放
+/// 后端引用；ramfs 文件本身驻留内存，不受影响。
+pub fn unmount_test_disk(mfs: &Arc<self::vfs::MountFS>) -> Result<(), &'static str> {
+    mfs.umount_force()
+        .map_err(|_| "ktest unmount of test disk failed")
+}
+
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。
 /// 在 `mm::init()` 之后、`drivers::init_net_device()` 之前调用。
 #[cfg(feature = "initramfs")]
