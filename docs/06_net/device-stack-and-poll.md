@@ -148,6 +148,10 @@ IRQ 不进入 smoltcp、不取得 WaitQueue、不分配，也不输出；它只�
 转换成普通 WaitQueue 唤醒。这样长 syscall 仍能接收 IRQ，但不会在中断上下文进入
 网络业务锁。
 
+**阶段 3 — 全局唤醒**：如果 `poll_once` 推进了协议栈（有数据收发），则调用 `wake_tcp_waiters()` 和 `wake_raw_waiters()`，遍历全局 `TCP_SOCKETS` 和 `RAW_SOCKETS` 列表，可靠唤醒有数据就绪的等待队列。
+
+**WaitQueue 锁序**：网络 syscall 在调用 `wait_until_interruptible` 前先执行 `NET_INTERFACE.poll()`；条件闭包只调用 TCP 的 `_without_poll` 状态检查。poll 可能在阶段 3 重入同一 `EventWaitQueue` 的通知路径，因此不得在条件闭包或其调用链中执行 poll，也不得将通知降级为 best-effort `try_lock()`。
+
 ### `net_poll_worker()` — CPU0 消费者
 
 worker 固定在 CPU0。每次醒来最多消费两轮 pending：先 AcqRel 清门，再快照

@@ -305,8 +305,8 @@ RESCHEDULE/本地 timer 抢占、永久 group-exit 与临时 exec stop/ack 不�
 - **信号**：`task/signal/` 子模块（action/delivery/frame/pending/wait）
 - **WaitQueue** — 每轮等待使用一次性 `WaitEntry` 固化早到 wake，
   `TaskStatus` 仍是 CPU/runqueue ownership 的唯一权威；支持 epoll、eventfd、IPC
-  等通用阻塞原语，futex 使用专用 waiter。通用 I/O fallback 在 FS/Net 生产者
-  通知补齐前保留，不得仅因核心 token 完成就提前删除
+  等通用阻塞原语，futex 使用专用 waiter。通用 I/O fallback（10ms 兜底定时器）
+  已随 FS/Net 生产者通知补齐而删除（2026-08-08 合并批次），等待一律走事件驱动
 - **Completion** — 单次通知原语
 
 ### 文件系统（VFS）

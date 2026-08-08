@@ -1,9 +1,9 @@
 //! L3 tests for the timer subsystem.
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::kernel_tests::runner::KernelTest;
 use crate::timer;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Returns all timer-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {

@@ -42,7 +42,10 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     let inode = match vfs_lookup(&lookup_inode, &lookup_path, false) {
         Ok(inode) => inode,
         Err(errno) => {
-            error!("[sys_umount2] vfs_lookup failed for path '{}': errno={}", lookup_path, errno);
+            error!(
+                "[sys_umount2] vfs_lookup failed for path '{}': errno={}",
+                lookup_path, errno
+            );
             return errno;
         }
     };
@@ -59,7 +62,10 @@ pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     match inode.umount() {
         Ok(_) => SUCCESS,
         Err(e) => {
-            error!("[sys_umount2] inode.umount() failed for '{}': errno={}", lookup_path, e as isize);
+            error!(
+                "[sys_umount2] inode.umount() failed for '{}': errno={}",
+                lookup_path, e as isize
+            );
             -(e as isize)
         }
     }

@@ -1,3 +1,0 @@
-tested HEAD: 85229a26f41d8b3502aaa0718da724d7ebbed98a
-tested tracked diff sha256: b2f54b2666a91aa3fc3ae1c7e45402de5b0af79bec8dca7f0d4f13643681a15e
-tested worktree state: dirty, containing the B08 production-code diff before documentation-only updates

@@ -25,7 +25,7 @@ rand_core = "0.6.4"
 rand_chacha = { version = "0.3.1", default-features = false }
 managed = { version = "0.8", default-features = false, features = ["map"] }
 virtio-drivers = { path = "../dependency/virtio-drivers", default-features = false, features = ["alloc"] }
-lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false }
+lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }
 another_ext4 = { path = "../dependency/another_ext4", optional = true }
 rustsbi = { path = "../dependency/rustsbi" }
 fdt = { git = "https://github.com/Mango-Iced-Americano/fdt", default-features = false }
@@ -78,28 +78,23 @@ comp = []
 heap_trace = []
 perf_stats = []
 perf_diag = ["perf_stats"]
-board_bringup_trace = []
+ext4_lwext4_backend = ["dep:lwext4_rust"]
+ext4_legacy_backend = []
+ext4_another_backend = ["dep:another_ext4"]
+bringup_trace = []
 gmac_probe = []
 gmac_2k1000 = []
 gmac_dhcp = []
 net_perf_diag = []
 net_ack_immediate = []
 initramfs = []
-ext4_lwext4_backend = []
-ext4_legacy_backend = []
-ext4_another_backend = ["dep:another_ext4"]
+preload_payloads = []
 
-# LoongArch Boards:
 loongarch64 = []
-board_2k1000 = ["oom_handler", "loongarch64"]
-board_laqemu = ["oom_handler", "loongarch64"]
-# Riscv Board:
 riscv = []
-board_rvqemu = ["oom_handler", "riscv"]
-board_vf2 = ["oom_handler", "riscv"]
-# END of LoongArch Boards.
+boot_la_qemu = ["oom_handler", "loongarch64"]
+boot_la_uboot_dmw = ["oom_handler", "loongarch64"]
 
-# default = ["board_laqemu", "block_sata"]
 default = ["initramfs", "ext4_another_backend"]
 
 [profile.dev]

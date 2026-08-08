@@ -7,18 +7,27 @@ use crate::utils::error::SyscallErr;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WritebackCall {
-    Pages { start_index: usize, page_count: usize },
-    Page { index: usize },
+    Pages {
+        start_index: usize,
+        page_count: usize,
+    },
+    Page {
+        index: usize,
+    },
 }
 
-struct ObservedBackend {
+struct ObservedPageCacheBackend {
     inner: Arc<dyn PageCacheBackend>,
     calls: Arc<Mutex<Vec<WritebackCall>>>,
 }
 
-impl PageCacheBackend for ObservedBackend {
+impl PageCacheBackend for ObservedPageCacheBackend {
     fn read_page(&self, index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
         self.inner.read_page(index, buffer)
+    }
+
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
+        self.inner.read_pages(start_index, pages)
     }
 
     fn write_page(&self, index: usize, buffer: &[u8]) -> Result<usize, SyscallErr> {
@@ -47,12 +56,13 @@ pub(super) struct PageCacheBackendSwapGuard<'cache> {
 
 impl<'cache> PageCacheBackendSwapGuard<'cache> {
     pub(super) fn install(cache: &'cache PageCache) -> Result<Self, &'static str> {
-        let original = cache.backend().ok_or("page-cache backend missing")?;
+        let original = cache.backend().ok_or("page-cache test backend missing")?;
         let calls = Arc::new(Mutex::new(Vec::new()));
-        cache.set_backend(Arc::new(ObservedBackend {
+        let observer: Arc<dyn PageCacheBackend> = Arc::new(ObservedPageCacheBackend {
             inner: original.clone(),
             calls: calls.clone(),
-        }));
+        });
+        cache.set_backend(observer);
         Ok(Self {
             cache,
             original,

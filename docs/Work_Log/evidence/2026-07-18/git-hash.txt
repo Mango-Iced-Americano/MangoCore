@@ -1,5 +1,0 @@
-branch=board-develop-combined
-head=78dd1c8c1cb50c5fe68c9cf0a7bd3606454b41e9
-describe=78dd1c8c-dirty
-tested_tree=dirty working tree; the source changes under review were not committed
-latest_tested_source_mtime=2026-07-19T01:24:28+0800 user/src/bin/regression/regression_lwext4_truncate_hole.rs

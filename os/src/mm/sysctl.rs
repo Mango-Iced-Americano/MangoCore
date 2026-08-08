@@ -10,10 +10,14 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PAGE_SIZE;
+
 // Keep the ABI-visible commit window conservative. The QEMU kernels have less
 // useful user mmap space and lower OOM recovery headroom than the raw RAM size
 // suggests, and LTP tunable tests size their stress loops from CommitLimit.
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
 const COMMIT_LIMIT_CAP_KB: usize = 64 * 1024;
+#[cfg(not(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw")))]
+const COMMIT_LIMIT_CAP_KB: usize = 512 * 1024;
 const DEFAULT_OVERCOMMIT_MEMORY: usize = 0;
 const DEFAULT_OVERCOMMIT_RATIO: usize = 50;
 const DEFAULT_MAX_MAP_COUNT: usize = 65_530;

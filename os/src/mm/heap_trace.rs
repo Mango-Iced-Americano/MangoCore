@@ -13,9 +13,6 @@ const ACTIVE_CAP: usize = 1 << 20; // 1,048,576 entries (~25 MB)
 const SITES_CAP: usize = 16384; // 16K sites
 const STACK_DEPTH: usize = 6;
 
-const KERNEL_TEXT_BASE: usize = 0x8020_0000;
-const KERNEL_TEXT_END: usize = 0x8100_0000;
-
 // ── data structures ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Default)]
@@ -175,8 +172,13 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
         let saved_ra = *(fp.wrapping_sub(8) as *const usize);
         let saved_fp = *(fp.wrapping_sub(16) as *const usize);
 
-        // Validate saved_ra looks like a kernel text address.
-        if saved_ra < KERNEL_TEXT_BASE || saved_ra > KERNEL_TEXT_END {
+        extern "C" {
+            fn stext();
+            fn etext();
+        }
+        let text_start = stext as *const () as usize;
+        let text_end = etext as *const () as usize;
+        if !(text_start..text_end).contains(&saved_ra) {
             break;
         }
         // Frame pointer must move upward (toward older frames).

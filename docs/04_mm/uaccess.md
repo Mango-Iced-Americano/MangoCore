@@ -96,6 +96,14 @@ SharedWrite，并产生无意义的 PTE 修改和 TLB shootdown。
 
 固定对象、数组和字符串最终都进入逐页 copy：
 
+### 4.1 已映射页的 fault-in 快路径
+
+`AddressSpace::fault_in_user_va()` 先以 `mapped_user_va()` 检查当前 PTE。对 Load 要求 `U+R`，对 Store 要求 `U+W`，并且物理地址必须仍在可分配 RAM 范围内；命中时直接返回物理地址，不进入缺页处理或输出 post-fault warning。
+
+未映射页、权限不满足页、lazy/file-backed 缺页、COW/shared-write 和 grow-down 场景全部继续走原有慢路径。快路径不修改 PTE，因此不会替代或省略需要 PTE 更新的 TLB 刷新。
+
+## 5. faulting 翻译
+
 ```text
 检查范围并取得当前 AddressSpace Arc
   -> 计算本页 chunk
@@ -223,6 +231,18 @@ nofault 不是普通 I/O 的优化开关。新增调用点必须同时证明：
 - SysV IPC 等 registry 调用链仍需单独审计是否跨普通锁进入 faultable uaccess。
 
 ## 11. 非 faulting 探测
+
+| 方法 | 语义 |
+|------|------|
+| `len()` | 逻辑总长度 |
+| `read(dst)` | 从用户 buffer 读到内核 dst |
+| `write(src)` | 从内核 src 写到用户 buffer |
+| `write_cursor().write_from(src)` | 顺序写入连续产出的多个内核 chunk |
+| iterator | 逐片段遍历 |
+
+跨页时，逻辑连续 buffer 被拆成多段物理页切片；read/write 会按顺序复制。`UserBufferWriteCursor` 保存当前 segment index 与 segment 内偏移，适用于 PageCache 按文件页升序产出数据的场景；一个请求只前进遍历每个目标 segment 一次。它不替换随机访问的 `write_at(offset, src)`，后者仍服务于需要显式逻辑偏移的调用方。
+
+`UserBufferWriter::new_writable_prefix()` 用一次当前 VM lock 构造连续的既有可写前缀。read/pread 的每个 chunk 先消费该前缀；第一个不可访问页才触发 Store fault-in。这样有效前缀保留 POSIX partial-read 结果，同时避免 `writable_len_for_read()` 与完整 Writer 初始化的重复遍历。
 
 `user_accessible_len()` 只遍历现有 PTE，返回从起点开始连续满足权限的字节数。它不会：
 

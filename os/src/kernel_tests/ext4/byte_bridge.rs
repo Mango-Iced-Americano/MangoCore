@@ -8,9 +8,7 @@ use crate::drivers::block::BlockDevice;
 use crate::hal::BLOCK_SZ;
 
 pub(super) fn test_lwext4_2k_byte_bridge() -> Result<(), &'static str> {
-    use crate::fs::ext4_lwext4::blockdev::{
-        read_bytes_for_block_size, write_bytes_for_block_size,
-    };
+    use crate::fs::ext4_lwext4::blockdev::{read_bytes_for_block_size, write_bytes_for_block_size};
 
     const BOARD_BLOCK: usize = 2048;
     let concrete = Arc::new(RecordingMemBlock::<BOARD_BLOCK>::new(8 * BOARD_BLOCK, 0xa5));
@@ -27,7 +25,9 @@ pub(super) fn test_lwext4_2k_byte_bridge() -> Result<(), &'static str> {
     if after[start..start + payload.len()] != payload {
         return Err("2K bridge write payload mismatch");
     }
-    if after[..start] != before[..start] || after[start + payload.len()..] != before[start + payload.len()..] {
+    if after[..start] != before[..start]
+        || after[start + payload.len()..] != before[start + payload.len()..]
+    {
         return Err("2K bridge write changed adjacent bytes");
     }
     if concrete.take_calls()
@@ -75,7 +75,9 @@ pub(super) fn test_partition_unaligned_batching() -> Result<(), &'static str> {
     if after[absolute..absolute + payload.len()] != payload {
         return Err("unaligned partition write payload mismatch");
     }
-    if after[..absolute] != before[..absolute] || after[absolute + payload.len()..] != before[absolute + payload.len()..] {
+    if after[..absolute] != before[..absolute]
+        || after[absolute + payload.len()..] != before[absolute + payload.len()..]
+    {
         return Err("unaligned partition write changed adjacent bytes");
     }
     if concrete.take_calls()
@@ -95,7 +97,13 @@ pub(super) fn test_partition_unaligned_batching() -> Result<(), &'static str> {
     if readback != payload {
         return Err("unaligned partition readback mismatch");
     }
-    if concrete.take_calls() != vec![(false, 0, BLOCK_SZ), (false, 1, BLOCK_SZ), (false, 2, BLOCK_SZ)] {
+    if concrete.take_calls()
+        != vec![
+            (false, 0, BLOCK_SZ),
+            (false, 1, BLOCK_SZ),
+            (false, 2, BLOCK_SZ),
+        ]
+    {
         return Err("unaligned partition read did not batch its middle");
     }
 
@@ -154,12 +162,15 @@ pub(super) fn test_partition_unaligned_batching() -> Result<(), &'static str> {
 }
 
 pub(super) fn test_lwext4_flush_forwarding() -> Result<(), &'static str> {
-    use crate::drivers::block::partition::{BlockSizeAdapter, PartitionBlockDevice, ReadOnlyBlockDevice};
+    use crate::drivers::block::partition::{
+        BlockSizeAdapter, PartitionBlockDevice, ReadOnlyBlockDevice,
+    };
     use crate::fs::ext4_lwext4::blockdev::{MangoBlockDev, MangoKernelDevOp};
     use lwext4_rust::KernelDevOp;
 
     let concrete = Arc::new(RecordingMemBlock::<BLOCK_SZ>::new(4 * BLOCK_SZ, 0));
-    let partition: Arc<dyn BlockDevice> = Arc::new(PartitionBlockDevice::new(concrete.clone(), 1, 8));
+    let partition: Arc<dyn BlockDevice> =
+        Arc::new(PartitionBlockDevice::new(concrete.clone(), 1, 8));
     let adapted: Arc<dyn BlockDevice> = Arc::new(BlockSizeAdapter::new(partition, 512));
     let read_only: Arc<dyn BlockDevice> = Arc::new(ReadOnlyBlockDevice::new(adapted));
     let mut bridge = MangoBlockDev {

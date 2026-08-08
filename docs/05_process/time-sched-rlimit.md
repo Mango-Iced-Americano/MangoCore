@@ -224,6 +224,22 @@ delete、exec 和退出产生的 stale 节点。compact 在队列锁下只读 ti
 先释放表锁再调用 `add_kernel_timer()`，禁止形成反向锁边。CPU clock timer 不能使用
 wall-time heap 驱动。
 
+到期处理在 `KernelTimerQueue::run_timer()` 中根据 `TimerAction` 分支执行。`WakeTask` 分支清除已挂 timer 标记，并用 generation 过滤陈旧的 deadline timer：
+
+```rust
+pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
+    match timer.action {
+        TimerAction::WakeTask { task, generation } => {
+            let Some(task) = task.upgrade() else { return false };
+            task.wait_io_timer_pending
+                .store(false, AtomicOrdering::Relaxed);
+
+            if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
+                crate::task::perf::record_ktimer_stale_waketask();
+                return false;
+            }
+```
+
 CPU clock timer 使用另一条路径：
 
 1. `CLOCK_PROCESS_CPUTIME_ID` 采样 PCB 的线程组 user+system 累计；
@@ -236,6 +252,8 @@ CPU clock timer 使用另一条路径：
 
 当前内核采用安全点抢占，所以长期不经过 trap return、block/yield/exit 的内核循环可能延迟
 CPU timer 投递；并发 CPU 记账也只会让锁外样本偏旧、延迟到下一安全点，不会提前或重复触发。
+
+这段代码只展示 `WakeTask` 分支；`SendSignal`、`PosixTimerSignal` 和 `TimerFdSweep` 在同一个 match 中处理。只有带 deadline 的等待会注册 `WakeTask` timer；无限期等待由 Waiter/Waker 的 one-shot 通知握手显式唤醒，不再依赖周期性定时器。
 
 ## 8. realtime clock 调整
 

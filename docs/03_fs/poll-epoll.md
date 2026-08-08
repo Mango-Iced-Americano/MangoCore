@@ -169,6 +169,8 @@ timeout 语义：`-1` 无限等待，`0` 在一次 `poll_now()` 与就绪扫描�
 
 `EventPoll::unregister_event_queues` 在 EPOLL_CTL_DEL 或 EventPoll drop 时清理监听器注册，防止悬空引用。
 
+**唤醒不丢失约束**：状态已变为就绪时必须调用 `notify_events_all` 或 `notify_events_at_most`，同时交付 listener 事件和任务唤醒；不得用 `try_lock()` 失败作为跳过任务唤醒的条件。触发状态变化的 poll 必须在任何 `WaitQueue` 条件闭包进入前完成，避免 poll 回调重入持有的队列锁。
+
 ## poll/select 与 epoll 对比
 
 | 维度 | poll/select | epoll |

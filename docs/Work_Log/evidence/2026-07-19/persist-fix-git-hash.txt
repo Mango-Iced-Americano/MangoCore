@@ -1,3 +1,0 @@
-git_describe=5a8ad725-dirty
-head=5a8ad725be552b1f82e71932bdd732d149d29b89
-branch=board-develop-combined

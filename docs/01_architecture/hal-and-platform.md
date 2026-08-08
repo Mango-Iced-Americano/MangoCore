@@ -20,7 +20,7 @@ tags: [architecture, hal, riscv64, loongarch64]
 | 上下文切换 | `task::processor` 调度循环 |
 | TLB 刷新 | 页表 unmap、权限修改、CoW、缺页修复 |
 | timer | task timer、nanosleep、futex timeout、调度 tick |
-| console/shutdown | 日志、panic、系统关机 syscall |
+| console/reboot/shutdown | 日志、panic、测试结束后的平台退出 |
 
 HAL 的核心文件是 `hal/mod.rs` 和 `hal/arch/mod.rs`。前者向内核其他模块统一导出接口，后者按编译 feature 选择 `riscv` 或 `loongarch64` 后端。
 
@@ -35,6 +35,7 @@ os/src/hal/
 │   │   ├── mod.rs
 │   │   ├── config.rs
 │   │   ├── kern_stack.rs
+│   │   ├── reset.rs
 │   │   ├── sbi.rs
 │   │   ├── sv39.rs
 │   │   ├── switch.{rs,S}
@@ -57,10 +58,10 @@ os/src/hal/
 │   ├── efi.rs
 │   ├── fdt.rs
 │   └── static_provider.rs
+├── configs/
 ├── device/
 │   ├── mod.rs
 │   └── manager.rs
-├── configs/
 └── platform/
     ├── mod.rs
     ├── info.rs
@@ -80,10 +81,12 @@ os/src/hal/
 | 配置 | `config` | 架构配置模块 |
 | 栈 | `kstack_alloc`, `KernelStack`, `trap_cx_bottom_from_tid`, `ustack_bottom_from_tid` | 内核栈和用户栈/trap context 地址计算 |
 | 启动 | `bootstrap_init`, `machine_init` | 早期机器初始化和运行期机器初始化 |
-| 启动快照 | `boot::{init_bsp, boot_info}` | BSP 在清 BSS 前冻结硬件 CPU ID、协议入口指针与镜像地址，AP 只读 |
+| 启动快照/协议 | `boot::{init_bsp, boot_info}`, `save_boot_info`, `BootProtocol`, `RawBootInfo` | BSP 在清 BSS 前冻结硬件 CPU ID、协议入口指针与镜像地址，AP 只读；架构入口保存 firmware 的 hart ID 与 DTB 物理地址，控制台就绪后供内核读取 |
 | 固件发现 | `firmware::*` | 双架构共享预堆 FDT 快照和资源解析；2K1000 允许静态内存回退 |
+| 固件内存 | `firmware::populate_memory_regions`, `memory_regions`, `firmware_reserved_regions` | `mm::init()` 前零分配填充 FDT 或静态回退 DRAM/保留区切片；完整 FDT 解析留在 post-heap 阶段 |
 | 平台模型 | `platform::{init_platform, platform_info}` | 堆就绪后发布一次 owned、不可变的平台与设备描述 |
-| 设备查询 | `device::DeviceManager` | 按 compatible、设备类别和 MMIO 资源只读查询平台设备 |
+| 平台信息 | `platform::{init_platform_info, platform_info, platform_cmdline, PlatformInfo, DeviceInfo, DeviceKind, FirmwareKind}` | `mm::init()` 后一次性构造的 owned 平台快照：优先解析 FDT，失败时静态回退；`/chosen/bootargs` 优先于编译期 `MANGO_CMDLINE` 与内建默认值 |
+| 设备查询 | `device::DeviceManager` | 按 compatible、设备类别和 MMIO 资源只读查询平台设备；取得 `Vec<DeviceInfo>` 的所有权，设备初始化后不支持变更 |
 | 用户 ABI | `user_hwcap` | 生成当前架构可安全暴露给 ELF `AT_HWCAP` 的能力位 |
 | console | `console_write_bytes`, `panic_console_write`, `console_getchar` | 正常批量输出、panic 无锁输出和字符输入 |
 | 中断 | `local_irq_save`, `local_irq_restore` | 保存/恢复本地中断状态 |
@@ -94,7 +97,7 @@ os/src/hal/
 | trap 类型 | `TrapContext`, `MachineContext`, `UserContext`, `UserSignalMask`, `TrapImpl` | task/signal/syscall 共享的上下文类型 |
 | TLB | `tlb_invalidate` | 架构后端提供的 TLB 刷新入口；la64 另在后端内部导出 global/page 级辅助 |
 | 平台常量 | `BLOCK_SZ`, `BUFFER_CACHE_NUM`, `KERNEL_HEAP_SIZE`, `MEMORY_END`, `MMIO`, `TICKS_PER_SEC` | 块大小、缓存数、堆大小、物理内存末尾、MMIO 表和 tick 频率 |
-| 关机 | `shutdown` | 平台退出/关机 |
+| 平台退出 | `reboot`, `shutdown` | 实板重启或 QEMU/未知平台关机 |
 
 `hal/mod.rs` 还定义两个与 I/O 路径直接相关的常量：
 
@@ -107,6 +110,7 @@ pub mod platform;
 pub use arch::__switch;
 pub use arch::config;
 pub use arch::kstack_alloc;
+pub use arch::reboot;
 pub use arch::shutdown;
 pub use arch::tlb_invalidate;
 pub use arch::{bootstrap_init, machine_init, user_hwcap};
@@ -142,13 +146,15 @@ pub const MAX_RW_COUNT: usize =
 
 这组导出构成 HAL 对上层的稳定命名面。MM 层通过 `PageTableImpl` 和 `tlb_invalidate` 操作页表；task 层通过 `KernelStack`、`TrapContext`、`__switch`、`trap_return` 完成调度与返回用户态；syscall/trap 层通过 `get_bad_addr()`、`get_exception_cause()`、`program_timer_delta()` 接入异常和时钟。`IO_CHUNK_SIZE` 用于限制 I/O bounce buffer 的单块大小；`MAX_RW_COUNT` 对齐 Linux 可见的单次读写上限。
 
+## 4. 固件与平台的两阶段初始化
+
+`os/src/hal/firmware/` 抽象了硬件发现来源：Flattened Device Tree (FDT)、ACPI 表或编译期静态配置。当前仅 FDT (RISC-V QEMU) 和静态回退（UbootGo、LoongArchLegacy、Test）在生产中使用。
+
 时间子系统不再维护第二套可变时钟源注册表。B90 删除了从未有读者的
 `TIME_SOURCE static mut`、`TimeSource/init_time_source()` 和硬编码 RISC-V MTIME 实现。
 架构无关层现在唯一从 HAL `get_time()/get_clock_freq()` 取得单调计数和频率；
 realtime 只在 `timer.rs` 保存原子 `BOOT_TIME_OFFSET_NS`。RV64 的频率来自已冻结
 FDT，LA64 来自 CPUCFG/原子 `CLOCK_FREQ`，不存在 AP 并发覆盖 trait object 指针的路径。
-
-## 4. 固件与平台的两阶段初始化
 
 平台发现被明确拆成两个生命周期，不把可分配对象带进清 BSS 之前的脆弱阶段：
 
@@ -185,6 +191,58 @@ MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame
 因此是内存容量权威来源；2K1000 无合法 FDT 时仍通过同一接口读取静态 fallback。
 动态 early-MMIO 映射以及 FS/Net/Driver 的设备资源迁移仍属于后续共享子系统批次。
 
+### 4.1 问题背景
+
+当前 RV64 QEMU ktest 环境下 OpenSBI 将 DTB 放置在物理地址 `0x82200000`，该地址在旧版内核布局中与 BSS 段重叠。`rust_main()` 中的 `mem_clear()` 将 BSS 清零时擦除了 DTB 数据，导致 post-heap `build_platform_info()` 读到的 FDT 头部全为零，回退到静态 fallback。注意这是当前 ktest 观测结果，不代表所有 QEMU/OpenSBI 版本或实板的固定放置规律。
+
+### 4.2 两阶段设计
+
+| 阶段 | 函数 | 调用时机 | 能力 | 行为 |
+|------|------|----------|------|------|
+| **Phase 1 — 预堆快照** | `populate_memory_regions()` | `bootstrap_init()` 后，`mem_clear()` 前 | 零分配，仅操作原始字节 | 验证 DTB magic，`ptr::copy` 到 `.data.boot` 段静态缓冲区；解析 `/memory` 节点填充 `MEMORY_BUF` |
+| **Phase 2 — 后堆解析** | `build_platform_info()` | `mm::init()` 后，通过 `init_platform_info()` | 可分配 (alloc) | 从 `.data.boot` 快照构造 `fdt::Fdt`，枚举全部设备节点，生成 `PlatformInfo` |
+
+### 4.3 快照数据结构
+
+```rust
+/// 最大保留的 FDT 大小（2 MiB，当前已验证上限）。
+const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
+
+/// 固定容量的 FDT 字节缓冲区，标注在 .data.boot 段。
+/// .data.boot 位于 .data 段内，BSS clear (mem_clear) 不会触及。
+#[link_section = ".data.boot"]
+static mut FDT_SNAPSHOT: FdtSnapshot = FdtSnapshot::new();
+
+struct FdtSnapshot {
+    bytes: [u8; MAX_FDT_SNAPSHOT_SIZE],
+    len: usize,  // 非零表示快照已发布，此后只读
+}
+```
+
+### 4.4 协议门禁
+
+只有 `BootProtocol::RiscvFdt` 通过 `has_valid_dtb()` 门禁，进入快照路径。其他协议直接使用静态 fallback：
+
+| 协议 | 来源 | 快照路径 | post-heap 数据来源 |
+|------|------|----------|-------------------|
+| `RiscvFdt` | QEMU RISC-V (a1 传 DTB paddr) | `capture_fdt_snapshot()` → `.data.boot` | `fdt_snapshot()` 返回的 `&[u8]` |
+| `UbootGo` | VF2 实板 (U-Boot `go` 命令) | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+| `LoongArchLegacy` | LA64 QEMU | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+| `Test` | ktest 单元测试 | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
+
+### 4.5 关键约束
+
+1. **快照从不回头读原始 firmware 地址** — `build_platform_info()` 只使用 `fdt_snapshot()` 返回的 `&[u8]`，不接触原始 DTB 物理地址。
+2. **`.data.boot` 标注的符号必须位于 `.data` 段内、BSS 段之前** — link 脚本布局确保所有 `#[link_section = ".data.boot"]` 符号落在 `.data` section 中，`readelf -sW` 可验证快照符号在 `sdata` 后、`edata` 前、`sbss` 前。
+3. **`len` 即最终写入标记** — 单线程 early boot 在完整 `ptr::copy` 后才写入 `len`；任何非零 `len` 阻止二次捕获。
+4. **仅 RV64 QEMU 受此影响** — LA64 使用 `LoongArchLegacy` 协议，不传递 DTB；VF2 的 `UbootGo` 同样不走快照。
+
+### 4.6 RV64 PCI host 与 early MMIO 映射
+
+RV64 PCI 不依赖固定的 QEMU 地址布局。预堆阶段的 `parse_node_resources()` 除了处理每个节点的 `reg`，还识别 `pci-host-ecam-generic`/`pci-host-cam-generic` 节点的 `ranges` 属性。对于 QEMU 使用的 28-byte PCI range entry，它只接收 non-prefetchable 或 prefetchable 的 32/64-bit memory space：父总线的物理基址与非零长度进入 `MEMORY_BUF.mmio`。因此内核页表会在设备枚举前同时映射 host bridge 的 ECAM `reg` 和 PCI BAR MMIO window；I/O space 不会被当作可映射内存。
+
+后堆阶段的 `resolve_pci_host()` 只接受 enabled 且资源有效的 host，使用其首个 `reg` 作为 ECAM，并从第一个有效 memory `ranges` entry 构造 `PlatformInfo::pci_host()` 返回的 `PciHost { ecam_base, ecam_size, mmio_base, mmio_size }`。RV64 VirtIO PCI driver 据此获取 ECAM 基址；如果 FDT 没有可用 host，才打印 warning 并使用 `RV64_PCI_ECAM_FALLBACK_BASE`。LA64 保持静态 `PCI_ECAM_BASE` 路径，未通过此 FDT 接口改变。
+
 ## 5. 架构选择
 
 `hal/arch/mod.rs` 使用 feature 选择后端：
@@ -204,13 +262,27 @@ MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame
 |------|------|
 | `config.rs` | 地址布局、页大小、内核堆、内核栈、平台常量 |
 | `kern_stack.rs` | 内核栈分配和 trap context 地址计算 |
+| `reset.rs` | 实板 watchdog 重启路由与非实板 SBI reboot fallback |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表实现和 `sfence.vma` TLB 刷新 |
 | `switch.rs`/`switch.S` | 任务上下文切换 |
 | `time.rs` | `get_time()`、`get_clock_freq()`、`program_timer_delta()` |
 | `trap/` | trap context、汇编入口、syscall/缺页/timer 分发 |
 
-### 6.2 初始化
+### 6.2 重启路由
+
+`hal::finish_test_run()` 保持“实板重启、QEMU/未知平台关机”的策略。RV64 的
+`hal::reboot()` 由 `riscv::reset::reboot()` 导出：`platform::is_real_board()` 为真时，
+`jh7110_watchdog_reboot()` 关闭本地中断，依次恢复 JH7110 WDT 时钟与 reset，限时等待
+reset status，然后解锁、加载计数器并以 `RESEN|INTEN` 启动 watchdog。该路径不依赖
+OpenSBI SRST，因此不受 U-Boot 已关闭 I2C5 的影响。其他平台仍调用 `sbi::reboot()`；
+LA64 继续使用自己的后端重启实现。
+
+watchdog 和 SYSCRG 的直接 MMIO 访问依赖完整 VF2 FDT 的非 RAM `reg` 范围。预堆
+`parse_node_resources()` 记录这些范围，`KernelSpace` 在设备驱动使用前恒等映射它们。
+QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
+
+### 6.3 初始化
 
 `hal/arch/riscv/mod.rs` 中：
 
@@ -229,7 +301,7 @@ rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 IPI，并在多核配置
 RFENCE；缺失或探测失败时明确打印软件 IPI fallback。CPU0 和 AP 都由
 `task::timer_cpu_init()` 先写未来 deadline，再通过 HAL 开放本地 timer source。
 
-### 6.3 Trap 路径
+### 6.4 Trap 路径
 
 RISC-V trap 后端负责：
 
@@ -370,6 +442,7 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/boot/mod.rs` | BSP 固件入口快照与启动协议 |
 | `os/src/hal/firmware/` | 预堆 FDT/静态资源发现与 FDT 保留快照 |
 | `os/src/hal/platform/` | post-heap 不可变平台模型与板级常量 |
+| `os/src/hal/platform/{mod.rs,info.rs}` | post-heap owned `PlatformInfo`、设备分类、`PciHost` 固件资源和静态回退构造器 |
 | `os/src/hal/device/manager.rs` | 平台设备只读查询接口 |
 | `os/src/hal/arch/mod.rs` | feature 选择和后端 re-export |
 | `os/src/hal/arch/riscv/mod.rs` | rv64 后端模块、类型别名、初始化 |
@@ -379,3 +452,6 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/arch/loongarch64/laflex.rs` | la64 页表实现 |
 | `os/src/hal/arch/loongarch64/tlb.rs` | la64 ASID/TLB |
 | `os/src/hal/arch/loongarch64/trap/mod.rs` | la64 trap/syscall/page fault/timer/unaligned access |
+| `os/src/hal/platform/` | 板级常量 |
+| `os/src/hal/firmware/mod.rs` | 两阶段初始化编排、`FdtSnapshot` 结构体、`MAX_FDT_SNAPSHOT_SIZE`、`#[link_section = ".data.boot"]` 静态缓冲区 |
+| `os/src/hal/firmware/fdt.rs` | `capture_fdt_snapshot()`（pre-BSS 快照）、PCI `ranges` early mapping、`build_platform_info()`（post-heap 从快照解构）、`read_totalsize()` 验证 DTB magic |

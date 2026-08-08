@@ -3,6 +3,7 @@
 pub mod cmdline;
 pub mod config;
 pub mod cpuinfo;
+pub mod device_tree;
 pub mod filesystems;
 pub mod meminfo;
 pub mod mounts;
@@ -84,6 +85,13 @@ pub fn register_all(root: &Arc<crate::fs::procfs::LockedProcInode>) -> Result<()
         "filesystems",
         InodeMode::from_bits_truncate(0o444),
         filesystems::filesystems_content,
+        0,
+    )?;
+    let device_tree_dir = root.add_dir_locked("device-tree", InodeMode::from_bits_truncate(0o555))?;
+    device_tree_dir.add_file(
+        "model",
+        InodeMode::from_bits_truncate(0o444),
+        device_tree::model_content,
         0,
     )?;
     let sys_dir = root.add_dir_locked("sys", InodeMode::from_bits_truncate(0o555))?;

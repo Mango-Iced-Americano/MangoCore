@@ -1,5 +1,0 @@
-BUILD_RS_COMPILE_WARNINGS=0
-VALID CORE_NUM=2 status=0
-cargo:rustc-env=MANGO_CORE_NUM=2
-INVALID CORE_NUM=3 status=101
-MANGO_CORE_NUM must be one of 1, 2, 4, or 8; got "3"

@@ -264,7 +264,10 @@ const PIPE_SET_SIZE_MAX: usize = 1usize << 31;
 
 pub(crate) fn send_sigpipe_to_current() {
     if let Some(task) = current_task() {
-        task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
+        {
+            task.acquire_inner_lock().add_signal(Signals::SIGPIPE);
+        }
+        task.process.notify_signal_waiters();
     }
 }
 
@@ -310,7 +313,7 @@ impl IndexNode for Pipe {
             pipe_finish_read(profile_start, &result);
             return result;
         }
-        let (result, write_end) = {
+        let (result, write_end, wake_all_writers) = {
             let mut ring = self.buffer.lock();
             let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
             if ring.status == RingBufferStatus::EMPTY {
@@ -331,14 +334,29 @@ impl IndexNode for Pipe {
             } else {
                 RingBufferStatus::NORMAL
             };
-            pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
-            (Ok(read_bytes), write_end)
+            let free_size = ring.get_free_size();
+            pipe_record_ring_sizes(ring.get_used_size(), free_size);
+            // A PIPE_BUF writer needs its whole request to fit.  Waking only
+            // one writer when the newly available space is smaller than
+            // PIPE_BUF can select an ineligible writer and strand another
+            // eligible waiter indefinitely.
+            (
+                Ok(read_bytes),
+                write_end,
+                read_bytes > 0 && free_size < PAGE_SIZE,
+            )
         };
         if let Ok(_n) = &result {
             if let Some(write_end) = write_end {
-                write_end
-                    .write_wait
-                    .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                if wake_all_writers {
+                    write_end
+                        .write_wait
+                        .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+                } else {
+                    write_end
+                        .write_wait
+                        .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                }
                 pipe_inc(profiling, &PIPE_NOTIFY_WRITE);
                 if !write_end.fasync.is_empty() {
                     write_end.fasync.send_sigio(None);
@@ -368,7 +386,7 @@ impl IndexNode for Pipe {
             pipe_finish_read(profile_start, &result);
             return result;
         }
-        let (result, write_end) = {
+        let (result, write_end, wake_all_writers) = {
             let mut ring = self.buffer.lock();
             let write_end = ring.write_end.as_ref().and_then(Weak::upgrade);
             if ring.status == RingBufferStatus::EMPTY {
@@ -423,19 +441,26 @@ impl IndexNode for Pipe {
                     break;
                 }
             }
-            pipe_record_ring_sizes(ring.get_used_size(), ring.get_free_size());
+            let free_size = ring.get_free_size();
+            pipe_record_ring_sizes(ring.get_used_size(), free_size);
             let result = if copy_failed && total == 0 {
                 Err(SyscallErr::EFAULT)
             } else {
                 Ok(total)
             };
-            (result, write_end)
+            (result, write_end, total > 0 && free_size < PAGE_SIZE)
         };
         if let Ok(_n) = &result {
             if let Some(write_end) = write_end {
-                write_end
-                    .write_wait
-                    .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                if wake_all_writers {
+                    write_end
+                        .write_wait
+                        .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+                } else {
+                    write_end
+                        .write_wait
+                        .notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+                }
                 pipe_inc(profiling, &PIPE_NOTIFY_WRITE);
                 if !write_end.fasync.is_empty() {
                     write_end.fasync.send_sigio(None);
@@ -745,7 +770,53 @@ impl Pipe {
     }
 
     pub fn set_pipe_capacity_compat(&self, requested: usize) -> Result<usize, SyscallErr> {
-        self.buffer.lock().set_capacity_compat(requested)
+        let (result, write_end) = {
+            let mut ring = self.buffer.lock();
+            let old_capacity = ring.capacity;
+            let was_full = ring.status == RingBufferStatus::FULL;
+            let result = ring.set_capacity_compat(requested);
+            let write_end = if result.is_ok()
+                && was_full
+                && ring.capacity > old_capacity
+                && ring.get_free_size() > 0
+            {
+                ring.write_end.as_ref().and_then(Weak::upgrade)
+            } else {
+                None
+            };
+            (result, write_end)
+        };
+
+        if let Some(write_end) = write_end {
+            write_end.write_wait.notify_events_all(EPollEvent::EPOLLOUT);
+        }
+        result
+    }
+
+    /// Pass a wake-one reader baton after an interrupted or failed wait.
+    /// The ring lock is deliberately released before waking the queue.
+    pub(crate) fn pass_reader_baton_if_data(&self) {
+        let has_data = {
+            let ring = self.buffer.lock();
+            ring.status != RingBufferStatus::EMPTY
+        };
+        if has_data {
+            self.read_wait
+                .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+        }
+    }
+
+    /// Pass a wake-one writer baton after an interrupted or failed wait.
+    /// The ring lock is deliberately released before waking the queue.
+    pub(crate) fn pass_writer_baton_if_space(&self) {
+        let has_space = {
+            let ring = self.buffer.lock();
+            ring.get_free_size() > 0
+        };
+        if has_space {
+            self.write_wait
+                .notify_events_all(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM);
+        }
     }
 
     /// Return a reference to the shared ring buffer `Arc`.
@@ -761,11 +832,7 @@ impl Pipe {
     }
 
     pub(crate) fn peer_read_end(&self) -> Option<Arc<Pipe>> {
-        self.buffer
-            .lock()
-            .read_end
-            .as_ref()
-            .and_then(Weak::upgrade)
+        self.buffer.lock().read_end.as_ref().and_then(Weak::upgrade)
     }
 
     pub(crate) fn peer_write_end(&self) -> Option<Arc<Pipe>> {
@@ -920,6 +987,13 @@ impl PipeRingBuffer {
             return Err(SyscallErr::EBUSY);
         }
         self.capacity = new_capacity;
+        // After capacity increase, a formerly FULL ring may now
+        // have free space and must transition to NORMAL so that
+        // subsequent writes can proceed and blocked writers are
+        // correctly woken by set_pipe_capacity_compat().
+        if self.status == RingBufferStatus::FULL && self.get_free_size() > 0 {
+            self.status = RingBufferStatus::NORMAL;
+        }
         Ok(self.capacity)
     }
     #[inline]
@@ -1017,7 +1091,11 @@ impl PipeRingBuffer {
         let mut total = 0;
         let mut pos = self.head;
         while total < n {
-            let end = if self.tail <= pos { self.capacity } else { self.tail };
+            let end = if self.tail <= pos {
+                self.capacity
+            } else {
+                self.tail
+            };
             let chunk = (n - total).min(end - pos);
             if chunk == 0 {
                 break;
@@ -1032,7 +1110,11 @@ impl PipeRingBuffer {
                 );
             }
             total += chunk;
-            pos = if pos + chunk == self.capacity { 0 } else { pos + chunk };
+            pos = if pos + chunk == self.capacity {
+                0
+            } else {
+                pos + chunk
+            };
         }
         total
     }
@@ -1292,13 +1374,33 @@ pub fn compact_fifo_registry() -> usize {
 
 // ── Public accessors for /sys/kernel/stats/pipe ──────────────────────
 
-pub fn pipe_read_calls() -> u64  { PIPE_READ_CALLS.load(Ordering::Relaxed) }
-pub fn pipe_write_calls() -> u64 { PIPE_WRITE_CALLS.load(Ordering::Relaxed) }
-pub fn pipe_read_bytes() -> u64  { PIPE_READ_BYTES.load(Ordering::Relaxed) }
-pub fn pipe_write_bytes() -> u64 { PIPE_WRITE_BYTES.load(Ordering::Relaxed) }
-pub fn pipe_read_cycles() -> u64  { PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed) }
-pub fn pipe_write_cycles() -> u64 { PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed) }
-pub fn pipe_read_cycles_max() -> u64  { PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed) }
-pub fn pipe_write_cycles_max() -> u64 { PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed) }
-pub fn pipe_read_eagain() -> u64  { PIPE_READ_EAGAIN.load(Ordering::Relaxed) }
-pub fn pipe_write_eagain() -> u64 { PIPE_WRITE_EAGAIN.load(Ordering::Relaxed) }
+pub fn pipe_read_calls() -> u64 {
+    PIPE_READ_CALLS.load(Ordering::Relaxed)
+}
+pub fn pipe_write_calls() -> u64 {
+    PIPE_WRITE_CALLS.load(Ordering::Relaxed)
+}
+pub fn pipe_read_bytes() -> u64 {
+    PIPE_READ_BYTES.load(Ordering::Relaxed)
+}
+pub fn pipe_write_bytes() -> u64 {
+    PIPE_WRITE_BYTES.load(Ordering::Relaxed)
+}
+pub fn pipe_read_cycles() -> u64 {
+    PIPE_READ_CYCLES_TOTAL.load(Ordering::Relaxed)
+}
+pub fn pipe_write_cycles() -> u64 {
+    PIPE_WRITE_CYCLES_TOTAL.load(Ordering::Relaxed)
+}
+pub fn pipe_read_cycles_max() -> u64 {
+    PIPE_READ_CYCLES_MAX.load(Ordering::Relaxed)
+}
+pub fn pipe_write_cycles_max() -> u64 {
+    PIPE_WRITE_CYCLES_MAX.load(Ordering::Relaxed)
+}
+pub fn pipe_read_eagain() -> u64 {
+    PIPE_READ_EAGAIN.load(Ordering::Relaxed)
+}
+pub fn pipe_write_eagain() -> u64 {
+    PIPE_WRITE_EAGAIN.load(Ordering::Relaxed)
+}

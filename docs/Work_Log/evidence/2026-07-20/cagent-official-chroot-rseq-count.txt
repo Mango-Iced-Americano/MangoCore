@@ -1,2 +1,0 @@
-rv64_rseq_unknown=79
-la64_rseq_unknown=80

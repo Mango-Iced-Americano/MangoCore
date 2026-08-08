@@ -18,16 +18,50 @@ require_trace() {
     esac
 }
 
+require_kernel_boot_contract() {
+    trace=$1
+    arch=$2
+    expected=$3
+    description=$4
+    kernel_features=$(printf '%s\n' "$trace" | grep 'cargo \(build\|check\).*--features ' || true)
+    [ -n "$kernel_features" ] || fail "$description has no kernel Cargo feature list"
+
+    case "$arch" in
+        rv64)
+            case "$kernel_features" in
+                *boot_*|*board_*) fail "$description must not select an RV64 boot or board feature" ;;
+                *riscv*) printf 'PASS: %s selects target-only RV64 support\n' "$description" ;;
+                *) fail "$description must select target-only RV64 support" ;;
+            esac
+            return
+            ;;
+    esac
+
+    profile_count=0
+    selected_profile=
+    for candidate in boot_la_qemu boot_la_uboot_dmw; do
+        case "$kernel_features" in
+            *"$candidate"*)
+                profile_count=$((profile_count + 1))
+                selected_profile=$candidate
+                ;;
+        esac
+    done
+    [ "$profile_count" -eq 1 ] || fail "$description must select exactly one boot profile"
+    [ "$selected_profile" = "$expected" ] || fail "$description selected $selected_profile, expected $expected"
+    printf 'PASS: %s selects only %s in its kernel Cargo feature list\n' "$description" "$expected"
+}
+
 for arch in rv64 la64; do
     case "$arch" in
         rv64)
             cpio_suffix=rv.cpio
-            board=board_rvqemu
+            boot_profile=
             target=riscv64gc-unknown-none-elf
             ;;
         la64)
             cpio_suffix=la.cpio
-            board=board_laqemu
+            boot_profile=boot_la_qemu
             target=loongarch64-unknown-linux-gnu
             ;;
     esac
@@ -45,6 +79,7 @@ for arch in rv64 la64; do
         require_trace "$trace" "MANGO_USER_OUTPUT_ROOT=" "$arch $profile ktest receives the selected user root"
         require_trace "$trace" "MANGO_USER_OUTPUT_MODE=\"release\"" "$arch $profile ktest receives the selected user mode"
         require_trace "$trace" "$cpio" "$arch $profile ktest selects its CPIO artifact"
+        require_kernel_boot_contract "$trace" "$arch" "$boot_profile" "$arch $profile ktest build-only"
         case "$trace" in
             *qemu-system-*) fail "$arch $profile ktest build-only dry-run must not launch QEMU" ;;
         esac
@@ -61,7 +96,7 @@ for arch in rv64 la64; do
         require_trace "$trace" "MANGO_USER_OUTPUT_ROOT=" "$arch $profile formal check receives the selected user root"
         require_trace "$trace" "MANGO_USER_OUTPUT_MODE=\"release\"" "$arch $profile formal check receives the selected user mode"
         require_trace "$trace" "$cpio" "$arch $profile formal check selects its CPIO artifact"
-        require_trace "$trace" "$board" "$arch $profile formal check selects a valid board feature"
+        require_kernel_boot_contract "$trace" "$arch" "$boot_profile" "$arch $profile formal check"
         require_trace "$trace" "$target" "$arch $profile formal check selects its target"
     done
 done

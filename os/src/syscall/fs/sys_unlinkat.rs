@@ -55,11 +55,20 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
         Ok(m) => m,
         Err(e) => return -(e as isize),
     };
-    if parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) && uid != 0 && uid != parent_meta.uid
-    {
+    if parent_meta.mode.contains(vfs::InodeMode::S_ISVTX) && uid != 0 && uid != parent_meta.uid {
         if let Ok(file_inode) = parent.find(&leaf) {
             if let Ok(file_meta) = file_inode.metadata() {
                 if uid != file_meta.uid {
+                    return EPERM;
+                }
+            }
+        }
+    }
+    if !flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
+        if let Ok(target) = parent.find(&leaf) {
+            if let Ok(metadata) = target.metadata() {
+                let protected = vfs::InodeFlags::S_APPEND | vfs::InodeFlags::S_IMMUTABLE;
+                if metadata.flags.intersects(protected) {
                     return EPERM;
                 }
             }

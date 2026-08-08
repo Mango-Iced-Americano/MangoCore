@@ -49,7 +49,18 @@ WaitEntry 和 TaskStatus 有意分层：
 | `VecDeque<Arc<WaitEntry>>` | FIFO 唤醒，并让多队列共享同一 token |
 | `compact_stale()` | 清理已经 drop 的 TCB entry |
 
-等待队列本身不持有外部锁；不同使用者通常把它放进自己的 `Mutex` 中。
+每个 `WaiterState`（Waiter）持有 task 的 `Weak<TaskControlBlock>` 和一个原子状态字；队列持有 waiter 的 `Arc`，但不延长 task 生命周期。唤醒路径（Waker）通过该状态字发布一次性通知，失效 task 的 waiter 仍可由 `compact_stale()` 清除。
+
+等待协议使用四态 one-shot 握手：
+
+| 状态 | 含义 |
+|------|------|
+| `Idle` | 已注册到队列，尚未尝试睡眠 |
+| `Sleeping` | 释放队列锁后已 arm，允许进入调度器睡眠路径 |
+| `Notified` | 某一个 wake source 已获胜；后续 source 不会重复唤醒 |
+| `Closed` | signal、timeout 或完成路径已取消 waiter，拒绝后续通知 |
+
+`WaitQueue` 本身不持有外部锁；不同使用者通常把它放进自己的 `Mutex` 中。
 
 ## 3. WaitResult
 
@@ -78,12 +89,14 @@ pub enum WaitResult {
 | `contains()` | 按 weak 指针比较 |
 | `is_empty()` | 是否为空 |
 | `compact_stale()` | 删除 strong_count 为 0 的 entry |
-| `prepare_to_wait()` | 注册并返回本轮 `Arc<WaitEntry>` |
+| `prepare_to_wait()` | 注册并返回本轮 `Arc<WaitEntry>`（创建并注册一个 waiter，初态为 `Idle`） |
 | `finish_entry()` | 关闭并精确移除本轮 entry，不改变调度状态 |
+| `finish_wait()` | 关闭并删除指定 task 的 waiter；兼容手工 futex 等调用者 |
 
 `prepare_to_wait()` 只登记条件等待和一次性 token；真正的
 `Running(cpu) -> Blocking(cpu)` 与加入 interruptible registry 由
 `block_current_and_run_next_*()` 在 `TASK_MANAGER` 临界区完成。
+`prepare_to_wait()` 不再以 `TaskStatus` 传递通知；真正从 CPU 切走仍由 `block_current_and_run_next_*()` 完成。
 
 ## 5. wake_one 与 wake_at_most
 
@@ -102,13 +115,15 @@ pub enum WaitResult {
 `Blocking` 之间，必须先固化 token；调度器会独立抑制重复入队。
 `New/Zombie` 是不可等待的终端/stale entry，直接丢弃。
 
+从队头移除一个 `Arc<WaiterState>`，使该队列不再持有它。对 `Idle` 或 `Sleeping` waiter 原子写入 `Notified`；`Notified`/`Closed` 条目被跳过。若 task 已处于 `Interruptible`，改为 `Ready`、递增 `wait_timer_generation`，并批量放入 ready queue。若 task 仍在运行，`Notified` 状态会阻止它随后睡眠。`wake_at_most(limit)` 保持 FIFO 限额语义；同一 waiter 出现在多队列时，只有第一个通知能获胜。
+
 ## 6. wait_event_impl
 
 WaitQueue 的主要等待模板：
 
 ```text
-wait_event_impl(wq, cond, signal_check, deadline, fallback_ms)
-  ├── 先执行 cond，若 Ready 直接返回
+wait_event_impl(wq, cond, signal_check, deadline)
+  ├── 检查 cond
   └── loop:
         ├── deadline 检查
         ├── current_task()
@@ -233,6 +248,21 @@ where
 直接注册 `wait_with_timeout()`。有 deadline 的一轮等待结束后会再推进
 generation，避免旧 timer 在下一轮无超时等待中造成假唤醒。
 
+wait_event_impl 的另一种等价描述（四态握手视角）：
+
+```text
+        ├── 在队列锁内 prepare_to_wait() 并复查 cond/deadline/signal
+        ├── 按需挂 deadline timer，释放队列锁
+        ├── CAS Idle -> Sleeping；若已 Notified 则跳过 block
+        ├── block_current_and_run_next_with_lock_checked(..., waiter.is_sleeping)
+        ├── Closed -> 从队列移除 waiter -> refresh_real_timer
+        └── 最终复查 cond，再返回 Ready/TimedOut/Interrupted 或重试
+```
+
+唤醒方在移出 waiter 后写入 `Notified`。因此 wake 发生在释放队列锁、CAS 或实际 block 之间时，等待方仍能观察通知，不能被调度器对 `TaskStatus` 的写入覆盖。
+
+超时或可处理信号路径先写 `Closed`，再从所有相关队列移除 waiter，最后复查条件；普通 deadline 继续通过 `wait_with_timeout()` 和 `wait_timer_generation` 管理。
+
 ## 7. fallback timer
 
 无 deadline 的通用 I/O wait 目前仍使用过渡 fallback timer：
@@ -258,7 +288,7 @@ WaitQueue 核心的注册竞争；只有在 FS/Net 生产者漏通知修复全�
 
 `wait_event_locked_impl(lock, queue_of, cond, ...)` 用于等待队列嵌在某个对象锁内的场景。
 
-流程特点：
+带锁版本也遵循相同握手：在业务锁内注册并复查条件，释放业务锁后 CAS `Idle -> Sleeping`，再以新获取的 guard 调用 `block_current_and_run_next_with_lock_checked()`。其检查闭包额外要求 waiter 仍为 `Sleeping`。
 
 1. 先持业务锁检查条件。
 2. 入队后再次检查条件。
@@ -344,9 +374,18 @@ where
 流程：
 
 1. 若 queues 为空，只等待 signal 或真实 deadline，不再构造 10 ms 周期唤醒。
-2. 非空时，创建一个共享 entry，并把它加入所有队列。
-3. 条件满足、超时或信号到达时，先 close token，再从所有队列精确移除。
+2. 非空时，创建一个共享 entry/waiter，并把它加入所有队列。
+3. 条件满足、超时或信号到达时，先写 `Closed`/close token，再从所有队列精确移除。
 4. 阻塞期间使用 `block_current_and_run_next_checked()`。
+
+从开发分支的四态握手视角：
+
+1. 非空时创建一个 `Arc<WaiterState>`，并把同一个 waiter 注册到所有 source queue。
+2. 各 source queue 竞争将它设为 `Notified`；第一个通知获胜。
+3. 条件满足、超时或信号到达时，先写 `Closed`，再从全部队列删除该 waiter。
+4. 阻塞期间使用 `block_current_and_run_next_checked()`，其检查闭包要求 waiter 仍为 `Sleeping`。
+
+返回时先记录 `Notified`，关闭并移除 waiter，随后在业务锁内做最终条件检查。`normal_wake_result` 仍用于 futex：条件不满足但 waiter 已通知时，返回该 wake 结果。
 
 该函数要求 `cond` 不依赖 `current_task()`，因为它可能在当前任务暂时离开
 CPU 时被评估。共享 token 使多个源并发 wake 时仍只有一个通知能被领取。
@@ -371,6 +410,9 @@ CPU 时被评估。共享 token 使多个源并发 wake 时仍只有一个通知
 |--------|------|
 | `WakeTask` | deadline/fallback wait 唤醒任务 |
 | `IntervalTimerSignal` | `ITIMER_REAL` 向所属进程投递 `SIGALRM` |
+
+| `WakeTask` | deadline wait 唤醒任务 |
+| `SendSignal` | `ITIMER_REAL` 等向任务投递信号 |
 | `PosixTimerSignal` | POSIX timer 到期投递信号 |
 | `TimerFdSweep` | 驱动 timerfd registry 唤醒 |
 
@@ -383,7 +425,6 @@ pub enum TimerAction {
     WakeTask {
         task: Weak<TaskControlBlock>,
         generation: usize,
-        fallback_ms: Option<usize>,
     },
     IntervalTimerSignal {
         process: Weak<ProcessControlBlock>,
@@ -441,6 +482,8 @@ heap 节点不能投递旧配置的信号。周期重装和调度器唤醒都在
 
 这避免旧 timeout 唤醒新等待，也避免 fallback timer 在任务还没完成
 `Running -> Blocking/Blocked` 登记时被提前消费。
+
+旧 generation 的 deadline timer 会直接丢弃。这避免旧 timeout 唤醒新等待；无 deadline 的等待由 Waiter/Waker one-shot 握手支持无限期阻塞，直至显式唤醒、信号或条件满足。
 
 ## 13. Completion
 
@@ -510,6 +553,8 @@ syscall 栈上的 `Arc` 并进入任务安全点。
 WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、切换、被唤醒后复查条件”。只在入队前检查一次条件会丢唤醒；持业务锁睡眠会阻塞唤醒方；唤醒后不复查条件会把虚假唤醒当成成功。`*_locked` 变体就是为了解决条件检查和业务锁释放之间的竞态。需要
 requeue 或一次任务多项注册时，应使用带独立身份和当前位置的专用等待对象。
 
+WaitQueue 的正确使用模式是“检查条件、入队、释放相关锁、CAS arm、切换、关闭并复查条件”。只在入队前检查一次条件会丢唤醒；跳过 `Idle -> Sleeping` 的通知检查会让调度器状态覆盖 wake；唤醒后不复查条件会把虚假唤醒当成成功。`*_locked` 变体将条件检查和注册保持在同一业务锁内。
+
 Completion 比 WaitQueue 更窄：它只表达一次性事件已经发生，典型场景是 vfork 子进程
 exec/exit 后释放父线程，或多线程 exec 的 sibling 全部离开 CPU current 槽。
 live count 另行证明资源清理完成，不能代替这个 inactive 条件。Completion 不承载
@@ -520,8 +565,8 @@ live count 另行证明资源清理完成，不能代替这个 inactive 条件�
 
 | 现象 | 检查 |
 |------|------|
-| 等待永不返回 | 入队后条件复查、fallback timer generation |
+| 等待永不返回 | waiter 是否注册、`Idle -> Sleeping` 是否观察到 `Notified`、条件复查 |
 | 唤醒后重复入 ready queue | `try_wake_interruptible()` duplicate enqueue |
 | timeout 提前或延后 | deadline 与 generation，la64 futex bias |
-| timer queue 无限增长 | `MAX_TIMERS`、compact、fallback pending 位 |
+| timer queue 无限增长 | `MAX_TIMERS`、compact、deadline generation |
 | vfork 父进程卡住 | `complete_vfork()` 是否执行 |

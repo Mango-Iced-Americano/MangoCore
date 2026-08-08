@@ -1,60 +1,161 @@
 mod block_dev;
+mod descriptor;
 pub mod partition;
 mod sata_blk;
-pub mod virtio_dma_pool;
-#[cfg(feature = "block_virt")]
+#[cfg(target_arch = "riscv64")]
+pub mod dw_mshc;
+#[cfg(any(feature = "block_virt", target_arch = "riscv64"))]
 pub mod virtio_blk;
 #[cfg(feature = "block_virt_pci")]
 pub mod virtio_blk_pci;
-pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceResult};
-#[cfg(feature = "block_sata")]
-type BlockDeviceImpl = sata_blk::SataBlock;
-#[cfg(feature = "block_virt")]
-type BlockDeviceImpl = virtio_blk::VirtIOBlock;
-#[cfg(feature = "block_virt_pci")]
-type BlockDeviceImpl = virtio_blk_pci::VirtIOBlock;
+pub mod virtio_dma_pool;
+pub(crate) use block_dev::validate_block_buffer_length;
+pub use block_dev::{BlockDevice, BlockDeviceError, BlockDeviceNameStyle, BlockDeviceResult};
+pub use descriptor::{
+    BlockDeviceDescriptor, BlockDeviceName, BlockDeviceNameError, BlockDeviceNode,
+    BlockDeviceNumber,
+};
 
 use crate::hal::BLOCK_SZ;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::convert::TryFrom;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
 
-// ── 平台相关的块设备探测 ──
+/// 标志位：跳过块设备初始化（ramfs-only 模式时由 fs::force_ramfs() 设置）
+pub static SKIP_BLOCK_DEVICE: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(feature = "block_virt", not(feature = "block_virt_pci")))]
-fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
-    virtio_blk::probe_rv64()
+/// 在 ramfs 模式下调用，阻止 BLOCK_DEVICE 初始化
+pub fn disable_block_device() {
+    SKIP_BLOCK_DEVICE.store(true, Ordering::Relaxed);
 }
 
-#[cfg(feature = "block_virt_pci")]
-fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
-    virtio_blk_pci::probe_la64()
+/// 虚拟块设备 — 用于 ramfs-only 模式下 BLOCK_DEVICE 的占位
+struct DummyBlockDevice;
+impl BlockDevice for DummyBlockDevice {
+    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceUnavailable)
+    }
+
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> BlockDeviceResult {
+        Err(BlockDeviceError::DeviceUnavailable)
+    }
 }
 
-#[cfg(not(any(feature = "block_virt", feature = "block_virt_pci")))]
-fn probe_block_devices() -> [Option<Arc<dyn BlockDevice>>; 2] {
-    // 内存盘 / SATA：单设备，slot1 为空
-    [Some(Arc::new(BlockDeviceImpl::new())), None]
+fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
+    let mut devices = Vec::new();
+    #[cfg(feature = "block_virt_pci")]
+    devices.extend(virtio_blk_pci::probe_la64());
+    #[cfg(any(
+        target_arch = "riscv64",
+        all(feature = "block_virt", not(feature = "block_virt_pci"))
+    ))]
+    {
+        let platform_info = crate::hal::platform::platform_info();
+        let device_manager = crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+        #[cfg(any(
+            target_arch = "riscv64",
+            all(feature = "block_virt", not(feature = "block_virt_pci"))
+        ))]
+        devices.extend(virtio_blk::probe_from_device_manager(&device_manager));
+        #[cfg(target_arch = "riscv64")]
+        devices.extend(dw_mshc::probe_from_device_manager(&device_manager));
+    }
+    #[cfg(feature = "block_sata")]
+    devices.push(Arc::new(sata_blk::SataBlock::new()));
+    devices
+}
+
+pub(crate) fn block_device_name(style: BlockDeviceNameStyle, index: usize) -> String {
+    match style {
+        BlockDeviceNameStyle::Alphabetic(prefix) => {
+            const ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
+
+            let mut remainder = index;
+            let mut suffix = Vec::new();
+            loop {
+                suffix.push(ALPHABET[remainder % ALPHABET.len()]);
+                let Some(next) = remainder
+                    .checked_div(ALPHABET.len())
+                    .and_then(|value| value.checked_sub(1))
+                else {
+                    break;
+                };
+                remainder = next;
+            }
+            suffix.reverse();
+
+            let mut name = String::from(prefix);
+            for letter in suffix {
+                name.push(char::from(letter));
+            }
+            name
+        }
+        BlockDeviceNameStyle::Decimal(prefix) => alloc::format!("{}{}", prefix, index),
+    }
+}
+
+fn describe_block_devices(devices: Vec<Arc<dyn BlockDevice>>) -> Vec<BlockDeviceDescriptor> {
+    let mut descriptors = Vec::new();
+    let mut name_counters: BTreeMap<BlockDeviceNameStyle, usize> = BTreeMap::new();
+    for (index, device) in devices.into_iter().enumerate() {
+        let style = device.name_style();
+        let style_index = name_counters.get(&style).copied().unwrap_or(0);
+        let Some(next_style_index) = style_index.checked_add(1) else {
+            println!("[kernel] block device {}: name counter exhausted, skipping", index);
+            continue;
+        };
+        name_counters.insert(style, next_style_index);
+        let name = block_device_name(style, style_index);
+        let Some(minor) = u64::try_from(index).ok() else {
+            println!("[kernel] block device {}: minor conversion failed, skipping", name);
+            continue;
+        };
+        let node = match BlockDeviceNode::new(&name, BlockDeviceNumber::new(254, minor)) {
+            Ok(node) => node,
+            Err(_) => {
+                println!("[kernel] block device {}: invalid name, skipping", name);
+                continue;
+            }
+        };
+        println!("[kernel] block device {}", name);
+        descriptors.push(BlockDeviceDescriptor::new(node, device));
+    }
+    descriptors
 }
 
 lazy_static! {
-    /// 多块设备数组。索引 0 = 官方 fs (x0)，索引 1 = 工具盘 (x1)。
-    /// 每个条目在设备未探测到时为 None。
-    pub static ref BLOCK_DEVICES: [Option<Arc<dyn BlockDevice>>; 2] = probe_block_devices();
+    pub static ref BLOCK_DEVICES: Vec<BlockDeviceDescriptor> = {
+        if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
+            println!("[kernel] block devices skipped (ramfs-only mode)");
+            Vec::new()
+        } else {
+            describe_block_devices(probe_block_devices())
+        }
+    };
 
-    /// 向后兼容别名：始终指向设备 0（官方 fs）。
-    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = BLOCK_DEVICES[0]
-        .clone()
-        .expect("[kernel] FATAL: no block device 0 (official fs) found");
+    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = {
+        if SKIP_BLOCK_DEVICE.load(Ordering::Relaxed) {
+            println!("[kernel] block device skipped (ramfs-only mode)");
+            Arc::new(DummyBlockDevice)
+        } else {
+            get_block_device(0).unwrap_or_else(|| {
+                println!("[kernel] no block device found; using dummy block device");
+                Arc::new(DummyBlockDevice)
+            })
+        }
+    };
 }
 
-/// 返回块设备数组的只读引用
-pub fn block_devices() -> &'static [Option<Arc<dyn BlockDevice>>; 2] {
+pub fn block_devices() -> &'static [BlockDeviceDescriptor] {
     &BLOCK_DEVICES
 }
 
-/// 获取指定索引的块设备（存在时返回 Some）
 pub fn get_block_device(index: usize) -> Option<Arc<dyn BlockDevice>> {
-    BLOCK_DEVICES.get(index).and_then(|dev| dev.clone())
+    BLOCK_DEVICES.get(index).map(|descriptor| descriptor.device().clone())
 }
 
 #[allow(unused)]
@@ -66,8 +167,12 @@ pub fn block_device_test() {
         for byte in write_buffer.iter_mut() {
             *byte = i as u8;
         }
-        block_device.write_block(i as usize, &write_buffer);
-        block_device.read_block(i as usize, &mut read_buffer);
+        block_device
+            .write_block(i, &write_buffer)
+            .expect("block device test write failed");
+        block_device
+            .read_block(i, &mut read_buffer)
+            .expect("block device test read failed");
         assert_eq!(write_buffer, read_buffer);
     }
     println!("block device test passed!");

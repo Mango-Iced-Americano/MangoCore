@@ -70,7 +70,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "board_rvqemu block_virt" -- -W warnings
+              cd /app/os && cargo clippy --features "riscv block_virt" -- -W warnings
             '
       - name: Clippy la64
         run: |
@@ -78,7 +78,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "board_laqemu block_virt_pci" -- -W warnings
+              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "boot_la_qemu block_virt_pci" -- -W warnings
             '
       - name: Docker compose down
         if: always()

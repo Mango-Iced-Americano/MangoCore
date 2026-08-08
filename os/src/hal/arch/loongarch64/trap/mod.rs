@@ -23,7 +23,7 @@ use crate::task::{
 use core::arch::{asm, global_asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
-#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+#[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TRAP_RETURN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -341,6 +341,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Exception(Exception::AddressError) => {
             log::info!("[trap] trigger SIGSEGV from address error");
@@ -348,6 +350,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGSEGV);
             inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Interrupt(Interrupt::Timer) => {
             handle_timer_interrupt();
@@ -495,10 +499,10 @@ pub fn trap_return() -> ! {
     // 从这里到 __restore 安装用户 EENTRY 之前，任何 timer/IPI 都必须进入
     // 内核 trap。尤其是 ASID rollover 的等待路径会临时开放本地中断。
     set_kernel_trap_entry();
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_return =
         !BOARD_FIRST_TRAP_RETURN.swap(true, core::sync::atomic::Ordering::Relaxed);
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:01] first task reached trap_return");
     }
@@ -506,7 +510,7 @@ pub fn trap_return() -> ! {
     // RESCHEDULE 只允许在这里让出 CPU，不能从任意 hard IRQ 位置切换。
     crate::task::run_task_safe_point();
     let task = do_signal();
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!("[bringup][user:02] initial signal check complete");
     }
@@ -546,7 +550,7 @@ pub fn trap_return() -> ! {
     // 下方恢复汇编不返回，Rust 不会为 trap 栈帧运行析构。
     // current 槽仍是任务 owner，因此在跳转前释放这个临时 Arc。
     drop(task);
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_return {
         println!(
             "[bringup][user:03] entering PLV3: pc={:#x} sp={:#x} trap_cx={:#x} token={:#x} asid={} restore={:#x}",

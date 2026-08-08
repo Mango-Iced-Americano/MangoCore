@@ -56,7 +56,7 @@ pub use heap_allocator::{
     KERNEL_HEAP_MAX_BYTES,
 };
 pub(crate) use kernel_space::remove_kernel_mapping_synchronized;
-pub use kernel_space::{kernel_token, KernelSpace, KERNEL_SPACE};
+pub use kernel_space::{kernel_program_base, kernel_token, KernelSpace, KERNEL_SPACE};
 pub(crate) use mmu_gather::{FlushRange, MmuGather};
 pub use page_table::{FaultAccess, PageTable, UserAccess};
 pub use sysctl::{

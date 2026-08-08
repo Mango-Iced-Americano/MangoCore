@@ -22,10 +22,41 @@
 
 ## 启动/Panic 排查
 
+### QEMU DTB 落入 kernel BSS 时，必须在清零前消费启动信息
+
+- **现象**：QEMU 传入的 DTB 地址落在大型内核 BSS（常见于嵌入 initramfs/测试资产）内；`mem_clear()` 后 FDT 解析静默回退，或预先解析后 DTB carveout 与 kernel exclusion 重叠导致 allocator/map panic。
+- **根因**：仅保存 DTB 指针而不在 BSS 清零前读取内容；DTB 页既是 firmware reserved 范围又可能已被 kernel image 覆盖。
+- **修复**：在 `mem_clear()` 前执行无分配的内存区域解析并保存结果；对重叠 exclusion 做区间合并，且不重复映射完全包含于 kernel image 的保留范围。
+- **教训**：启动协议提供的物理 blob 的存活期不能假设晚于内核 BSS 初始化。测试 FDT 路径时使用带真实 ktest block drive 的 profile；无 drive 的裸 QEMU 不能验证依赖 `block_devices()[0]` 的 ext4 测试。
+- **相关文件**：`os/src/main.rs`、`os/src/mm/frame_allocator.rs`、`os/src/mm/kernel_space.rs`
+
+### 固件寄存器参数必须先按启动协议建立信任边界
+
+- **根因**: 将架构入口寄存器（如 `a1`）一律解释为 DTB 指针，只检查非零；`UbootGo` 和 `LoongArchLegacy` 的同一寄存器位置可能是无关的垃圾值，导致早期 volatile 读取或 raw-slice FDT 解析访问错误地址。
+- **修复**: 所有 DTB 消费入口先要求 `matches!(boot_info().protocol, BootProtocol::RiscvFdt)`，再检查指针非零、页对齐、FDT magic 和有界 `totalsize`；FDT 成功后仍保留编译期 firmware carveout，并保留 DTB 自身页面。
+- **教训**: 原始启动参数不是跨平台 ABI。先按协议缩小信任域，再执行指针解引用或物理地址转换；“非零”从来不是可访问性证明。
+- **相关文件**: `os/src/hal/firmware/{mod.rs,fdt.rs}`
+
 ### 内核 panic 定位
 - 启动时加 `LOG=debug make rv64-run` 查看详细日志
 - 使用 GDB 调试：`make rv64-debug` → `b rust_main` → `c`
 - panic 输出包含 syscall 上下文、内存状态、任务信息（`panic_diag.rs`）
+
+### 早期启动 MMIO 恒等映射必须包含 post-heap 前使用的编译期外设范围
+
+- **现象**: VF2 实板在早期启动阶段访问 L2CC 缓存控制器 MMIO 地址 `0x02010200` 时触发 `StorePageFault`；该地址在 FDT/PlatformInfo 初始化前使用，但不在编译期 identity MMIO 映射表范围内。
+- **根因**: 早期启动代码（FDT 初始化前、堆分配器就绪前）依赖编译期 identity MMIO 映射表访问外设寄存器。L2CC 缓存控制器地址 `0x0201_0000..0x0201_1000` 未被纳入该表，导致 volatile 写操作触发了对未映射物理地址的 StorePageFault。
+- **修复**: 在 VF2 板级 identity MMIO 映射表中添加 `0x0201_0000..0x0201_1000` 范围的恒等映射，确保 post-heap FDT/PlatformInfo 初始化前的 L2CC 访问有有效页表项。
+- **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
+- **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
+### PCI host 的 `ranges` 与 `reg` 必须在预堆阶段同时映射
+
+- **现象**: RV64 用 `BLK_MODE=virt_pci` 启动时，PCI config access 或 VirtIO BAR access 触发 page fault；仅把固定 ECAM 地址加到板级 MMIO 常量会使 QEMU 特例可用，但仍无法适配 FDT 描述的不同 host。
+- **根因**: PCI host 的 `reg` 描述 ECAM，而可分配的 BAR memory window 在 `ranges`。若 pre-heap parser 只收集节点 `reg`，`PlatformInfo` 虽能在 post-heap 解析出 PCI host，驱动实际访问 BAR 时仍没有内核页表映射。
+- **修复**: pre-heap 解析 `pci-host-ecam-generic`/`pci-host-cam-generic` 的 `ranges`，只接受 memory space 的完整固定长度 entry，并验证非零长度、地址转换和加法不溢出后写入 early MMIO buffer；post-heap 再由同一 FDT 数据构造驱动用的 `PciHost`。缺失或畸形 host 才允许显式 warning fallback，不能用固定 QEMU 地址替代有效 FDT。
+- **教训**: FDT 资源的“发现”和“可访问”是两个阶段的契约。任何在 post-heap discovery 后立即被驱动解引用的总线资源，都必须在内核页表建立前从 FDT 的全部资源属性（而非只 `reg`）获得映射。
+- **相关文件**: `os/src/hal/firmware/fdt.rs`、`os/src/hal/platform/info.rs`、`os/src/drivers/block/virtio_blk_pci.rs`
 
 ## 内存问题
 
@@ -82,6 +113,43 @@
 - **相关文件**: `os/src/syscall/flock.rs`, `os/src/syscall/errno.rs`
 
 ## 性能问题
+
+### 新增诊断计数器必须进入 reset 窗口
+
+- **现象**：相邻诊断组的同一计数器看似精确翻倍，但其调用计数已被正确清零，导致按当前组调用次数计算的平均值失真。
+- **根因**：新增 `AtomicUsize` 只接入 recorder 与 sysfs 导出，遗漏 `perf::reset_all_counters()`，所以 initproc 的每组 reset 不会清空该原子值。
+- **修复**：同一个改动中同时完成“声明 → recorder/no-op → sysfs 导出 → reset”；用连续两个诊断窗口确认第二个窗口不含第一个窗口的累计值。
+- **相关文件**：`os/src/task/perf.rs`、`os/src/fs/sysfs/files/diag.rs`
+
+### deferred journal 被 direct metadata barrier 提前提交
+
+- **根因**：另一个 ext4 的普通数据回写若进入 `lock_direct_metadata_mutation()`，该 guard 为了让 direct writer 看到稳定元数据会先 `flush_deferred_journal()`。小 append 或已映射覆盖若落入该路径，会把原本可合并的 deferred JBD2 transaction 在每个 writeback run 提前提交。
+- **修复**：将单页 append 也纳入 journal append path；对所有块已映射的覆盖写，在 transactional/inode mutation guards 持有期间写数据块，并复用已映射数据写核心，不进入 direct metadata domain。保留 hole/allocation 路径的 direct barrier，以及 fsync/sync 时的明确 journal commit。
+- **教训**：优化 deferred transaction 时不要只检查 `defer_or_commit()` 阈值；还要沿所有 fallback/数据写路径检查是否跨入会强制 flush 的一致性域。数据块在 metadata 提交前必须已完成写入，且 fsync 仍必须显式提交 deferred journal。
+- **相关文件**：`dependency/another_ext4/src/ext4/{low_level,data_write,mod}.rs`
+
+### 空 deferred batch 会伪造 DirectMetadataBarrier journal commit
+
+- **根因**：`Transaction::defer_or_commit()` 若没有任何 staged home image，仍会留下一个空 `deferred_transaction`。后续 direct metadata guard 只按 `Some` 判断 pending，于是对零 image 执行完整的四阶段 JBD2 commit。
+- **修复**：总 staged image 数为零时直接释放 writer token，不保存 deferred batch；只有非空 batch 才允许 size/timestamp inode image 通过 transactional path 合并。无 pending 的 metadata 保持既有 direct path。
+- **验证**：用诊断按 `JournalCommitReason` 和 phase 计数确认 `DirectMetadataBarrier` transaction 归零、每个保留 transaction 仍恰有四个 phase；结合 data-before-metadata 单元测试与 fsync/sync QEMU 回归。
+- **相关文件**：`dependency/another_ext4/src/ext4/{journal_transaction,journal,low_level}.rs`
+
+### journal flush 数必须按 commit reason 与 flush phase 分离
+
+- **现象**：随机写诊断看到大量 device flush，若只统计总数会误判为同数量的 journal commit，进而把 cleanup 或 durability I/O 错归因给 PageCache writeback。
+- **根因**：一个 `commit_journal` 包含 ActiveLog、CommitRecord、Checkpoint、TailUpdate 四个设备 flush；此外 direct metadata、`fsync`/`sync` 等一致性边界可独立执行 device flush。旧的混合计时无法区分它们。
+- **修复**：诊断插桩同时记录 transaction id/reason、四个 phase 和独立 boundary flush；报告先验证 `journal_flush_count = transaction_count × 4`，再将余数归为明确的 boundary flush。`staged_blocks=0` 只表示 deferred journal staging，不能用于否定周边 direct metadata I/O。
+- **教训**：聚合优化只能减少可合并 transaction 的数量，不能删除四阶段的 journal 顺序或绕过 `fsync`/`sync` durability boundary。先按 reason 切分写回 commit 与 cleanup commit，再决定优化范围。
+- **相关文件**：`dependency/another_ext4/src/ext4/{journal_transaction,journal,mod,low_level}.rs`、`os/src/{task/perf.rs,fs/ext4_another/blockdev.rs,fs/sysfs/files/diag.rs}`
+
+### write syscall 前台成本要按 syscall→uaccess→VFS→PageCache 边界拆分，不能只拆 PageCache
+
+- **现象**：随机 writers 的 `write(2)` 总 ticks 中 PageCache 前台只占 ~24%，剩下 ~76% 在 PageCache 之外；若继续微调 lookup/lease/copy/commit，收益 <1%。
+- **根因**：`write` 与 `pwrite` 走不同 syscall 包装，但 `write_from_user`（非定位写）原先没有任何边界计时——只有 `pwrite_from_user`/`pwrite_user` 有 `PWRITE_*` 计数器，且 `mutations.rs` 的 `write_at_user` setup/post 是无条件记录的（两种路径都计）。误以为写路径已被 PWRITE_* 覆盖是常见陷阱。
+- **修复**：给 `write` 路径镜像一套 `WRITE_*` 边界计数器（fd prep、uaccess、VFS mode/seals、offset/touch 收尾），PageCache 前台继续用既有 `pc_write_cycles`；在 `sys_write` 分发前记 fd/fsize 准备，在 `write_from_user` 内把 UserBufferReader 构造与 `file.write_user` 分开计时，`File::write_user` 内镜像 `pwrite_user` 的 mode/seals/offset 三段。用 `write_total_count == pc_write_calls == write(2) count` 做路径覆盖自检，并确认 pwrite 窗口的 `WRITE_*` 全零（两条路径不串扰）。
+- **教训**：有界拆分一轮后若没有任何子桶稳定达到总成本 ~25%（本案例最大两个为 PageCache ~21–22% 和通用 syscall 残留 ~23%），即按止损门槛停止该方向深挖，转向差距更大的基准（lat-pagefault ~25x 对 random-writers ~3x）。新增计数器必须同步声明 → recorder/no-op stub → sysfs 导出 → reset 四件套，且要用 `pc_read_user_calls` 类已覆盖路径的比值验证 workload 真的命中目标代码段。
+- **相关文件**：`os/src/{task/perf.rs,syscall/fs/sys_write.rs,syscall/fs/common.rs,fs/vfs/file.rs,fs/sysfs/files/diag.rs}`
 
 ### la64 大量 page fault 慢
 - 检查陷阱入口是否有不必要的 `invtlb`
@@ -290,6 +358,16 @@
   `hw/intc/loongson_ipi_common.c` 和
   `include/hw/intc/loongson_ipi_common.h`。
 - **相关文件**: `os/src/hal/arch/loongarch64/mod.rs`, `os/src/smp.rs`
+
+### syscall trap 中不能同步 poll 会等待 VirtIO completion 的网络栈
+
+- **现象**：network-enabled RV64 QEMU 在用户态第一次创建 UDP socket 后停在启动同步逻辑；GDB 显示 CPU 在 `VirtQueue::add_notify_wait_pop()` 的 `while !can_pop()` 自旋。
+- **根因**：`UdpSocket::new()` 在 `sys_socket` trap 路径内调用完整 `NET_INTERFACE.poll()`。smoltcp 的 DHCP egress 进入 `VirtIONetRaw::send()`，该路径等待 VirtIO used-ring completion；而 trap 上下文的 `sstatus.SIE` 已关闭，completion interrupt 无法运行，因此同一 hart 永远等不到 `can_pop()`。
+- **根治**：发送路径必须感知中断状态。`NetTxToken::consume()` 检查 `hal::irq_enabled()`（riscv `sstatus.sie()` / la64 `CrMd.is_interrupt_enabled()`）：SIE=1 走原阻塞发送；SIE=0（syscall 上下文）把包放入**独立的全局延迟队列**（`static DEFERRED_TX_QUEUE: Mutex<Vec>`），由下次调度器 poll（中断开启）在 `poll_once` 中 drain 真正发送。同时删除 socket 构造函数里多余的 `poll()`。
+- **⚠️ 锁重入陷阱**：延迟队列**不能**放进 `NetInterfaceInner`——`push_deferred_tx` 被 smoltcp poll 的 `inner_handler` 内调用，此时 `NET_INTERFACE.inner` 已被持有，二次 `inner.lock()` 造成 `spin::Mutex` 重入死锁。必须用独立于 `inner` 锁的全局队列。
+- **正确性**：DHCP/ARP/TCP 有协议级重传计时器兜底，延迟发送不破坏语义（smoltcp 认为 consume 成功即推进状态机）。
+- **定位**：GDB 确认 `sstatus.SIE=0`、`sie` 缺少 external interrupt 位，调用链 `sys_socket → UdpSocket::new → NetInterface::poll_once → VirtIONetRaw::send`。
+- **相关文件**：`os/src/net/adapter.rs`、`os/src/net/config.rs`、`os/src/net/socket/inet/datagram/udp.rs`、`os/src/hal/{mod.rs,arch/riscv/sbi.rs,arch/loongarch64/sbi.rs}`
 
 ### LA64 首次用户态恢复跳入 kernel trap stub
 
@@ -554,6 +632,13 @@
 - **相关文件**: `os/src/syscall/fs/common.rs`, `os/src/syscall/fs/sys_*.rs`
 
 ## 文件系统多路径操作（renameat2）中的验证镜像缺失
+
+## 目录项发布的存在性检查必须与插入共享命名空间锁
+
+- **现象**：VFS 适配层在调用文件系统后端前用 `lookup()` 返回 `EEXIST`，但两个并发创建/硬链接任务都可能在检查时看到名称不存在，随后分别插入相同名称的目录项。
+- **根因**：检查与 `dir_add_entry()` 发布点不在同一个后端 `namespace_lock` 临界区；桥接层的检查只能优化常见失败路径，不能建立后端命名空间不变式。
+- **修复**：在所有后端命名空间操作持有 `namespace_lock` 后、调用 `dir_add_entry()`/`link_inode()` 前使用 `dir_find_entry()` 检查同名项并返回 `EEXIST`。新 inode 路径须将检查放在既有自动释放包装内，确保失败仍释放未发布 inode。
+- **相关文件**：`dependency/another_ext4/src/ext4/low_level.rs`
 
 ### 路径搜索权限检查遗漏（renameat2）
 
@@ -1186,3 +1271,143 @@
   动态测试应通过真实业务结果证明 worker 被唤醒，不要为测试在生产热路径保留 submitted/
   completed 计数或专用 hook。
 - **相关文件**：`os/src/net/config.rs`、`os/src/kernel_tests/net_smp.rs`
+
+## FFI 挂载与测试门禁的交易性
+
+### C 全局注册表的失败路径必须逆序回滚
+
+- **现象**: Rust wrapper 在“设备注册成功、mount/journal/writeback 后续步骤失败”时直接
+  `Drop`，C 层全局表仍保留指针；后续重试可报重名/无 slot，更严重时访问已释放内存。
+- **根因**: 挂载是多步跨语言交易，但 wrapper 只有一个笼统的 mounted bool，C 内部函数也没有
+  在每个 error label 撤销 block cache、block device 和 mountpoint slot。
+- **修复**: 显式记录 `device_registered → fs_mounted → journal_started →
+  writeback_enabled`，每次成功后才推进状态，失败时逆序撤销；只有全部从 C 表
+  脱钩后才释放 Rust/C 共享内存。若卸载失败，宁可有界泄漏并报错，也不制造 UAF。
+- **教训**: 任何“注册→初始化→启动子系统”的 FFI API 都应当作交易审计；不能仅检查
+  happy path 或依赖 Rust `Drop` 自动修复 C 全局状态。
+- **相关文件**: `dependency/lwext4_rust/src/blockdev.rs`、
+  `dependency/lwext4_rust/c/lwext4/src/ext4.c`
+
+### 回归进程全过不等于门禁完成
+
+- **现象**: TAP 已打印 `N passed, 0 failed`，但 QEMU 一直不退出，Makefile 最终只看到 timeout；
+  或测试使用了违反 syscall 前置条件的输入，把正确 errno 误报为内核回归。
+- **根因**: PID1 直接 `exec` 测试程序后不再有 supervisor 可以 wait、输出机器可读最终标记并
+  关机；同时用例注释的“partial range”没有区分“起点对齐”与“长度可非对齐”。
+- **修复**: 保留 PID1 supervisor，fork/exec 子进程、wait 下载状态、打印唯一 PASS/FAIL 标记后
+  shutdown；Makefile 同时检查程序退出与标记。syscall 用例先对照 ABI 前置条件，再选边界值。
+- **教训**: 门禁必须验证“用例运行→结果聚合→可机器识别的终态→可观测退出”整条链；
+  不能将某段日志看似全绿当成门禁通过。
+- **相关文件**: `user/src/bin/regression_init.rs`、
+  `user/src/bin/regression/regression_mmap_edge_cases.rs`
+
+### U-Boot 串口完整但内核长行确定性缺字时检查 THRE 握手
+
+- **现象**: 同一串口和波特率下，U-Boot 的 TFTP、CRC 和命令输出完整；内核接管 UART 后，短行只剩片段，长行稳定缺少大量字符。重复复位后缺字模式近似一致，使硬件探针实际运行却无法取得可信 PASS 证据。
+- **根因**: NS16550A 的 `Write<u8>` 实现未读取 `LSR.THRE` 就直接覆盖 THR，并无条件返回成功；上层 `console_putchar()` 又忽略返回值。CPU 连续 MMIO 写入快于 UART 移出字符时，发送保持寄存器被覆盖。
+- **修复**: `Write<u8>` 仅在 THRE 就绪时写 THR，否则返回 `WouldBlock`；上层发送函数循环重试到成功。保留整条 `print` 的 irq-save 序列化，不能用重复打印 marker 或降低日志量掩盖底层发送违规。
+- **验收**: 以修改前同一只读实板探针作为 RED，对照修改后原始串口日志必须完整包含型号、容量、重复读取结果和最终 PASS；同时顺序完成双架构编译。U-Boot 输出正常只能证明主机接收链路和波特率正确，不能替代内核 UART 握手验证。
+- **相关文件**: `os/src/drivers/serial/ns16550a.rs`, `os/src/hal/arch/loongarch64/sbi.rs`, `os/src/console.rs`
+
+### journal 掉电恢复必须在可证明的持久化窗口外部截断
+
+- **现象**：正常卸载、冷重启和离线 fsck 都通过，但无法证明事务 commit 已落盘、home block
+  未 checkpoint 时的恢复正确性；随机关 QEMU 又难以复现，失败镜像也不可比较。
+- **方法**：在 journal 内设置默认关闭、单次触发的测试钩子。钩子只能停在 records/commit block
+  已写并 flush、journal start pointer 也已写并 flush、home checkpoint 尚未开始的位置；串口先打印
+  唯一 marker，再由宿主 timeout/kill QEMU，不能让内核自己正常 shutdown。
+- **门禁**：首启制造掉电后保留原镜像；次启必须复用同一镜像，验证 replay 后的语义状态、可写性
+  与完整 teardown；关机后再执行只读 `e2fsck -f -n`。正常 remount 或只看 journal start 清零不能替代
+  这个两阶段实验。
+- **教训**：故障点必须同时证明“恢复记录已经 durable”和“home 状态尚未 durable”；太早只是丢事务，
+  太晚只是正常 checkpoint，两者都会产生误导性的绿色结果。日志需记录 fixture feature、block size、
+  镜像 hash 与两次启动身份。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4_journal.c`、
+  `os/src/kernel_tests/ext4.rs`、`os/make/rv64.mk`、`os/make/la64.mk`
+
+### 精确 wait 与通用 reaper 不能竞争同一个子进程
+
+- **现象**：子命令已经明确报错，supervisor 却打印 ready/PASS；随后真正入口因准备未完成而失败。
+- **根因**：精确 `waitpid(pid, WNOHANG)` 之前调用 `waitpid(-1, WNOHANG)`，通用 reaper 可能先回收目标 pid 并丢弃状态。精确 wait 随后得到 `ECHILD`，若 status 还以 0 初始化，就会把失败伪装成成功。
+- **修复**：目标子进程 outstanding 时只做精确 wait；通用 orphan 回收放到目标状态已取得之后。status 以 `127 << 8` fail closed，任何精确 wait 错误都保留非零状态并记录 errno。
+- **教训**：一个 child 的退出状态只能有一个 owner。凡是同时存在 supervisor wait 和全局 reaper，都要明确所有权，不能把 `ret < 0` 与“已成功取得状态”合并处理。
+- **相关文件**：`user/src/bin/initproc.rs`
+
+### 成熟 ext4 卷迁移不能只用全新 fixture 验证
+
+- **现象**：全新 QEMU ext4 上嵌套 symlink 创建/删除都通过，真实旧卷却出现同名目录项、dentry type 与 inode mode 冲突、`ln`/`chroot` 失败；应用门禁甚至可能先 PASS，下一次小文件写入却覆盖无关 Python 源码。
+- **根因**：旧驱动可能留下重复同名目录项、不可靠 file type，以及“inode/extent 仍引用数据块、块位图却标为空闲”的跨层不一致。全新 fixture 没有历史状态；新驱动按位图合法分配时会复用仍被旧文件引用的块。底层 symlink API 若不是 create-exclusive，还会继续覆盖并隐藏目录问题。
+- **定位**：在全盘备份副本上用 `debugfs ls/stat/testi/testb/blocks` 同时审计目录项、inode 和位图，不能只看文件可读。整文件摘要门禁若在一次小写入后变化，要比较异常文件内容与探针 payload；命中就先按跨文件块复用处理，而不是把新摘要加入版本白名单。
+- **修复**：路径遍历复用本来就要加载的 child inode，并始终以真实 inode mode 校验类型；适配层补 symlink `EEXIST`，迁移器只删除 readlink 可证明的旧 symlink。更重要的是，成熟旧卷在新后端第一次写入前必须离线 `e2fsck -fy` 到收敛，再以 `e2fsck -fn` 复检 clean；无法安全修复时从逻辑文件备份重建新卷。
+- **验收**：至少包含“fresh fixture 语义测试 + 旧卷只读结构/位图审计 + offline-fsck-clean 前置条件 + 同一修复卷首次写入 + 冷启动复用 + 最终离线 fsck + 关键文件摘要”。在线 raw 快照的 fsck 结果不能直接外推为当前实盘状态，但只要该副本能复现 live extent 被标 free 并发生串写，就已经足以否决在该副本上直接迁移；生产卷必须取得自身的离线证据。
+- **相关文件**：`dependency/lwext4_rust/c/lwext4/src/ext4.c`、`os/src/fs/ext4_lwext4/layout.rs`、`user/src/bin/initproc.rs`、`scripts/board/patch_ddgs_redirect.py`
+
+### JH7110 DWMAC5 TX 正常但 RX descriptor 零 write-back
+
+- **现象**：VF2 上 TX DMA 能清 OWN、MAC 内部 loopback 可通过，但物理 RX descriptor 始终没有 write-back。
+- **根因**：YT8531C 默认门控 MAC 侧 RXC；同时 DWMAC5 增强 RX 描述符的 `RDES3.BUFFER1_VALID_ADDR` 是 bit 1，DMA tail pointer 作为 restart 通知必须晚于 OWN 发布，且通道 RX buffer size 必须与实际 buffer 长度一致。
+- **修复**：在 YT8531C extension register 打开 RXC、禁用自动休眠并设置 VF2 RGMII-ID 延迟；用 bit 1 标记 buffer 有效，先写 OWN 和 DMA barrier 再更新 RX tail，使用 2048-byte size field。
+- **教训**：TX/内部 loopback 只能证明 MAC 与 TX DMA 路径，不能替代 PHY 到 MAC 的 RXC 时钟和真实 RX descriptor ABI 验证；实板诊断应同时检查 PHY 时钟、RDES3 ownership/valid 位、tail publication 顺序和 DMA size 编码。
+- **相关文件**：`os/src/drivers/net/gmac_jh7110/phy.rs`、`os/src/drivers/net/gmac_jh7110/ring.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
+
+## 启动文件系统
+
+### initramfs 占位 `.gitkeep` 阻止目录替换为 sdcard 符号链接
+
+- **根因**: CPIO 中的 `/musl`、`/glibc` 虽然没有运行时库或测试脚本，但保留了 `.gitkeep`，使 `rmdir()` 失败；仅以 `test -e` 判断也会把空目录误当成已正确配置，最终 lmbench 仍在 initramfs 目录找脚本。
+- **修复**: 确认 `/sdcard/{musl,glibc}` 存在后，先删除 initramfs 目录的 `.gitkeep`，再 `rmdir` 并创建到 sdcard 的绝对符号链接。
+- **教训**: 需要将 CPIO 占位目录替换为挂载盘路径时，先检查打包后的 CPIO 条目，而不是只检查源码树目录是否“空”。
+- **相关文件**: `user/src/bin/test_runner/bootstrap/layout.rs`, `scripts/build_initramfs.sh`
+
+## WaitQueue 在 block 前覆盖并发唤醒
+
+- **根因**: 用 `TaskStatus` 作为唯一通知载体时，wake 可在条件复查后把任务标为 `Ready`，随后 block 入口又写回 `Interruptible`，从而吞掉通知。
+- **修复**: 每次等待创建共享 `Arc<WaiterState>`；释放保护锁后用 CAS 执行 `Idle → Sleeping`，唤醒方先从队列移除 waiter 再写 `Notified`。signal/timeout 先写 `Closed`，从所有队列删除 waiter，最后复查条件。多队列必须注册同一个 waiter，保证第一个通知获胜。
+- **教训**: 调度状态只能描述任务是否可运行，不能承担一次性通知语义；任何“注册 → 解锁 → block”协议都需要独立的原子握手和取消状态。
+- **相关文件**: `os/src/task/manager.rs`
+
+## WaitQueue 条件闭包重入
+
+### 网络 poll 从条件闭包重入 EventWaitQueue
+
+- **根因**: `WaitQueue::wait_until_interruptible()` 的条件闭包会在持有 waitqueue 锁时执行；若闭包调用的 TCP `try_*` 方法再执行 `NET_INTERFACE.try_poll()`，poll 回调会通过 `wake_tcp_waiters()`/`wake_raw_waiters()` 通知同一个 `EventWaitQueue`，对不可重入锁再次加锁而死锁。
+- **修复**: 在进入 `wait_until_interruptible()` 前执行一次 `NET_INTERFACE.poll()`；条件闭包只调用无 poll 的状态检查变体。通知路径始终使用 `notify_events_all`/`notify_events_at_most`，不能以 `try_lock()` 失败跳过唤醒，否则会丢失就绪通知。
+- **教训**: “通知时跳过锁竞争”不是死锁修复；它把确定性死锁替换成数据丢失。对可能触发 wake 回调的操作，应把副作用移出持锁条件闭包，而非削弱回调的交付保证。
+- **相关文件**: `os/src/task/manager.rs`, `os/src/net/socket/inet/stream/mod.rs`, `os/src/fs/vfs/event.rs`
+## 固件 ABI / Hypercall
+
+### 内联汇编调用约定中未初始化的寄存器被固件解释
+
+- **现象**：VF2 串口输入产生 OpenSBI `ext=0x2 func=0xf4240`。`console_getchar()` 调用 legacy `sbi_call(which=2)`，但 a6 (x16) 寄存器未被显式初始化，包含来自调用者寄存器池的垃圾值 `0xf4240`（= 1_000_000）。
+- **根因**：Legacy SBI ABI（EID < 0x10）规范上不使用 a6 传递 FID，但 OpenSBI 实现仍读取 a6 并输出 `func=<a6>` 日志。`sbi_call()` 的 `asm!` 只设置了 a0-a2 和 a7，遗漏了 a6。
+- **修复**：在 `sbi_call()` 的 `asm!` 操作数中添加 `in("x16") 0usize`，确保每次 legacy ecall 时 a6 被显式零初始化。
+- **教训**：调用固件/超管理器 ABI（ecall/hcall/svc）时，**所有**参数寄存器必须被显式初始化，即使规范将某些寄存器标注为"该调用类型未使用"。固件实现可能读取并记录这些寄存器的值，或将其纳入行为判断（如 OpenSBI 输出日志含 func=）。同一文件中的 `reboot()` 已正确初始化 a6=0（SRST 现代扩展需要 FID），恰好留下了对比。
+- **相关文件**: `os/src/hal/arch/riscv/sbi.rs`
+
+## SD/MMC 初始化：reset 后缺延时导致后续命令 INT_RTO
+
+- **现象**: dw-mshc 驱动在实板上 CMD8 已正确应答 `0x1aa`（接口条件握手成功），但紧随其后的 CMD55（ACMD41 探测循环首条命令）触发 INT_RTO（响应超时）。CMD0 → CMD8 → CMD55 无任何延时连续发出。
+- **根因**: 卡在上电/复位后需要时间稳定时钟与状态（SD 规范要求约 74+ 时钟周期），且 CMD0 复位后到能可靠应答命令之间需要额外时间。U-Boot `mmc_go_idle()` 在 CMD0 前 `udelay(1000)`、CMD0 后 `udelay(2000)`；本驱动缺失这些延时。
+- **修复**: `initialize_card()` 在 CMD0 前 `wait_ms(1)`、CMD0 后 `wait_ms(2)`，并在 CMD8 成功后、首次 CMD55 前 `wait_ms(1)`；新增 `wait_ms(ms)` 帮助函数（`crate::timer::get_time_ms()` 截止时间自旋循环），`wait_10ms()` 委托之。
+- **教训**: 硬件初始化命令序列（reset/if-cond/op-cond）之间必须保留电源/复位稳定窗口，不能依赖命令本身往返耗时。参考 U-Boot/Linux 的 `mmc_go_idle`/`mmc_send_op_cond` 时序。另注意本项目 `crate::timer::get_time_ms()` 返回 **`usize`** 而非 `u64`，`saturating_add` 传 `usize` 即可，传 `as u64` 会 E0308。
+- **相关文件**: `os/src/drivers/block/dw_mshc/sd.rs`
+
+### GPT 盘分区误判排查：dd if=/dev/mmcblk0p1 头部 'EFI PART' → probe_mbr 误把保护性 MBR 当分区；检查 type 0xEE 与 LBA1 签名
+
+## 按编号/键限流内核日志（首次打印、重复静默）
+
+- **现象**: 实板（VF2）上用户态频繁调用未实现的 syscall（如 `rseq(293)`、`fsopen(430)`），catch-all 分支每次调用都 `println!`+`error!` 打印全部参数，控制台被刷屏、串口吞吐被拖慢，且掩盖真正的错误输出。
+- **根因**: 未知 syscall 的 catch-all `_` 分支无状态地去打印每个调用；没有区分"首次见到这个编号"与"重复命中"。
+- **修复**: 模块级 `static REPORTED_UNSUPPORTED: spin::Mutex<alloc::collections::BTreeSet<usize>> = Mutex::new(BTreeSet::new());`，在 catch-all 中 `if REPORTED_UNSUPPORTED.lock().insert(syscall_id) { /* 打印一次 */ }`。`BTreeSet::insert` 返回 `true` 表示此前不存在（首次），重复时返回 `false` 静默跳过；始终返回 `ENOSYS`。
+- **教训**: no_std 内核里 `spin::Mutex::new` 与 `BTreeSet::new` 都是 const fn，可直接用于 `static` 初始化（无需 lazy_static），已有先例 `os/src/mm/heap_trace.rs`、`os/src/trace.rs`。该模式可复用于任何"每 id/键只报一次"的噪音日志限流，避免在实板上对高频路径无条件打印。
+- **相关文件**: `os/src/syscall/mod.rs`
+
+## 性能计时单位
+
+### `rdcycle` 不能用 timer frequency 换算为微秒
+
+- **现象**: `/sys/kernel/stats` 导出 `clock_freq_hz` 并把 `rdcycle` 累计值当作 tick 除以该频率，得到的 handler 平均耗时会比同一 workload 的 lmbench wall time 大一个数量级，或与真实时间完全矛盾。
+- **根因**: RV64 的 `cycle` CSR 是 CPU cycle 计数，不保证与 OpenSBI/QEMU 的 timer timebase 同频；而 `clock_freq_hz` 描述的是 `time` CSR / 内核 timer 的频率。两种计数域不能直接相除。
+- **修复**: 对外暴露且需要以 `clock_freq_hz` 换算的诊断计时，统一从 `timer::raw_ticks()`（RV64 `time` CSR）取样；保留 `rdcycle` 的计数器必须单独标注为 CPU cycle，不能混用单位。
+- **教训**: 首次分析任何 tick 指标前，先用独立 wall-time benchmark 做量纲 sanity check。若 `ticks / clock_freq_hz` 与 workload wall time 矛盾，先验证时钟源，再讨论热点占比；否则所有 µs、百分比和优化优先级都不可信。
+- **相关文件**: `os/src/task/perf.rs`, `os/src/timer.rs`, `os/src/hal/arch/riscv/time.rs`

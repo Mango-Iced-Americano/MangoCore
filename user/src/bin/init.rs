@@ -11,7 +11,13 @@ use user_lib::{
     waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
 };
 
+#[path = "init/mounts.rs"]
+mod mounts;
+#[path = "init/vf2.rs"]
+mod vf2;
+
 const PID1: isize = 1;
+const MS_BIND: usize = 4096;
 const RUNNER: &str = "/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
 const BUILDSTORM_INIT: &str = "/sbin/init\0";
@@ -19,7 +25,6 @@ const BUILDSTORM_FALLBACK_INIT: &str = "/init\0";
 const BUILDSTORM_SCRIPT: &str = "/glibc/buildstorm_testcode.sh\0";
 const BUILDSTORM_SHELL: &str = "/bin/sh\0";
 const SIGACTION_RESTART: usize = 0x10000000;
-const MS_BIND: usize = 4096;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -59,21 +64,6 @@ fn reap_orphans() {
     CHILD_EVENT.store(false, Ordering::Release);
 }
 
-fn prepare_pseudo_fs_framework() {
-    const AT_FDCWD: isize = -100;
-    for path in [
-        "/dev\0",
-        "/proc\0",
-        "/sys\0",
-        "/run\0",
-        "/tmp\0",
-        "/dev/shm\0",
-    ] {
-        let _ = sys_mkdirat(AT_FDCWD, path, 0o755);
-    }
-    println!("[init] pseudo-fs mount framework ready");
-}
-
 fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
     let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
     if result < 0 {
@@ -86,13 +76,6 @@ fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -
         return false;
     }
     true
-}
-
-fn mount_pseudo_filesystems() {
-    let _ = try_mount("none\0", "/proc\0", "proc\0");
-    let _ = try_mount("none\0", "/sys\0", "sysfs\0");
-    let _ = try_mount("none\0", "/run\0", "tmpfs\0");
-    let _ = try_mount("none\0", "/dev/shm\0", "tmpfs\0");
 }
 
 fn mount_disk(source: &'static str, target: &'static str) -> bool {
@@ -148,7 +131,7 @@ fn enter_buildstorm_root() -> bool {
         println!("[init] BuildStorm pre-chroot chdir failed");
         return false;
     }
-    let ret = sys_chroot("/sdcard\0".as_ptr());
+    let ret = sys_chroot("/sdcard\0");
     if ret < 0 || chdir("/\0") < 0 {
         println!("[init] BuildStorm chroot failed: {}", ret);
         return false;
@@ -292,9 +275,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         return 1;
     }
     install_signal_handlers();
-    prepare_pseudo_fs_framework();
-    mount_pseudo_filesystems();
+    mounts::prepare_pseudo_fs_framework();
+    mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
+    vf2::try_boot();
     if profile == "buildstorm" {
         let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
         // BuildStorm owns the complete x0 userspace.  Give it a fresh tmpfs
@@ -355,7 +339,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         bind_tools_and_sdcard(tools_ok, disk_ok);
     } else {
         // No block device in regression mode
-        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
+        mounts::mount_tmpfs("/tmp\0");
     }
     let environ = runner_environment(profile);
     println!(

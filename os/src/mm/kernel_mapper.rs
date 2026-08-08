@@ -63,6 +63,22 @@ impl<'a, T: PageTable> KernelMapper<'a, T> {
         Ok(())
     }
 
+    /// Map a virtual range to a physically contiguous range of equal length.
+    pub(super) fn map_range(
+        &mut self,
+        start_va: VirtAddr,
+        start_pa: PhysPageNum,
+        end_va: VirtAddr,
+        flags: MapPermission,
+    ) -> MmResult<()> {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for (offset, vpn) in VPNRange::new(start_vpn, end_vpn).into_iter().enumerate() {
+            self.map_page(vpn, PhysPageNum(start_pa.0 + offset), flags)?;
+        }
+        Ok(())
+    }
+
     /// 如果单页已映射则解除映射。
     pub(super) fn unmap_page_if_mapped(&mut self, vpn: VirtPageNum) -> MmResult<bool> {
         self.mapper.unmap_if_mapped(vpn)

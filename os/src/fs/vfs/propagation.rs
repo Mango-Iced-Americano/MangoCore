@@ -444,7 +444,8 @@ pub fn propagate_mount(
     child_name: &str,
 ) {
     let _start = crate::task::perf::perf_time_now();
-    super::mount::counters::MOUNT_LIST_PROPAGATE_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::mount::counters::MOUNT_LIST_PROPAGATE_CALLS
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     const MAX_DEPTH: usize = 32;
     let mut visited: Vec<usize> = Vec::new();
     visited.push(Arc::as_ptr(source) as usize);

@@ -49,7 +49,6 @@ pub struct TaskControlBlock {
     sched_state: AtomicUsize,
     pub wait_io_timer_pending: AtomicBool,
     pub wait_timer_generation: AtomicUsize,
-    pub wait_io_fallback_active_generation: AtomicUsize,
     pub sched_nice_hint: AtomicI32,
 }
 ```
@@ -68,7 +67,7 @@ pub struct TaskControlBlock {
 | `exit_signal` | 非 `CLONE_THREAD` child 退出时投递给父进程的信号 |
 | `_thread_quota` | `CLONE_THREAD` 线程级 quota guard |
 | `sched_state` | 原子调度状态与 CPU owner，是调度所有权的唯一真值 |
-| `wait_io_timer_pending` | I/O fallback timer 去重标记 |
+| `wait_io_timer_pending` | I/O fallback timer 去重标记（已注册 deadline 唤醒 timer 的去重标记） |
 | `wait_timer_generation` | wait timeout generation，过滤旧 timer |
 | `wait_io_fallback_active_generation` | fallback wait 活跃 generation |
 | `sched_nice_hint` | runqueue fast path 判断 nice 是否为 0 |
@@ -77,6 +76,8 @@ pub struct TaskControlBlock {
 这些字段里，`sched_nice_hint` 和当前任务身份 hint 直接影响 syscall/调度热路径，避免频繁持有 TCB inner 锁。
 LA64 ASID 不属于线程字段：它由 `AddressSpace` 的 `TlbContext` 持有，同一 MM 的线程
 共享一个 versioned ASID，并在用户返回时与页表根一起激活。
+
+无 deadline 的等待不注册 timer：Waiter/Waker 的 one-shot 通知握手在显式唤醒、信号或条件满足时完成状态转换，因此支持无限期等待而不需要定时器兜底。
 
 ## 3. TCB inner 字段分组
 

@@ -40,9 +40,9 @@ const PRECISE_FUTEX_SPIN_NS: usize = 1_250_000;
 // LA64 QEMU has a stable futex timeout return-to-user tail. The 2K1000LA
 // board does not have that tail, so applying this bias there causes an early
 // timeout observable by futex_wait05.
-#[cfg(all(target_arch = "loongarch64", feature = "board_laqemu"))]
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_qemu"))]
 const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 180_000;
-#[cfg(all(target_arch = "loongarch64", not(feature = "board_laqemu")))]
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
 const FUTEX_REL_TIMEOUT_EXIT_BIAS_NS: usize = 0;
 
 #[allow(unused)]

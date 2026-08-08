@@ -1,7 +1,0 @@
-MANGO_CORE_NUM / CORE_NUM: 8
-KTEST: smp
-KREPEAT: 1
-kernel test timeout: 5000 ms
-QEMU wrapper timeout: 30 s
-profile: normal
-mode: release

@@ -1,1 +1,0 @@
-qemu-system-riscv64 -machine virt -nographic -bios ../bootloader/fw_payload.bin -device loader,file=/app/build/rv64/release/normal/kernel/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000 -m 1024 -smp threads=1

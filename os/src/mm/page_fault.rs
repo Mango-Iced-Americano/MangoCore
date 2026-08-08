@@ -111,7 +111,7 @@ impl PageFaultHandler {
             FaultAction::Cow => 5,
             _ => 6,
         };
-        let _pf_start = crate::task::perf::perf_time_now();
+        let _pf_start = crate::task::perf::perf_memory_io_time_now();
         let result = match action {
             // 匿名页首次访问：分配清零物理页并安装用户 PTE。
             FaultAction::LazyAlloc => {
@@ -147,7 +147,7 @@ impl PageFaultHandler {
                 map_existing_resident_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
             }
         };
-        let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_pf_start);
+        let elapsed = crate::task::perf::perf_memory_io_time_now().wrapping_sub(_pf_start);
         crate::task::perf::record_pagefault_action(action_tag, elapsed);
         match result {
             Ok(pa) => FaultOutcome::Completed(pa),

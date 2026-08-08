@@ -1,4 +1,0 @@
-container=6b17b5297342cc14a02d200db798aae3bf10954110855eaa46b0ca43caa86825
-image=zhouzhouyi/os-contest:20260510
-mount=/home/lzm/projects/MangoCore-smp-final-merge-20260806:/app:rw
-qemu=/opt/qemu-bin-10.0.2/bin/qemu-system-riscv64 (10.0.2)

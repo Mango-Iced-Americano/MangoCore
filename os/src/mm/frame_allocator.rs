@@ -33,6 +33,7 @@ pub struct FrameTracker {
 impl FrameTracker {
     /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
+        let zero_start = crate::task::perf::perf_memory_io_time_now();
         let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
         const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
         const UNROLL: usize = 8;
@@ -57,6 +58,10 @@ impl FrameTracker {
             unsafe { ptr.add(i).write(0) };
             i += 1;
         }
+        crate::task::perf::record_pagefault_stage(
+            4,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(zero_start),
+        );
         Self { ppn }
     }
 
@@ -284,7 +289,13 @@ pub(super) fn for_each_usable_frame_region(mut f: impl FnMut(PhysPageNum, PhysPa
         fn ekernel();
     }
 
-    let kernel_image = [(skernel as usize, ekernel as usize)];
+    // 内核以 KERNEL_LINK_VADDR 高地址链接（见 hal/arch/*/linker.ld）。排除内核
+    // 镜像时必须先用 kernel_linked_to_phys 转成运行时物理地址，否则链接地址
+    // 永不与 DRAM region 重叠，内核镜像物理页会被帧分配器当作可用帧分配
+    // （页表页写进内核 .data 会破坏运行中的内核，表现为启动卡死）。
+    let kernel_start = crate::hal::boot::kernel_linked_to_phys(skernel as *const () as usize);
+    let kernel_end = crate::hal::boot::kernel_linked_to_phys(ekernel as *const () as usize);
+    let kernel_image = [(kernel_start, kernel_end)];
     crate::hal::firmware::for_each_usable_ram_range(&kernel_image, |start, end| {
         f(PhysAddr::from(start).floor(), PhysAddr::from(end).floor());
     });
@@ -793,8 +804,8 @@ lazy_static! {
 
 #[cfg(all(
     feature = "loongarch64",
-    feature = "board_2k1000",
-    feature = "board_bringup_trace"
+    feature = "boot_la_uboot_dmw",
+    feature = "bringup_trace"
 ))]
 fn probe_board_memory_word(pa: usize) {
     let ptr = pa as *mut u64;
@@ -830,8 +841,8 @@ fn probe_board_memory_word(pa: usize) {
 
 #[cfg(all(
     feature = "loongarch64",
-    feature = "board_2k1000",
-    feature = "board_bringup_trace"
+    feature = "boot_la_uboot_dmw",
+    feature = "bringup_trace"
 ))]
 fn probe_board_memory_regions() {
     for_each_usable_frame_region(|start, end| {
@@ -849,8 +860,8 @@ fn probe_board_memory_regions() {
 pub fn init_frame_allocator() {
     #[cfg(all(
         feature = "loongarch64",
-        feature = "board_2k1000",
-        feature = "board_bringup_trace"
+        feature = "boot_la_uboot_dmw",
+        feature = "bringup_trace"
     ))]
     probe_board_memory_regions();
     FRAME_ALLOCATOR.write().init();

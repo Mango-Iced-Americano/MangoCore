@@ -1,9 +1,0 @@
-e2fsck 1.47.0 (5-Feb-2023)
-Pass 1: Checking inodes, blocks, and sizes
-Pass 2: Checking directory structure
-Pass 3: Checking directory connectivity
-Pass 4: Checking reference counts
-Pass 5: Checking group summary information
-MANGO_STATE: 58740/262144 files (0.4% non-contiguous), 792832/1048576 blocks
-debugfs 1.47.0 (5-Feb-2023)
-3c321b9445ec57db0bd1d06899c6a10eeeea2817fa7ecbc1b2e08f37878bed24  /hosttmp/ddgs-after-final11.py

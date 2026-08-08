@@ -1,8 +1,7 @@
-//! 堆就绪后构造的平台信息模型。
+//! Owned, post-heap platform information model.
 //!
-//! Batch 2 先发布完整数据模型，MM/Driver 消费者在后续批次迁移；尚未接线的
-//! 字段和查询函数因此暂时触发 dead-code。豁免只覆盖本数据模型文件，消费者
-//! 接入后应删除并由编译器继续检查真实的废弃接口。
+//! Built once after `mm::init()` from firmware data or static fallback.
+//! All kernel subsystems read from the resulting `PlatformInfo` singleton.
 
 #![allow(
     dead_code,
@@ -127,10 +126,7 @@ impl DeviceInfo {
             node_path: String::new(),
             parent_path: None,
             status: DeviceStatus::Enabled(None),
-            compatible: compatible
-                .iter()
-                .map(|entry| String::from(*entry))
-                .collect(),
+            compatible: compatible.iter().map(|entry| String::from(*entry)).collect(),
             raw_properties: Vec::new(),
             raw_property_validity: RawPropertyValidity::Valid,
             mmio_ranges,
@@ -221,8 +217,7 @@ impl PlatformInfo {
     /// A static boot contract never invents hardware devices.
     pub fn from_static() -> Self {
         let boot = *crate::hal::boot::boot_info();
-        // 正在构造 `PLATFORM_INFO` 时不能通过 `get_cmdline()` 再查询同一个 Once。
-        let cmdline = crate::bootargs::compiled_cmdline().into();
+        let cmdline = crate::bootargs::get_cmdline().into();
         Self {
             firmware: FirmwareKind::Static,
             boot,
@@ -250,10 +245,7 @@ impl PlatformInfo {
             && self.devices.iter().any(|device| {
                 device.is_enabled()
                     && device.resource_validity == ResourceValidity::Valid
-                    && device
-                        .compatible
-                        .iter()
-                        .any(|compatible| compatible == "virtio,mmio")
+                    && device.compatible.iter().any(|compatible| compatible == "virtio,mmio")
             })
         {
             "/dev/vda"

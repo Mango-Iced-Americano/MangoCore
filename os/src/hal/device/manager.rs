@@ -1,19 +1,18 @@
-//! 平台设备只读查询器。
+//! Device manager implementation.
 //!
-//! Batch 2 先稳定查询接口，Driver 批次再接入消费者；在此之前这些入口会被
-//! dead-code 检查判定为未使用。豁免仅限本文件，消费者迁移后应整体删除。
+//! Wraps `PlatformInfo.devices` and provides typed query methods
+//! for driver initialization.
 
-#![allow(
-    dead_code,
-    reason = "DeviceManager 在后续 Driver 融合批次接入，本批只冻结查询合同"
-)]
-
-use crate::hal::platform::{
+use crate::hal::platform::info::{
     DeviceInfo, DeviceKind, MmioRange, RawPropertyValidity, ResourceValidity,
 };
 use alloc::vec::Vec;
 
-/// 拥有设备描述副本的只读查询视图。
+/// Owned, query-only view of platform devices.
+///
+/// Created from `PlatformInfo.devices` after platform initialization.
+/// All query methods are infallible — they return empty results
+/// when no matching device is found.
 #[derive(Debug, Clone)]
 pub struct DeviceManager {
     devices: Vec<DeviceInfo>,
@@ -93,9 +92,7 @@ impl DeviceManager {
         if device.resource_validity == ResourceValidity::Malformed {
             return Err(DeviceQueryError::MalformedResources);
         }
-        device
-            .mmio_range(index)
-            .ok_or(DeviceQueryError::MissingMmioRange)
+        device.mmio_range(index).ok_or(DeviceQueryError::MissingMmioRange)
     }
 
     /// Return all devices of a specific DeviceKind.
@@ -127,11 +124,13 @@ impl DeviceManager {
 
     /// Return the first serial console device.
     pub fn find_console(&self) -> Option<&DeviceInfo> {
-        self.devices.iter().find(|device| {
-            device.kind == DeviceKind::Serial
-                && device.is_enabled()
-                && device.resource_validity == ResourceValidity::Valid
-        })
+        self.devices
+            .iter()
+            .find(|device| {
+                device.kind == DeviceKind::Serial
+                    && device.is_enabled()
+                    && device.resource_validity == ResourceValidity::Valid
+            })
     }
 
     /// Return all devices (for iteration / debugging).

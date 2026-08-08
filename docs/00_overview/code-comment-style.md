@@ -181,12 +181,12 @@ VM 锁内完成 PTE 解析、权限检查和实际访问；字符串必须先复
 
 - 谁唤醒、谁等待
 - 条件闭包的锁持有范围
-- 兜底定时器是否启用及其作用
+- 无 deadline 等待由 Waiter/Waker one-shot 握手维持，显式唤醒、可处理信号或条件满足如何结束等待
 
 ```rust
-/// `WAIT_IO_FALLBACK_MS` 防止因丢失唤醒导致的永久阻塞。
-/// 此定时器是防卫性措施，不应依赖它作为正常唤醒机制。
-const WAIT_IO_FALLBACK_MS: usize = 10;
+/// Waiter/Waker one-shot handshake closes the lost-wakeup window.
+/// This wait has no deadline and remains blocked until an explicit wake,
+/// an actionable signal, or the condition becomes true.
 ```
 
 ### 锁顺序
@@ -445,3 +445,4 @@ PR 审查时，注释相关的检查项如下：
 2. **需改写的**：口语化注释、无退出条件的 TODO → 按本标准格式改写
 3. **需补充的**：缺少 Safety/Locking/Linux Compatibility 说明的关键函数 → 按本标准补充
 4. **需跟踪的**：短期内无法清理的 TODO → 在 `docs/Work_Log.md` 或 issue 中登记跟踪
+

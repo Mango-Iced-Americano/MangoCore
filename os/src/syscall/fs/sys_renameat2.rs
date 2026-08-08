@@ -50,9 +50,13 @@ pub fn sys_renameat2(
 
     let (uid, fsgid, groups) = caller_ids_and_groups();
     let old_perm = check_parent_search_access(&old_start, &oldpath_str, uid, fsgid, &groups);
-    if old_perm != SUCCESS { return old_perm; }
+    if old_perm != SUCCESS {
+        return old_perm;
+    }
     let new_perm = check_parent_search_access(&new_start, &newpath_str, uid, fsgid, &groups);
-    if new_perm != SUCCESS { return new_perm; }
+    if new_perm != SUCCESS {
+        return new_perm;
+    }
 
     // 解析 oldpath: 获取父目录 + 叶子名
     let (old_parent, old_leaf) = match vfs_lookup_parent_for_start(&old_start, &oldpath_str) {

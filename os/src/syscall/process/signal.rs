@@ -155,7 +155,7 @@ impl SignalfdSiginfo {
     }
 }
 
-struct SignalFd {
+pub(crate) struct SignalFd {
     mask: Mutex<Signals>,
     metadata: Metadata,
 }

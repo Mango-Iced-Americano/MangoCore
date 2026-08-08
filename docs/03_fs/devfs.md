@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-18"
+last_updated: "2026-07-29"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -24,6 +24,7 @@ entry_points:
   - "DEV_FS"
   - "DevFS"
   - "add_dev"
+  - "add_block_devices"
   - "add_dir"
   - "LockedDevFSInode"
 arch:
@@ -82,7 +83,7 @@ lazy_static! {
 }
 ```
 
-`DEV_FS` 是全局共享的单例，在 `mount_common_filesystems` 中通过 `DEV_FS.add_dev` 注册静态设备，在 `mount_boot_block_devices` 中注册块设备分区节点。
+`DEV_FS` 是全局共享的单例，在 `mount_common_filesystems` 中通过 `DEV_FS.add_dev` 注册静态设备。`mount_boot_block_devices` 则将驱动探测得到的 `BlockDeviceDescriptor` 批量发布；DevFS 不推断设备类型、名称或主次设备号。
 
 ## 设备注册
 
@@ -105,6 +106,10 @@ let misc_dir = devfs.add_dir("misc", InodeMode::from_bits_truncate(0o755))?;
 misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 ```
 
+### add_block_devices
+
+启动块设备以 `BlockDeviceDescriptor` 批量注册。描述符由具体驱动提供节点名称、主次设备号、角色与 `Arc<dyn BlockDevice>`；DevFS 只在插入前检查名称冲突，并由 `BlockDevInode::from_descriptor()` 保留该元数据。这样 virtio 可以发布 `vda`/`vdb`，而 MMC、SATA 或未来控制器可发布各自的 Linux 风格节点，不需要 DevFS 增加平台分支。
+
 ### IndexNode for LockedDevFSInode
 
 目录 inode 实现了 `find`、`list`、`list_dirents` 等标准 VFS 方法，将 lookup 委托给 `children` map 查找。非目录操作（`read_at`、`write_at`）返回 `ENOSYS`。
@@ -121,7 +126,7 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 ### /dev/urandom 和 /dev/random
 
-两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。读操作返回请求长度的安全随机字节，可信熵源初始化失败时返回 `EAGAIN`，不会回退到全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。`/dev/random` 当前仍是 `/dev/urandom` 的同实现别名，主次设备号为 makedev!(1, 9)。
+两者共享内核 ChaCha20 CSPRNG。QEMU 由 VirtIO RNG 播种，2K1000LA 由片上 APB RNG 播种；启动样本通过基本重复/卡死健康检查后，随机池才进入 ready 状态。`/dev/random` 未就绪时保持返回 `EAGAIN`；`/dev/urandom` 则回退到标记为不可信的启动 ChaCha20 流，保证每次读取都返回请求长度且从不返回 `EAGAIN`。若该内部回退也意外失败，原子 PRNG 仍会填满 buffer，绝不返回全零或时间种子。写入数据会混入私有状态，但不会提高 ready 状态或被计为可信熵。两者主次设备号均为 makedev!(1, 9)。
 
 ### /dev/full
 
@@ -160,12 +165,12 @@ read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形�
 
 管道由 `make_pipe` 创建一对 `(read_end, write_end)`，共享同一个 `PipeRingBuffer`（64KB 环形缓冲区）。关键行为：
 
-- **读**：从环形缓冲区读取数据。缓冲区为空且写端已关闭返回 EOF（0）；缓冲区为空且写端打开返回 `EAGAIN`；读取后通知写端 `EPOLLOUT`。
+- **读**：从环形缓冲区读取数据。缓冲区为空且写端已关闭返回 EOF（0）；缓冲区为空且写端打开返回 `EAGAIN`；读取后通知写端 `EPOLLOUT`。若释放空间小于 `PIPE_BUF`，唤醒全部写 waiter，避免仅被无法原子写入的 waiter 消耗唤醒令牌。
 - **写**：写入环形缓冲区。读端已关闭发送 SIGPIPE 并返回 `EPIPE`；缓冲区满返回 `EAGAIN`；写入后通知读端 `EPOLLIN`。
 - **poll**：基于环形缓冲区状态和端对关闭情况计算可读/可写/挂起事件位。
 - **ioctl**：`FIONREAD` 用于读取当前缓冲区中可用字节数。
 
-PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）。资源使用支持原子计数器跟踪。
+PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）；满管道扩容后会在释放 ring 锁后唤醒全部写 waiter。被信号或错误中断的 splice 等待若仍有可读数据或可写空间，也会把 reader/writer baton 广播给其余 waiter。资源使用支持原子计数器跟踪。
 
 **Named FIFO**：通过 `fifo_open` 在全局 `FIFO_REGISTRY` 中以 `(dev_id, inode_id)` 标识建立管道端点。支持 `compact_fifo_registry` 周期回收两端已关闭的陈旧条目。
 
@@ -198,7 +203,7 @@ Pty 系统由 `PtyManager` 管理，每对 PTY 包含一个 master（`PtmxMaster
 
 ### BlockDevInode（块设备节点）
 
-BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主设备号固定为 254（VIRTIO_BLK_MAJOR）。
+BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。节点名称和主次设备号来自 `BlockDeviceDescriptor`，而不是固定为 VirtIO 的 major 254。
 
 **读**：按 BLOCK_SZ 块对齐分片读取，通过 `read_block` 获取整块数据后拷贝子区间。超出设备大小返回 0。
 
@@ -209,8 +214,7 @@ BlockDevInode 包装 `Arc<dyn BlockDevice>`，提供原始块设备访问。主�
 - `BLKGETSIZE64`：获取设备字节大小
 - `BLKSSZGET`：获取逻辑扇区大小（固定返回 512）
 
-**动态注册路径**：`mount_boot_block_devices` 先注册原始设备，再对未识别为裸
-ext4/FAT32 的设备解析 MBR 主分区。QEMU 使用：
+**动态注册路径**：`mount_boot_block_devices` 先验证并发布原始描述符，再对 Tools 角色设备解析 MBR 主分区并以动态 minor 发布分区节点。当前 QEMU 使用：
 
 ```
 /dev/vda       (原始根设备, minor=0)

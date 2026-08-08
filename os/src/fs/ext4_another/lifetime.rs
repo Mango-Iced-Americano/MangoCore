@@ -435,3 +435,32 @@ impl Ext4FileSystem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::InodeLifetime;
+    use crate::timer::TimeSpec;
+
+    #[test]
+    fn cached_timestamps_remain_visible_until_a_successful_flush() {
+        // Given: a clean inode lifetime and a completed write timestamp update.
+        let lifetime = InodeLifetime::new(0, TimeSpec::new(), TimeSpec::new());
+        let modified = TimeSpec {
+            tv_sec: 123,
+            tv_nsec: 456,
+        };
+        lifetime.cache_modified_time(modified);
+
+        // When: sync snapshots the timestamp update but the device flush has not completed.
+        let snapshot = lifetime
+            .dirty_timestamps()
+            .expect("a write must mark timestamps dirty");
+
+        // Then: stat-facing cache remains current until the persistence barrier succeeds.
+        assert_eq!(lifetime.cached_mtime(), Some(modified));
+        assert_eq!(lifetime.cached_ctime(), Some(modified));
+        lifetime.finish_timestamp_commit(snapshot);
+        assert_eq!(lifetime.cached_mtime(), None);
+        assert_eq!(lifetime.cached_ctime(), None);
+    }
+}

@@ -6,4 +6,4 @@
 	url = https://github.com/Mango-Iced-Americano/lwext4_rust
 [submodule "dependency/another_ext4"]
 	path = dependency/another_ext4
-	url = https://github.com/Mango-Iced-Americano/another_ext4
+	url = https://github.com/Mango-Iced-Americano/another_ext4.git

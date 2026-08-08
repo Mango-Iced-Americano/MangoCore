@@ -1,4 +1,5 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::any::Any;
 use core::convert::TryFrom;
 use core::fmt;
@@ -65,6 +66,9 @@ impl another_ext4::MetadataMutationNotifier for MetadataMutationWait {
     }
 }
 
+/// Live writable another_ext4 instances for global `sync(2)`.
+pub(crate) static EXT4_REGISTRY: Mutex<Vec<Weak<Ext4FileSystem>>> = Mutex::new(Vec::new());
+
 /// One writable another_ext4 filesystem instance.
 pub struct Ext4FileSystem {
     ext4: Arc<another_ext4::Ext4>,
@@ -123,6 +127,7 @@ impl Ext4FileSystem {
         });
         let root = Ext4Inode::new_root(&fs, another_ext4::EXT4_ROOT_INO)?;
         *fs.root.lock() = Some(root);
+        EXT4_REGISTRY.lock().push(Arc::downgrade(&fs));
         Ok(fs)
     }
 
@@ -197,6 +202,7 @@ impl Ext4FileSystem {
             .map_err(|error| from_another(error.code()))
     }
 
+    /// Persist a lifetime's dirty mtime and ctime in one inode mutation.
     pub(crate) fn commit_lifetime_timestamps(
         &self,
         inode_id: u32,
@@ -218,6 +224,56 @@ impl Ext4FileSystem {
             )
         })?;
         Ok(Some(timestamps))
+    }
+}
+
+/// Sync every live another_ext4 instance without exposing per-instance errors to `sync(2)`.
+pub(crate) fn sync_all_instances() {
+    let live = {
+        let mut registry = EXT4_REGISTRY.lock();
+        let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
+        registry.retain(|weak| weak.strong_count() > 0);
+        live
+    };
+
+    for fs in live {
+        if let Err(error) = fs.sync_all() {
+            log::error!(
+                "another_ext4: global sync failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+        }
+    }
+}
+
+/// Shutdown every live another_ext4 instance: sync data, then clear
+/// FEATURE_INCOMPAT_RECOVER so the next boot does not see a dirty journal.
+pub(crate) fn shutdown_all_instances() {
+    let live = {
+        let mut registry = EXT4_REGISTRY.lock();
+        let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
+        registry.retain(|weak| weak.strong_count() > 0);
+        live
+    };
+
+    for fs in live {
+        if let Err(error) = fs.sync_all() {
+            log::error!(
+                "another_ext4: sync before shutdown failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+            // Do NOT clear RECOVER if sync failed — data may be incomplete
+            continue;
+        }
+        if let Err(error) = fs.inner().shutdown_writable() {
+            log::error!(
+                "another_ext4: shutdown_writable failed for filesystem {}: {:?}",
+                fs.fs_id(),
+                error
+            );
+        }
     }
 }
 

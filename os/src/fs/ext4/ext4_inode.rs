@@ -852,11 +852,17 @@ impl Ext4FileSystem {
             return Err(Errno::ENOTSUP as isize);
         }
         let _t = crate::task::perf::perf_time_now();
-        let mut meta_reads_before = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let mut meta_reads_before = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT
+            .load(core::sync::atomic::Ordering::Relaxed);
         let search_path = self.find_extent(inode_ref, lblock);
         let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t);
-        let meta_reads = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT.load(core::sync::atomic::Ordering::Relaxed).saturating_sub(meta_reads_before);
-        let depth = search_path.as_ref().map(|sp| sp.depth as usize).unwrap_or(0) as usize;
+        let meta_reads = crate::fs::ext4::counters::METADATA_BLOCK_READ_COUNT
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(meta_reads_before);
+        let depth = search_path
+            .as_ref()
+            .map(|sp| sp.depth as usize)
+            .unwrap_or(0) as usize;
         crate::task::perf::record_ext4_find_extent_cost(elapsed, depth, meta_reads as usize);
         if let Ok(path) = search_path {
             if let Some(node) = path.path.last() {

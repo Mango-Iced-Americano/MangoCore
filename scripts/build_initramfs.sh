@@ -75,8 +75,7 @@ else
     # 1. 复制 common skeleton
     cp -a "$REPO_ROOT/os/initramfs/common/." "$STAGE/"
 
-    # 1b. 生成 /etc/resolv.conf（DNS_SERVER 环境变量可配置，默认 10.0.2.3 适配 QEMU user 网）
-    DNS_SERVER="${DNS_SERVER:-10.0.2.3}"
+    DNS_SERVER="${DNS_SERVER:-8.8.8.8}"
     printf 'nameserver %s\n' "$DNS_SERVER" > "$STAGE/etc/resolv.conf"
 
     # 2. 确定架构相关的路径
@@ -84,11 +83,13 @@ else
       rv64)
         INIT_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/init"
         BUSYBOX_SRC="$REPO_ROOT/user/tools/riscv64/bin/busybox"
+        BASH_SRC="$REPO_ROOT/user/tools/riscv64/bin/bash"
         REG_SRC="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE/regression"
         ;;
       la64)
         INIT_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/init"
         BUSYBOX_SRC="$REPO_ROOT/user/tools/loongarch64/bin/busybox"
+        BASH_SRC="$REPO_ROOT/user/tools/loongarch64/bin/bash"
         REG_SRC="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE/regression"
         ;;
       *)
@@ -112,6 +113,8 @@ else
     INITD_SRC="$INIT_DIR/init"
     RUNNER_SRC="$INIT_DIR/test_runner"
     LTPRUNNER_SRC="$INIT_DIR/ltprunner"
+    IOZONE_RUNNER_SRC="$INIT_DIR/iozone_runner"
+    LMBENCH_RUNNER_SRC="$INIT_DIR/lmbench_runner"
     if [ -f "$INITD_SRC" ] && [ -f "$RUNNER_SRC" ]; then
         mkdir -p "$STAGE/sbin"
         install -m 0755 "$INITD_SRC" "$STAGE/sbin/init"
@@ -120,6 +123,14 @@ else
             install -m 0755 "$LTPRUNNER_SRC" "$STAGE/ltprunner"
             echo "[initramfs] installed /ltprunner from $LTPRUNNER_SRC"
         fi
+        if [ -f "$IOZONE_RUNNER_SRC" ]; then
+            install -m 0755 "$IOZONE_RUNNER_SRC" "$STAGE/iozone_runner"
+            echo "[initramfs] installed /iozone_runner from $IOZONE_RUNNER_SRC"
+        fi
+        if [ -f "$LMBENCH_RUNNER_SRC" ]; then
+            install -m 0755 "$LMBENCH_RUNNER_SRC" "$STAGE/lmbench_runner"
+            echo "[initramfs] installed /lmbench_runner from $LMBENCH_RUNNER_SRC"
+        fi
         echo "[initramfs] installed /sbin/init and test runner"
     else
         echo "[initramfs] ERROR: missing PID1 or test-runner binary under $INIT_DIR"
@@ -127,13 +138,22 @@ else
         exit 1
     fi
 
-    # 4. 安装 /rescue/sh（静态 BusyBox，救援 shell）
+    # 4. 安装根目录 BusyBox 和 /rescue/sh（静态 BusyBox，救援 shell）
     if [ -f "$BUSYBOX_SRC" ]; then
         mkdir -p "$STAGE/rescue"
+        install -m 0755 "$BUSYBOX_SRC" "$STAGE/busybox"
         install -m 0755 "$BUSYBOX_SRC" "$STAGE/rescue/sh"
-        echo "[initramfs] installed /rescue/sh from $BUSYBOX_SRC"
+        echo "[initramfs] installed /busybox and /rescue/sh from $BUSYBOX_SRC"
     else
-        echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /rescue/sh will be missing"
+        echo "[initramfs] WARNING: $BUSYBOX_SRC not found, /busybox and /rescue/sh will be missing"
+    fi
+
+    if [ -f "$BASH_SRC" ]; then
+        mkdir -p "$STAGE/bin"
+        install -m 0755 "$BASH_SRC" "$STAGE/bin/bash"
+        echo "[initramfs] installed /bin/bash from $BASH_SRC"
+    else
+        echo "[initramfs] WARNING: $BASH_SRC not found, /bin/bash will be missing"
     fi
 
     # 5. 安装 /regression（normal initproc 的 mode=regression 路径）

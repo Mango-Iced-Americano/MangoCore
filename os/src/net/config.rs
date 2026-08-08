@@ -454,7 +454,7 @@ impl<'a> NetDirectory<'a> {
             let mut runtime_dhcp_handle = None;
 
             #[cfg(all(
-                feature = "board_2k1000",
+                feature = "boot_la_uboot_dmw",
                 feature = "gmac_2k1000",
                 not(feature = "gmac_dhcp")
             ))]
@@ -465,7 +465,7 @@ impl<'a> NetDirectory<'a> {
                 println!("[net] eth0 static address 192.168.9.20/24");
             }
 
-            #[cfg(all(feature = "board_2k1000", feature = "gmac_dhcp"))]
+            #[cfg(all(feature = "boot_la_uboot_dmw", feature = "gmac_dhcp"))]
             if has_real_nic {
                 let mut dhcp_socket = dhcpv4::Socket::new();
                 dhcp_socket.set_retry_config(dhcpv4::RetryConfig {
@@ -479,7 +479,7 @@ impl<'a> NetDirectory<'a> {
                 println!("[net] eth0 DHCP client started");
             }
 
-            #[cfg(not(all(feature = "board_2k1000", feature = "gmac_2k1000")))]
+            #[cfg(not(all(feature = "boot_la_uboot_dmw", feature = "gmac_2k1000")))]
             if has_real_nic {
                 // QEMU 也使用与 gmac_dhcp 相同的常驻 DHCP 上层语义。启动阶段
                 // 仍处于 IRQ-off 上下文，不在这里 poll VirtIO 并轮询 TX used ring；

@@ -27,7 +27,7 @@ const IDLE_NET_POLL_INTERVAL: usize = 64;
 /// idle 起点的空值；正常的单调微秒时间不可能达到该值。
 const IDLE_TIME_INACTIVE: u64 = u64::MAX;
 
-#[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+#[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -451,9 +451,6 @@ pub fn run_tasks() -> ! {
         // 2. Other input → stash, then feed the TTY line discipline.  The
         //    production path owns both task and epoll readiness notification.
         //
-        // On rv64 this is an SBI ecall, so do not pay it on every context
-        // switch. Blocked readers are covered by the scheduler's periodic
-        // console poll and the existing wait-IO fallback timer.
         #[cfg(target_arch = "riscv64")]
         let should_poll_console = true;
         #[cfg(not(target_arch = "riscv64"))]
@@ -672,7 +669,7 @@ fn dispatch_task(
     sched_profile: bool,
     loop_t0: u64,
 ) {
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_switch =
         cpu == crate::smp::BOOT_CPU_ID && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
     let stage_t0 = sched_profile_start(sched_profile);
@@ -705,7 +702,7 @@ fn dispatch_task(
         SCHED_SWITCHES.fetch_add(1, SchedOrdering::Relaxed);
     }
     sched_record_loop_cycles(sched_profile, loop_t0);
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_switch {
         let (resume_pc, resume_sp) = unsafe { (&*next_task_cx_ptr).bringup_resume_state() };
         println!(
@@ -730,7 +727,7 @@ fn dispatch_task(
     // current/MM/zombie 收尾，使 idle 调度上下文的执行时间不会丢失。
     task_state.begin_idle_time();
     finish_current_switch_out(cpu);
-    #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+    #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     if trace_first_switch {
         println!("[bringup][sched:02] first init context returned to idle scheduler");
     }

@@ -1,5 +1,14 @@
 use super::common::*;
 
+const FIFREEZE: u32 = 0xc004_5877;
+const FITHAW: u32 = 0xc004_5878;
+const FIFREEZE_LEGACY: u32 = 0x5878;
+const FITHAW_LEGACY: u32 = 0x5879;
+const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+const FS_APPEND_FL: u32 = 0x0000_0020;
+const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.get_user_token();
@@ -13,6 +22,63 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
     drop(fd_table);
     if is_path_fd(&file) {
         return EBADF;
+    }
+
+    if matches!(cmd, FIFREEZE | FITHAW | FIFREEZE_LEGACY | FITHAW_LEGACY)
+        && file.file_type() == crate::fs::vfs::FileType::File
+    {
+        return 0;
+    }
+
+    if file.file_type() == crate::fs::vfs::FileType::File {
+        match cmd {
+            FS_IOC_GETFLAGS => {
+                let metadata = match file.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) => return -(error as isize),
+                };
+                let mut flags = 0u32;
+                if metadata
+                    .flags
+                    .contains(crate::fs::vfs::InodeFlags::S_APPEND)
+                {
+                    flags |= FS_APPEND_FL;
+                }
+                if metadata
+                    .flags
+                    .contains(crate::fs::vfs::InodeFlags::S_IMMUTABLE)
+                {
+                    flags |= FS_IMMUTABLE_FL;
+                }
+                if crate::mm::copy_to_user(token, &flags, arg as *mut u32).is_err() {
+                    return EFAULT;
+                }
+                return 0;
+            }
+            FS_IOC_SETFLAGS => {
+                let flags = match crate::mm::get_from_user(token, arg as *const u32) {
+                    Ok(input) => input,
+                    Err(_) => return EFAULT,
+                };
+                let mut metadata = match file.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) => return -(error as isize),
+                };
+                metadata.flags.set(
+                    crate::fs::vfs::InodeFlags::S_APPEND,
+                    flags & FS_APPEND_FL != 0,
+                );
+                metadata.flags.set(
+                    crate::fs::vfs::InodeFlags::S_IMMUTABLE,
+                    flags & FS_IMMUTABLE_FL != 0,
+                );
+                return match file.inode.set_metadata(&metadata) {
+                    Ok(()) => 0,
+                    Err(error) => -(error as isize),
+                };
+            }
+            _ => {}
+        }
     }
 
     if cmd == FIONREAD {

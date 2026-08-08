@@ -1,8 +1,0 @@
-make -f make/rv64.mk ktest-run
-rv64 exit=0
-make -f make/la64.mk ktest-run
-la64 exit=2
-make -f make/la64.mk ktest-run
-la64 exit=0
-make -f make/rv64.mk ktest-run (post user asset path repair)
-rv64 post-repair exit=0

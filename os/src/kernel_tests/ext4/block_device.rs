@@ -76,20 +76,25 @@ pub(super) fn test_memblk_read_write() -> Result<(), &'static str> {
     for (index, byte) in pattern.iter_mut().enumerate() {
         *byte = (index % 256) as u8;
     }
-    dev.write_block(0, &pattern);
+    dev.write_block(0, &pattern)
+        .map_err(|_| "block 0 write failed")?;
     let mut actual = [0u8; BLOCK_SZ];
-    dev.read_block(0, &mut actual);
+    dev.read_block(0, &mut actual)
+        .map_err(|_| "block 0 read failed")?;
     if actual != pattern {
         return Err("block 0: read data does not match written data");
     }
 
     let second = [0xabu8; BLOCK_SZ];
-    dev.write_block(1, &second);
-    dev.read_block(1, &mut actual);
+    dev.write_block(1, &second)
+        .map_err(|_| "block 1 write failed")?;
+    dev.read_block(1, &mut actual)
+        .map_err(|_| "block 1 read failed")?;
     if actual != second {
         return Err("block 1: read data does not match written data");
     }
-    dev.read_block(0, &mut actual);
+    dev.read_block(0, &mut actual)
+        .map_err(|_| "block 0 reread failed")?;
     if actual != pattern {
         return Err("block 0: data corrupted after writing block 1");
     }
@@ -105,15 +110,23 @@ pub(super) fn test_memblk_isolation() -> Result<(), &'static str> {
     ));
     let first_data = [0x11u8; BLOCK_SZ];
     let second_data = [0x22u8; BLOCK_SZ];
-    first.write_block(0, &first_data);
-    second.write_block(0, &second_data);
+    first
+        .write_block(0, &first_data)
+        .map_err(|_| "first write failed")?;
+    second
+        .write_block(0, &second_data)
+        .map_err(|_| "second write failed")?;
 
     let mut actual = [0u8; BLOCK_SZ];
-    first.read_block(0, &mut actual);
+    first
+        .read_block(0, &mut actual)
+        .map_err(|_| "first read failed")?;
     if actual != first_data {
         return Err("first device leaked data or lost its write");
     }
-    second.read_block(0, &mut actual);
+    second
+        .read_block(0, &mut actual)
+        .map_err(|_| "second read failed")?;
     if actual != second_data {
         return Err("second device leaked data or lost its write");
     }

@@ -17,6 +17,12 @@ const MAX_CPUS: usize = 8;
 unsafe extern "C" fn _start() -> ! {
     naked_asm!(
             r"
+            # Save firmware handoff registers BEFORE DMW setup and csrrd.
+            la.global   $t0, {raw_hart_id}
+            st.d        $a0, $t0, 0
+            la.global   $t0, {raw_dtb_paddr}
+            st.d        $a1, $t0, 0
+            # Original DMW and boot sequence.
             # 0x180 + n 为 DMWn 寄存器位置
             ori         $t0, $zero, 0x11    # 配置 CSR_DMWn_PLV0
             # lu52i.d     $t0, $t0, -2048     # UC Uncached, PLV0
@@ -53,6 +59,8 @@ unsafe extern "C" fn _start() -> ! {
             b           2b
             ",
             max_cpus = const MAX_CPUS,
+            raw_hart_id = sym crate::hal::boot::RAW_HART_ID,
+            raw_dtb_paddr = sym crate::hal::boot::RAW_DTB_PADDR,
             boot_stack_size = const BOOT_STACK_SIZE,
             boot_stack = sym BOOT_STACK,
             entry = sym crate::rust_main,

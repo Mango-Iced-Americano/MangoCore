@@ -426,6 +426,10 @@ pub trait Socket: Send + Sync {
     fn try_connect(&self) -> Result<isize, SyscallErr> {
         Err(SyscallErr::EOPNOTSUPP)
     }
+    /// Check connection state without polling. Safe inside a waitqueue condition closure.
+    fn try_connect_without_poll(&self) -> Result<isize, SyscallErr> {
+        self.try_connect()
+    }
     /// 读取并清除 socket 的待处理错误（用于 getsockopt(SO_ERROR)）
     fn take_error(&self) -> Option<SyscallErr> {
         None
@@ -491,10 +495,26 @@ pub trait Socket: Send + Sync {
         Ok((n, None))
     }
 
+    /// Receive one message without polling. Safe inside a waitqueue condition closure.
+    fn try_recvmsg_without_poll(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        self.try_recvmsg(buf)
+    }
+
     /// MSG_PEEK: 查看 recv 队列头部数据但不消费。
     /// 默认委托给 try_recvmsg()（会消费）；支持 peek 的 socket 类型应覆写。
     fn try_peek_recvmsg(&self, buf: &mut [u8]) -> Result<(isize, Option<Endpoint>), SyscallErr> {
         self.try_recvmsg(buf)
+    }
+
+    /// Peek one message without polling. Safe inside a waitqueue condition closure.
+    fn try_peek_recvmsg_without_poll(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(isize, Option<Endpoint>), SyscallErr> {
+        self.try_peek_recvmsg(buf)
     }
 
     /// 尝试发送消息（sendmsg 用）。
@@ -510,18 +530,36 @@ pub trait Socket: Send + Sync {
         self.try_send(buf, _flags)
     }
 
+    /// Send one message without polling. Safe inside a waitqueue condition closure.
+    fn try_sendmsg_without_poll(
+        &self,
+        buf: &[u8],
+        dest: Option<Endpoint>,
+        flags: MsgFlags,
+    ) -> Result<isize, SyscallErr> {
+        self.try_sendmsg(buf, dest, flags)
+    }
+
     /// 获取最近一次接收到的源地址（仅 UDP 有意义）。
     fn last_recv_addr(&self) -> Option<Endpoint> {
         None
     }
 
-    /// 尝试接收数据，不阻塞。
-    /// 不会调用 poll、不会睡眠、不会调度。成功时返回收到的字节数 (isize)。
+    /// 尝试接收数据，不阻塞。成功时返回收到的字节数 (isize)。
     fn try_recv(&self, buf: &mut [u8]) -> Result<isize, SyscallErr>;
 
-    /// 尝试发送数据，不阻塞。
-    /// 不会调用 poll、不会睡眠、不会调度。成功时返回发送的字节数 (isize)。
+    /// Receive one buffer without polling. Safe inside a waitqueue condition closure.
+    fn try_recv_without_poll(&self, buf: &mut [u8]) -> Result<isize, SyscallErr> {
+        self.try_recv(buf)
+    }
+
+    /// 尝试发送数据，不阻塞。成功时返回发送的字节数 (isize)。
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr>;
+
+    /// Send one buffer without polling. Safe inside a waitqueue condition closure.
+    fn try_send_without_poll(&self, buf: &[u8], flags: MsgFlags) -> Result<isize, SyscallErr> {
+        self.try_send(buf, flags)
+    }
 
     /// 零拷贝接收: 直接从用户态 UserBuffer 接收，non-blocking 路径使用。
     fn try_recv_user(
@@ -1031,6 +1069,26 @@ pub fn wake_tcp_waiters() {
             }
         }
     }
+}
+
+/// After smoltcp advances, wake UDP writers whose transport buffer regained
+/// capacity. UDP receive delivery wakes readers directly in `dispatch_udp_packets`.
+pub fn wake_udp_waiters() {
+    let sockets: Vec<Arc<UdpSocket>> = UDP_SOCKETS
+        .lock()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect();
+    for socket in &sockets {
+        if socket.send_ready() {
+            if let Some(wq) = socket.send_event_queue() {
+                wq.notify_events_at_most(EPollEvent::EPOLLOUT | EPollEvent::EPOLLWRNORM, 1);
+            }
+        }
+    }
+    UDP_SOCKETS
+        .lock()
+        .retain(|socket| socket.strong_count() > 0);
 }
 
 /// Unconditional listener-only accept scan. Called after every poll cycle,

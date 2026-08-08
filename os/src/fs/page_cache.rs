@@ -696,11 +696,22 @@ pub struct PageCache {
     /// Producers use it to avoid taking the queue lock on uncontended writes.
     state_waiter_count: AtomicUsize,
     state_waiters: Mutex<WaitQueue>,
+    /// Write-balance suppression flag, set by `write_without_balance`.
+    suppress_balance: AtomicBool,
 }
 
 struct PageCacheFaultWait {
     cache: Arc<PageCache>,
     page_index: usize,
+}
+
+/// 写入路径各阶段（lookup/lease/copy/commit）的周期累计，用于 perf 分阶段计时。
+#[derive(Default)]
+struct WriteStageCycles {
+    lookup: usize,
+    lease: usize,
+    copy: usize,
+    commit: usize,
 }
 
 enum WriteAttemptError {
@@ -777,6 +788,7 @@ impl PageCache {
             state_wait_generation: AtomicUsize::new(0),
             state_waiter_count: AtomicUsize::new(0),
             state_waiters: Mutex::new(WaitQueue::new()),
+            suppress_balance: AtomicBool::new(false),
         });
         register_page_cache(&pc);
         pc
@@ -1782,15 +1794,100 @@ impl PageCache {
         src: &[u8],
         old_size: usize,
     ) -> Result<usize, SyscallErr> {
+        self.write_with_after_copy(offset, src, Some(old_size), |_| {})
+    }
+
+    /// 从指定偏移量写入数据。
+    ///
+    /// `old_file_size`: 旧文件大小，用于判断页面是否超出 EOF 以跳过不必要的后端读取。
+    pub fn write(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.write_with_after_copy(offset, buf, old_file_size, |_| {})
+    }
+
+    /// 从指定偏移量写入数据，并在所有数据及有效位发布后执行回调。
+    ///
+    /// `after_copy` 仅在成功写入非空缓冲区后调用一次，且在脏页节流之前。
+    pub(crate) fn write_with_after_copy<F>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        after_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize),
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), after_copy)
+    }
+
+    /// Test-only seam which runs after page populate/lease acquisition but
+    /// before payload bytes are copied. 失败时释放已获取的写租约。
+    pub(crate) fn write_with_before_copy<F>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: F,
+    ) -> Result<usize, SyscallErr>
+    where
+        F: FnOnce(usize) -> Result<(), SyscallErr>,
+    {
+        self.write_with_copy_callbacks(offset, buf, old_file_size, before_copy, |_| {})
+    }
+
+    /// Write data without triggering global dirty-page balancing.
+    pub fn write_without_balance(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.suppress_balance.store(true, Ordering::Relaxed);
+        let result =
+            self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), |_| {});
+        self.suppress_balance.store(false, Ordering::Relaxed);
+        result
+    }
+
+    /// 写入口的统一外壳：持 `op_gate.read()` 调用 `write_kernel_body`，租约竞争时
+    /// 通过 WaitQueue 睡眠重试（不自旋）。`before_copy` 在页面 populate/租约获取
+    /// 之后、字节复制之前执行；`after_copy` 在所有租约 commit 之后执行。
+    ///
+    /// 两个回调都只在对应的成功路径上触发一次；Busy 重试发生在回调触发之前，
+    /// 因此用 `Option` 持有 `FnOnce` 不会跨重试被重复消费。
+    fn write_with_copy_callbacks<BeforeCopy, AfterCopy>(
+        &self,
+        offset: usize,
+        buf: &[u8],
+        old_file_size: Option<usize>,
+        before_copy: BeforeCopy,
+        after_copy: AfterCopy,
+    ) -> Result<usize, SyscallErr>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+        AfterCopy: FnOnce(usize),
+    {
+        let mut before_copy = Some(before_copy);
+        let mut after_copy = Some(after_copy);
         loop {
             let op = self.op_gate.read();
-            match self.write_kernel_body(offset, src, Some(old_size)) {
+            match self.write_kernel_body(offset, buf, old_file_size, &mut before_copy) {
                 Ok(written) => {
                     drop(op);
                     if written != 0 {
                         self.notify_state_progress();
                     }
-                    balance_dirty_pages();
+                    if let Some(cb) = after_copy.take() {
+                        cb(written);
+                    }
+                    if !self.suppress_balance.load(Ordering::Relaxed) {
+                        balance_dirty_pages();
+                    }
                     return Ok(written);
                 }
                 Err(WriteAttemptError::Busy(entry)) => {
@@ -1809,13 +1906,17 @@ impl PageCache {
         }
     }
 
-    /// `write_kernel` 的锁内实现；调用者已经持有 `op_gate.read()`。
-    fn write_kernel_body(
+    /// `write_with_copy_callbacks` 的锁内实现；调用者已经持有 `op_gate.read()`。
+    fn write_kernel_body<BeforeCopy>(
         &self,
         offset: usize,
         buf: &[u8],
         old_file_size: Option<usize>,
-    ) -> Result<usize, WriteAttemptError> {
+        before_copy: &mut Option<BeforeCopy>,
+    ) -> Result<usize, WriteAttemptError>
+    where
+        BeforeCopy: FnOnce(usize) -> Result<(), SyscallErr>,
+    {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         if buf.is_empty() {
             perf::record_pc_write(
@@ -1828,6 +1929,7 @@ impl PageCache {
 
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (offset + buf.len() - 1) >> PAGE_SIZE_BITS;
+        let mut stages = WriteStageCycles::default();
 
         // Single-page fast path: bypass Vec<CopyItem> construction
         if start_page == end_page {
@@ -1838,17 +1940,27 @@ impl PageCache {
             let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry =
                 self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
+            let lease_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let was_dirty = entry
                 .try_lock_for_write()?
                 .ok_or_else(|| WriteAttemptError::Busy(entry.clone()))?;
-            perf::record_pc_write_lookup(
+            stages.lookup = stages.lookup.wrapping_add(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
             );
+            stages.lease = stages.lease.wrapping_add(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lease_start),
+            );
+            if let Some(cb) = before_copy.take() {
+                if let Err(error) = cb(sub_len) {
+                    entry.abort_write();
+                    return Err(WriteAttemptError::Error(error));
+                }
+            }
             let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             entry.with_bytes_mut(|dst| {
                 dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
             });
-            perf::record_pc_write_copy(
+            stages.copy = stages.copy.wrapping_add(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
             );
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
@@ -1856,12 +1968,13 @@ impl PageCache {
             if entry.commit_write() && !was_dirty {
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
             }
-            perf::record_pc_write_commit(
+            stages.commit = stages.commit.wrapping_add(
                 perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(commit_start),
             );
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
             }
+            self.record_write_stages(&stages);
             perf::record_pc_write(
                 1,
                 full_page_overwrite,
@@ -1884,6 +1997,7 @@ impl PageCache {
         let mut any_full_overwrite = false;
 
         let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+        let mut lease_cycles = 0usize;
         for page_index in start_page..=end_page {
             let page_start = page_index << PAGE_SIZE_BITS;
             let page_end = page_start + PAGE_SIZE;
@@ -1914,6 +2028,7 @@ impl PageCache {
                     return Err(WriteAttemptError::Error(error));
                 }
             };
+            let lease_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let was_dirty = match entry.try_lock_for_write() {
                 Ok(Some(was_dirty)) => was_dirty,
                 Ok(None) => {
@@ -1929,6 +2044,9 @@ impl PageCache {
                     return Err(WriteAttemptError::Error(error));
                 }
             };
+            lease_cycles = lease_cycles.wrapping_add(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lease_start),
+            );
             copies.push(CopyItem {
                 entry,
                 page_offset,
@@ -1938,9 +2056,18 @@ impl PageCache {
             });
             total_written += sub_len;
         }
-        perf::record_pc_write_lookup(
+        stages.lookup = stages.lookup.wrapping_add(
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
         );
+        stages.lease = stages.lease.wrapping_add(lease_cycles);
+        if let Some(cb) = before_copy.take() {
+            if let Err(error) = cb(total_written) {
+                for item in &copies {
+                    item.entry.abort_write();
+                }
+                return Err(WriteAttemptError::Error(error));
+            }
+        }
 
         // Phase 2: 写入数据（无锁）
         let mut src_offset = 0;
@@ -1967,10 +2094,11 @@ impl PageCache {
             }
             src_offset += item.sub_len;
         }
-        perf::record_pc_write_copy(
+        stages.copy = stages.copy.wrapping_add(
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
         );
-        perf::record_pc_write_commit(commit_cycles);
+        stages.commit = stages.commit.wrapping_add(commit_cycles);
+        self.record_write_stages(&stages);
 
         perf::record_pc_write(
             pages,
@@ -1978,6 +2106,14 @@ impl PageCache {
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(_t0),
         );
         Ok(total_written)
+    }
+
+    /// 把 WriteStage 分阶段计数发布到现有 smp 侧 perf 计数器。
+    /// lease 阶段并入 lookup（smp 的 lookup 已包含租约获取语义）。
+    fn record_write_stages(&self, stages: &WriteStageCycles) {
+        perf::record_pc_write_lookup(stages.lookup.wrapping_add(stages.lease));
+        perf::record_pc_write_copy(stages.copy);
+        perf::record_pc_write_commit(stages.commit);
     }
 
     // ── UserBuffer 读写 ──────────────────────────────────────────────
@@ -2324,6 +2460,27 @@ impl PageCache {
             }
         }
         Ok(total_written)
+    }
+
+    /// develop 命名别名：直接把 PageCache 页面复制到用户缓冲区。
+    pub fn read_user(
+        &self,
+        offset: usize,
+        len: usize,
+        dst: &mut crate::mm::UserBuffer,
+    ) -> Result<usize, SyscallErr> {
+        self.read_at_user(offset, len, dst)
+    }
+
+    /// develop 命名别名：直接从用户缓冲区复制到 PageCache 页面。
+    pub fn write_user(
+        &self,
+        offset: usize,
+        len: usize,
+        src: &crate::mm::UserBuffer,
+        old_file_size: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        self.write_at_user(offset, len, src, old_file_size.unwrap_or(0))
     }
 
     // ── 顺序读预取 (readahead) ─────────────────────────────────────────

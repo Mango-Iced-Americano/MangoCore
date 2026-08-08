@@ -1,11 +1,13 @@
 //! RISC-V HAL 后端。
 //!
-//! 包含 QEMU/K210/FU740/VisionFive2 配置、SV39 页表、trap、SBI、时钟和上下文切换实现。
+//! 包含统一 FDT 启动配置（与 SMP 并发基础设施）、SV39 页表、trap、SBI、
+//! 时钟和上下文切换实现。
 
 use core::arch::naked_asm;
 
 pub mod config;
 pub mod kern_stack;
+pub mod reset;
 pub mod sbi;
 pub mod sv39;
 pub mod switch;
@@ -14,13 +16,6 @@ pub mod time;
 pub mod trap;
 
 pub use kern_stack::reclaim_retired_kernel_stacks;
-
-#[cfg(feature = "board_rvqemu")]
-#[path = "../../platform/riscv/qemu.rs"]
-pub mod rv_board;
-#[cfg(feature = "board_vf2")]
-#[path = "../../platform/riscv/vf2.rs"]
-pub mod rv_board;
 
 pub fn machine_init() {
     trap::init();

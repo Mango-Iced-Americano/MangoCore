@@ -1,6 +1,6 @@
-# rv64 PCI ECAM 未映射导致启动崩溃
+# RV64 PCI ECAM/BAR 未映射导致启动崩溃（已修复）
 
-## 触发条件
+## 触发条件（历史）
 
 将 rv64 `BLK_MODE` 从 `virt` 切换到 `virt_pci`，QEMU 设备从 `virtio-blk-device` 切换为 `virtio-blk-pci`，内核在 PCI 枚举阶段崩溃并重启：
 
@@ -14,7 +14,9 @@
 
 ## 根因
 
-`kernel_space.rs` 在初始化内核页表时遍历 `crate::hal::MMIO` 常量来建立恒等映射，而该常量定义在 `os/src/hal/platform/riscv/qemu.rs`，**只包含 UART、virtio-mmio、PLIC，缺少 PCI ECAM 和 PCI BAR 窗口**：
+旧实现的预堆 FDT 解析只收集节点 `reg`，而 PCI host 的 BAR MMIO window 存在于 `ranges`。因此即使 host ECAM `reg` 可见，驱动为 VirtIO PCI BAR 分配并访问的 memory range 仍可能没有恒等映射；SV39 首次访问会触发 page fault。
+
+同时，RV64 驱动将 ECAM 写死为 `0x3000_0000`，这与 firmware 描述平台资源的设计不一致。以下旧版常量列表说明了当时的症状，但不再是修复方式：
 
 ```rust
 // os/src/hal/platform/riscv/qemu.rs
@@ -28,39 +30,36 @@ pub const MMIO: &[(usize, usize)] = &[
 ];
 ```
 
-`MmioCam::new(PCI_ECAM_BASE)` 使用 `0x3000_0000` 作为虚拟地址指针，但由于该地址未映射 → 第一次 PCI config read 触发 page fault → 内核崩溃。
+`MmioCam::new()` 过去使用硬编码 `PCI_ECAM_BASE` 作为虚拟地址指针；没有对应映射时，第一次 PCI config read 会触发 page fault 并重启。
 
 **为什么 `.toml` 配置里有但实际没映射？** `riscv64-qemu-virt.toml` 中的 `mmio-regions` 字段定义了 QEMU 设备树的布局，但内核实际使用的 `MMIO` 常量是独立硬编码在平台文件中的，并非从 toml 动态加载。
 
 **为什么 la64 没问题？** La64 使用 DMW（Direct Mapping Window）直接映射了全部物理地址空间，不依赖 `MMIO` 常量列表。RV64 使用 SV39 页表，需要显式映射每个区域。
 
-## 影响
-
-PCI 改动仅为基础设施（已提交到 `perf/fs` 分支），`rv64.mk` 始终保持 `BLK_MODE := virt`（MMIO）。**所有基准测试均在 MMIO 模式下运行，无正确性退化。**
-
 ## 修复
 
-在 `os/src/hal/platform/riscv/qemu.rs` 的 `MMIO` 数组中添加：
+1. `parse_pci_mmio_ranges()` 在预堆阶段严格解析 PCI `ranges` 的 28-byte QEMU entry，仅接纳 memory space、非零且不溢出的范围，并写入 early MMIO buffer。
+2. 后堆 `resolve_pci_host()` 从 enabled/valid `pci-host-ecam-generic` 节点解析 ECAM `reg` 与 memory `ranges`，构造 `PciHost`。
+3. RV64 `pci_ecam_base()` 优先读取 `PlatformInfo::pci_host()`；仅 FDT 未提供可用 host 时 warning 并回退到 `0x3000_0000`。
 
-```rust
-(0x3000_0000, 0x1000_0000), // PCIe ECAM
-(0x4000_0000, 0x4000_0000), // PCIe 32-bit MMIO BAR window
-```
+这项修复没有修改 `MMAP_BASE` 或其他地址布局常量，也没有改变 LA64 的静态 PCI 路径。
 
 ## 验证
 
-- 添加映射后 rv64 QEMU 使用 `virtio-blk-pci` 应能正常启动
-- 需同时添加 `-no-reboot` 到 QEMU 参数以捕获首次 panic 信息
+- `make kernel ARCH=rv64 PROFILE=normal` ✅
+- `make kernel ARCH=la64 PROFILE=normal` ✅
+- `make test ARCH=rv64 PROFILE=regression` ✅（`=== REGRESSION PASS ===`）
+- `timeout --foreground 90 make run ARCH=rv64 PROFILE=normal BLK_MODE=virt_pci` ✅（发现 VirtIO PCI block device）
 
 ## 相关文件
 
-- `os/src/hal/platform/riscv/qemu.rs` — MMIO 常量定义（需修改）
-- `os/src/mm/kernel_space.rs:219-226` — MMIO 恒等映射逻辑
-- `os/src/drivers/block/virtio_blk_pci.rs:27-30` — PCI_ECAM_BASE cfg 选择
-- `os/src/hal/configs/riscv64-qemu-virt.toml:56-62` — .toml 中的 PCI MMIO 声明（仅供参考，非实际映射来源）
+- `os/src/hal/firmware/fdt.rs` — PCI `ranges` early mapping 和 post-heap host 解析
+- `os/src/hal/platform/info.rs` — `PciHost` 与 `PlatformInfo::pci_host()`
+- `os/src/drivers/block/virtio_blk_pci.rs` — FDT ECAM 选择与 warning-only fallback
+- `os/src/kernel_tests/platform_fdt_snapshot.rs` — QEMU PCI host snapshot test
 
 ## 归类
 
-- **根因**: PMM / 页表映射缺失
-- **严重度**: 功能不可用（实验性特性，未在生产启用）
-- **修复难度**: Low（加 2 行常量）
+- **根因**: PCI `ranges` 未纳入预堆 MMIO 映射，且 RV64 ECAM 基址硬编码
+- **严重度**: PCI VirtIO 路径不可用
+- **修复状态**: 已修复；验证证据见 `docs/Work_Log/evidence/2026-07-31/`

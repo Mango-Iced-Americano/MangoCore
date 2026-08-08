@@ -43,7 +43,6 @@ use super::{
 use crate::fs::page_cache::{Ext4PageCacheBackend, PageCache as NewPageCache, PageCacheBackend};
 
 // use crate::timer::get_time;
-// use crate::hal::arch::riscv::rv_board::CLOCK_FREQ;
 
 // 可能后续会用到？
 pub enum ExtType {

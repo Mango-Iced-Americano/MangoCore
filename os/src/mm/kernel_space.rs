@@ -15,7 +15,6 @@ use super::{
     VPNRange, VirtAddr, VirtPageNum,
 };
 use crate::config::*;
-use crate::hal::MMIO;
 use crate::should_map_trampoline;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -46,6 +45,16 @@ lazy_static! {
 /// Return the root PPN of kernel space
 pub fn kernel_token() -> usize {
     KERNEL_SPACE.lock().token()
+}
+
+#[cfg(target_arch = "riscv64")]
+pub const fn kernel_program_base() -> usize {
+    crate::config::KERNEL_PROGRAM_BASE
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+pub const fn kernel_program_base() -> usize {
+    MMAP_BASE
 }
 
 pub struct KernelSpace<T: PageTable> {
@@ -169,14 +178,39 @@ impl<T: PageTable> KernelSpace<T> {
             kernel_space.map_trampoline();
         }
         // map kernel sections
-        boot_trace!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        boot_trace!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        boot_trace!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        let stext = stext as *const () as usize;
+        let etext = etext as *const () as usize;
+        let srodata = srodata as *const () as usize;
+        let erodata = erodata as *const () as usize;
+        let sdata = sdata as *const () as usize;
+        let edata = edata as *const () as usize;
+        let sbss_with_stack = sbss_with_stack as *const () as usize;
+        let ebss = ebss as *const () as usize;
+        let ekernel = ekernel as *const () as usize;
+        boot_trace!(".text [{:#x}, {:#x})", stext, etext);
+        boot_trace!(".rodata [{:#x}, {:#x})", srodata, erodata);
+        boot_trace!(".data [{:#x}, {:#x})", sdata, edata);
         boot_trace!(
             ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize,
-            ebss as usize
+            sbss_with_stack,
+            ebss
         );
+        macro_rules! kernel_map {
+            ($begin:expr,$end:expr,$permission:expr) => {
+                KernelMapper::new(&mut kernel_space.page_table)
+                    .map_range(
+                        ($begin as usize).into(),
+                        crate::mm::PhysAddr::from(crate::hal::boot::kernel_linked_to_phys($begin as usize)).floor(),
+                        ($end as usize).into(),
+                        $permission,
+                    )
+                    .unwrap();
+            };
+            ($name:literal,$begin:expr,$end:expr,$permission:expr) => {
+                boot_trace!("mapping {}", $name);
+                kernel_map!($begin, $end, $permission);
+            };
+        }
         macro_rules! kernel_identical_map {
             ($begin:expr,$end:expr,$permission:expr) => {
                 KernelMapper::new(&mut kernel_space.page_table)
@@ -192,20 +226,20 @@ impl<T: PageTable> KernelSpace<T> {
                 kernel_identical_map!($begin, $end, $permission);
             };
         }
-        kernel_identical_map!(
+        kernel_map!(
             ".text section",
             stext,
             etext,
             MapPermission::R | MapPermission::X | MapPermission::G
         );
-        kernel_identical_map!(".rodata section", srodata, erodata, MapPermission::R); // read only section
-        kernel_identical_map!(
+        kernel_map!(".rodata section", srodata, erodata, MapPermission::R);
+        kernel_map!(
             ".data section",
             sdata,
             edata,
             MapPermission::R | MapPermission::W | MapPermission::G
         );
-        kernel_identical_map!(
+        kernel_map!(
             ".bss section",
             sbss_with_stack,
             ebss,
@@ -221,12 +255,28 @@ impl<T: PageTable> KernelSpace<T> {
         });
 
         boot_trace!("mapping memory-mapped registers");
-        for pair in MMIO {
-            kernel_identical_map!(
-                (*pair).0,
-                ((*pair).0 + (*pair).1),
-                MapPermission::R | MapPermission::W | MapPermission::G
-            );
+        for &(base, end) in crate::hal::firmware::early_mmio_ranges() {
+            for vpn in VPNRange::new(VirtAddr::from(base).floor(), VirtAddr::from(end).ceil()) {
+                if kernel_space.page_table.translate(vpn).is_none() {
+                    KernelMapper::new(&mut kernel_space.page_table)
+                        .map_identical_page(vpn, MapPermission::R | MapPermission::W | MapPermission::G)
+                        .unwrap();
+                }
+            }
+        }
+
+        // Map firmware reserved regions (DTB, initrd) as read-only.
+        // These pages are not in the frame allocator but must remain
+        // accessible for post-heap firmware description parsing.
+        for &(base, end) in crate::hal::firmware::firmware_reserved_regions() {
+            // QEMU can place the DTB entirely inside the kernel BSS. That
+            // range is already mapped above with kernel write permissions.
+            let kernel_start = crate::hal::boot::kernel_linked_to_phys(stext);
+            let kernel_end = crate::hal::boot::kernel_linked_to_phys(ekernel);
+            if kernel_start <= base && end <= kernel_end {
+                continue;
+            }
+            kernel_identical_map!(base, end, MapPermission::R | MapPermission::G);
         }
         kernel_space
     }
@@ -236,7 +286,10 @@ impl<T: PageTable> KernelSpace<T> {
         KernelMapper::new(&mut self.page_table)
             .map_page(
                 VirtAddr::from(TRAMPOLINE).into(),
-                PhysAddr::from(strampoline as usize).into(),
+                PhysAddr::from(crate::hal::boot::kernel_linked_to_phys(
+                    strampoline as *const () as usize,
+                ))
+                .into(),
                 MapPermission::R | MapPermission::X | MapPermission::G,
             )
             .unwrap();
@@ -343,7 +396,7 @@ impl<T: PageTable> KernelSpace<T> {
         // KERNEL_PROGRAM_END，就可能命中与高地址内核栈相同的低 39 位 PGDH 索引。
         // 普通区间重叠检查无法发现这种架构别名，因此必须在安装任何 PTE 前拒绝该
         // 范围。上方 checked_add 还可防止 end_vpn 回绕后绕过边界比较。
-        let arena_start = VirtAddr::from(MMAP_BASE).floor();
+        let arena_start = VirtAddr::from(kernel_program_base()).floor();
         let arena_end = VirtAddr::from(KERNEL_PROGRAM_END).floor();
         if start_vpn < arena_start || end_vpn > arena_end {
             return Err(MemoryError::BadAddress);
@@ -400,7 +453,7 @@ impl<T: PageTable> KernelSpace<T> {
     pub fn highest_addr(&self) -> VirtAddr {
         self.kernel_mappings
             .highest_program_end()
-            .unwrap_or_else(|| VirtAddr::from(MMAP_BASE))
+            .unwrap_or_else(|| VirtAddr::from(kernel_program_base()))
     }
 
     pub fn mapped_frame(&self, vpn: VirtPageNum) -> Option<Arc<FrameTracker>> {
@@ -451,9 +504,21 @@ pub(crate) fn remove_kernel_mapping_synchronized(
 #[allow(unused)]
 pub fn remap_test() {
     let kernel_space = KERNEL_SPACE.lock();
-    let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();
-    let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();
-    let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();
+    let mid_text: VirtAddr = ((
+        stext as *const () as usize
+            + etext as *const () as usize
+    ) / 2)
+        .into();
+    let mid_rodata: VirtAddr = ((
+        srodata as *const () as usize
+            + erodata as *const () as usize
+    ) / 2)
+        .into();
+    let mid_data: VirtAddr = ((
+        sdata as *const () as usize
+            + edata as *const () as usize
+    ) / 2)
+        .into();
     assert_eq!(
         kernel_space.page_table.writable(mid_text.floor()).unwrap(),
         false

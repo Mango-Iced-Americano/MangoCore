@@ -249,8 +249,13 @@ fn send_stream_chunked(
             Err(errno) => return if done > 0 { done as isize } else { errno },
         };
 
-        let send_fn =
-            || socket.try_sendmsg(&kbuf[..copied.min(accessible)], dest.clone(), msg_flags);
+        let send_fn = || {
+            socket.try_sendmsg_without_poll(
+                &kbuf[..copied.min(accessible)],
+                dest.clone(),
+                msg_flags,
+            )
+        };
 
         // Locking: `socket.send_wait_queue()` 由 socket 发送路径唤醒（发送缓冲区
         // 腾出空间时 smoltcp 调用 `dispatch()` → `wake_one_if()`）。

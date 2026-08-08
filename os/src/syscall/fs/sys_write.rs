@@ -1,6 +1,10 @@
 use super::common::*;
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
+    // Foreground split bucket (a): fd table lookup + fsize limit preparation.
+    // Recorded once per syscall just before the write dispatch, aligned with
+    // the existing pwrite boundary counters (perf_diag diagnostic only).
+    let _prep_start = crate::task::perf::perf_memory_io_time_now();
     let mut count = count.min(crate::hal::MAX_RW_COUNT);
     let task = current_task().unwrap();
     let file = {
@@ -24,6 +28,9 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     };
     let is_nonblock = file.is_nonblock();
     let token = task.get_user_token();
+    crate::task::perf::record_write_fd_prep(
+        crate::task::perf::perf_memory_io_time_now().wrapping_sub(_prep_start),
+    );
     if is_nonblock {
         write_from_user(&file, token, buf, count)
     } else if let Some(wq) = file.inode.write_wait_queue() {

@@ -24,11 +24,14 @@ use super::{
     TaskControlBlock, UtsNamespace, WaitQueue, WaitResult, INITPROC,
 };
 use crate::config::{SYSTEM_TASK_LIMIT, USER_STACK_SIZE};
-use crate::fs::vfs;
-use crate::mm::{AddressSpace, AddressSpaceInner, PageTableImpl, UserVmContext};
+use crate::mm::{AddressSpaceInner, UserVmContext};
 use crate::signal_type;
 use crate::timer::{ITimerVal, TimeSpec, TimeVal, USEC_PER_SEC};
 use crate::utils::error::SyscallErr;
+use crate::{
+    fs::{pidfd::PidFdState, vfs},
+    mm::{AddressSpace, PageTableImpl},
+};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -648,6 +651,11 @@ pub struct ProcessControlBlock {
     sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
     user_token_hint: AtomicUsize,
+    /// Weak shared state retained by all pidfds for this process.
+    ///
+    /// The PCB never owns this state strongly: a pidfd keeps it alive across
+    /// process reaping so its exit readiness remains observable.
+    pidfd_state: Mutex<Weak<PidFdState>>,
     inner: Mutex<ProcessInner>,
     signal: Mutex<ProcessSignalState>,
     shared_pending_hint: AtomicU64,
@@ -1399,6 +1407,7 @@ impl ProcessControlBlock {
             sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             user_token_hint: AtomicUsize::new(user_token),
+            pidfd_state: Mutex::new(Weak::new()),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
@@ -1617,11 +1626,21 @@ impl ProcessControlBlock {
         events
     }
 
+    /// develop 兼容别名：signalfd read/poll 动态解析同一通知域。
+    pub fn signal_event_queue(&self) -> Arc<vfs::event::EventWaitQueue> {
+        self.signalfd_events()
+    }
+
     /// 信号已经发布到权威 pending 队列后，锁外通知 signalfd 等待者重查。
     pub fn notify_signalfd(&self) {
         self.signalfd_events().notify_events_all(
             vfs::event::EPollEvent::EPOLLIN | vfs::event::EPollEvent::EPOLLRDNORM,
         );
+    }
+
+    /// develop 兼容别名：等价于 [`Self::notify_signalfd`]。
+    pub fn notify_signal_waiters(&self) {
+        self.notify_signalfd();
     }
 
     pub fn futex(&self) -> Arc<Mutex<FutexTable>> {
@@ -1931,6 +1950,31 @@ impl ProcessControlBlock {
 
     pub fn is_zombie(&self) -> bool {
         self.inner.lock().state == ProcessState::Zombie
+    }
+
+    /// Get the shared pidfd state, creating it with the current exit state.
+    ///
+    /// Holding `pidfd_state` while observing `inner.state` closes the race
+    /// between opening a pidfd and the one-time exit notification: either the
+    /// opener installs a live state before exit wakes it, or it observes zombie
+    /// state and creates an already-readable pidfd.
+    pub fn pidfd_state(&self) -> Arc<PidFdState> {
+        let mut weak_state = self.pidfd_state.lock();
+        if let Some(state) = weak_state.upgrade() {
+            return state;
+        }
+
+        let state = Arc::new(PidFdState::new(self.is_zombie()));
+        *weak_state = Arc::downgrade(&state);
+        state
+    }
+
+    /// Mark the shared pidfd state readable after this PCB becomes zombie.
+    fn notify_pidfd_exit(&self) {
+        let state = { self.pidfd_state.lock().upgrade() };
+        if let Some(state) = state {
+            state.notify_exit();
+        }
     }
 
     #[cfg(feature = "heap_trace")]
@@ -2492,6 +2536,8 @@ impl ProcessControlBlock {
         // 不能等 PCB Drop。exec 只清 POSIX timer，legacy interval timer 则保留。
         self.clear_interval_timers();
         self.clear_posix_timers();
+        // 让 pidfd 在进程进入 zombie 时立即变为可读。
+        self.notify_pidfd_exit();
         // 在 mark_zombie 之后重新获取 parent：其它 CPU 可能同时完成 reparent，
         // 因此不能沿用进入 finish_exit() 前取得的父进程快照。
         let parent_process = self.parent();

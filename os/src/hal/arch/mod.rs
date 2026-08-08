@@ -3,9 +3,9 @@
 //! 该模块按 feature 选择 RISC-V 或 LoongArch64 后端，并向 `hal/mod.rs`
 //! 提供统一的启动、页表、陷阱、时间、控制台和上下文切换接口。
 
-#[cfg(feature = "loongarch64")]
+#[cfg(target_arch = "loongarch64")]
 pub mod loongarch64;
-#[cfg(feature = "loongarch64")]
+#[cfg(target_arch = "loongarch64")]
 pub use loongarch64::{
     __switch, board,
     board::MMIO,
@@ -17,7 +17,7 @@ pub use loongarch64::{
     enable_local_timer_interrupt, enter_secondary_idle, init_kernel_mapping_metadata,
     install_cpu_local, irq_enabled, kernel_tlb_invalidate, kstack_alloc, local_irq_restore,
     local_irq_save,
-    machine_init, machine_shutdown, panic_console_write, prepare_secondary_cpu_stop,
+    machine_init, machine_shutdown, panic_console_write, prepare_secondary_cpu_stop, reboot,
     reclaim_retired_kernel_stacks, remote_user_tlb_invalidate_range, secondary_cpu_stop,
     secondary_cpu_wait, send_ipi, start_secondary_cpu, syscall_id,
     time::{
@@ -32,9 +32,9 @@ pub use loongarch64::{
     user_tlb_invalidate_range, ustack_bottom_from_tid, KernelPageTableImpl, KernelStack,
     PageTableImpl, BLOCK_SZ,
 };
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
 pub mod riscv;
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
 pub use riscv::{
     boot_cpu_park, bootstrap_init, config,
     config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
@@ -46,10 +46,12 @@ pub use riscv::{
     kern_stack::KernelStack,
     kernel_tlb_invalidate, machine_init, prepare_secondary_cpu_stop, reclaim_retired_kernel_stacks,
     remote_user_tlb_invalidate_range,
-    rv_board::MMIO,
+    reset::reboot,
+    config::MMIO,
     sbi::{
-        console_flush, console_getchar, console_putchar, console_write_bytes, irq_enabled,
-        local_irq_restore, local_irq_save, machine_shutdown, panic_console_write, set_timer,
+        configure_runtime_console, console_flush, console_getchar, console_putchar,
+        console_write_bytes, irq_enabled, local_irq_restore, local_irq_save, machine_shutdown,
+        panic_console_write, set_timer, shutdown,
     },
     secondary_cpu_stop, secondary_cpu_wait, send_ipi, start_secondary_cpu,
     sv39::tlb_invalidate,

@@ -1,7 +1,11 @@
-use super::BlockDevice;
+use super::{
+    validate_block_buffer_length, BlockDevice, BlockDeviceError, BlockDeviceNameStyle,
+    BlockDeviceResult,
+};
+use crate::hal::device::DeviceManager;
 use crate::mm::{
-    frames_alloc, frames_alloc_fresh_contiguous, kernel_token, FrameTracker, PageTable,
-    PageTableImpl, PhysAddr, VirtAddr,
+    frame_alloc, frame_dealloc, frames_alloc, kernel_token, FrameTracker, PageTable, PageTableImpl,
+    PhysAddr, PhysPageNum, StepByOne, VirtAddr,
 };
 use alloc::collections::BTreeMap;
 use alloc::{sync::Arc, vec::Vec};
@@ -21,15 +25,10 @@ use crate::hal::{
     BLOCK_SZ,
 };
 use crate::task::perf;
-use crate::drivers::block::BlockDeviceResult;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 // Multi-page DMA uses the pool for contiguity; fallback to BLOCK_SZ when pool
 // is exhausted.  See virtio_dma_pool.rs.
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
-#[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
-const VIRTIO_MMIO_BASE: usize = 0x10001000;
-const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
 
@@ -46,8 +45,12 @@ lazy_static! {
 static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 impl BlockDevice for VirtIOBlock {
+    fn name_style(&self) -> BlockDeviceNameStyle {
+        BlockDeviceNameStyle::Alphabetic("vd")
+    }
+
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
-        assert!(buf.len() % BLOCK_SZ == 0);
+        validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
 
@@ -69,9 +72,13 @@ impl BlockDevice for VirtIOBlock {
             // for share() to reconstruct a DmaReservation and consume it.
             *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
-            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
-            dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len])
-                .expect("Error when reading VirtIOBlk");
+            let first_sector = block_id
+                .checked_add(offset / BLOCK_SZ)
+                .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+            // One record per submitted VirtIO request, after any DMA fallback split.
+            perf::record_virtio_read();
+            let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
 
             // share() should have consumed the reservation. If it didn't (e.g.
             // because the virtio-drivers library split the buffer), cancel it.
@@ -79,12 +86,15 @@ impl BlockDevice for VirtIOBlock {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
             }
 
+            result.map_err(|_| BlockDeviceError::DeviceError)?;
+
             offset += chunk_len;
         }
         Ok(())
     }
+
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
-        assert!(buf.len() % BLOCK_SZ == 0);
+        validate_block_buffer_length(buf.len())?;
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
 
@@ -103,17 +113,36 @@ impl BlockDevice for VirtIOBlock {
 
             *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
-            let first_sector = (block_id + offset / BLOCK_SZ) * BLOCK_RATIO;
-            dev.write_blocks(first_sector, &buf[offset..offset + chunk_len])
-                .expect("Error when writing VirtIOBlk");
+            let first_sector = block_id
+                .checked_add(offset / BLOCK_SZ)
+                .and_then(|current_block| current_block.checked_mul(BLOCK_RATIO))
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+            // One record per submitted VirtIO request, after any DMA fallback split.
+            perf::record_virtio_write(chunk_len);
+            let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
             }
 
+            result.map_err(|_| BlockDeviceError::DeviceError)?;
+
             offset += chunk_len;
         }
         Ok(())
+    }
+
+    fn flush(&self) -> BlockDeviceResult {
+        let mut dev = self.0.lock();
+        if !dev.supports_flush() {
+            return Err(BlockDeviceError::FlushUnsupported);
+        }
+        perf::record_device_flush();
+        dev.flush().map_err(|_| BlockDeviceError::DeviceError)
+    }
+
+    fn supports_reliable_flush(&self) -> bool {
+        self.0.lock().supports_flush()
     }
 
     fn size_bytes(&self) -> Option<u64> {
@@ -121,30 +150,18 @@ impl BlockDevice for VirtIOBlock {
         let bytes = sectors.saturating_mul(512);
         Some(bytes / BLOCK_SZ as u64 * BLOCK_SZ as u64)
     }
-
-    fn flush(&self) -> BlockDeviceResult {
-        self.0.lock().flush().map_err(|err| {
-            log::error!("VirtIO block flush failed: {:?}", err);
-            crate::drivers::block::BlockDeviceError::DeviceError
-        })
-    }
-
-    fn supports_reliable_flush(&self) -> bool {
-        true
-    }
 }
 
 impl VirtIOBlock {
-    #[allow(unused)]
-    pub fn new() -> Self {
-        Self::try_new(VIRTIO0).expect("VirtIOBlock::new: no device at VIRTIO0")
-    }
-
     pub fn try_new(base_addr: usize) -> Option<Self> {
         let transport = unsafe {
             MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
         };
         if transport.device_type() != DeviceType::Block {
+            // `MmioTransport::drop` resets the device. This transport only read the
+            // immutable device ID while filtering the FDT catalogue, so it must not
+            // reset a device owned by another driver.
+            core::mem::forget(transport);
             return None;
         }
         let blk = VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(transport).ok()?;
@@ -152,26 +169,41 @@ impl VirtIOBlock {
     }
 }
 
-pub fn probe_rv64() -> [Option<alloc::sync::Arc<dyn super::BlockDevice>>; 2] {
-    use alloc::sync::Arc;
-    let d0 =
-        VirtIOBlock::try_new(VIRTIO_MMIO_BASE).map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
-    if d0.is_some() {
-        virtio_dma_pool::dma_pool_init_once();
+pub fn probe_from_device_manager(dm: &DeviceManager) -> Vec<Arc<dyn BlockDevice>> {
+    let mut devices = Vec::new();
+
+    let mut virtio_devices: Vec<_> = dm
+        .find_enabled_by_compatible("virtio,mmio")
+        .into_iter()
+        .filter(|device| device.mmio_range(0).is_some())
+        .collect();
+    virtio_devices.sort_by_key(|device| {
+        device
+            .mmio_range(0)
+            .map(|range| range.base)
+            .unwrap_or(usize::MAX)
+    });
+
+    for dev_info in virtio_devices {
+        let Some(range) = dev_info.mmio_range(0) else {
+            continue;
+        };
+        let base_addr = range.base;
+        let Some(device) = VirtIOBlock::try_new(base_addr) else {
+            continue;
+        };
+
+        if devices.is_empty() {
+            virtio_dma_pool::dma_pool_init_once();
+        }
         println!(
-            "[kernel] block device 0: official fs (MMIO {:#x})",
-            VIRTIO_MMIO_BASE
+            "[kernel] discovered VirtIO block device (MMIO {:#x})",
+            base_addr
         );
+        devices.push(Arc::new(device) as Arc<dyn BlockDevice>);
     }
-    let d1 = VirtIOBlock::try_new(VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE)
-        .map(|b| Arc::new(b) as Arc<dyn super::BlockDevice>);
-    if d1.is_some() {
-        println!(
-            "[kernel] block device 1: tools disk (MMIO {:#x})",
-            VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE
-        );
-    }
-    [d0, d1]
+
+    devices
 }
 
 pub struct VirtioHal;
@@ -286,7 +318,7 @@ unsafe impl Hal for VirtioHal {
 #[no_mangle]
 pub extern "C" fn virtio_dma_alloc(pages: usize) -> PhysAddr {
     // Use fresh contiguous allocation — bypasses recycled stack fragmentation.
-    let frames = frames_alloc_fresh_contiguous(pages)
+    let frames = crate::mm::frames_alloc_fresh_contiguous(pages)
         .expect("virtio_dma_alloc: failed to alloc contiguous fresh frames");
 
     let pa = PhysAddr::from(frames[0].ppn).0;

@@ -47,7 +47,11 @@ pub fn local_irq_save() -> bool {
     was_enabled
 }
 
-/// Return whether interrupts are currently enabled on this core.
+/// 返回当前核中断是否使能（CRMD.IE）。
+///
+/// 网络发送路径用它区分"调度器/任务上下文（中断开启，可等待 VirtIO
+/// completion 中断）"与"syscall/trap 上下文（中断关闭，等不到 completion，
+/// 必须延迟发送）"。
 pub fn irq_enabled() -> bool {
     CrMd::read().is_interrupt_enabled()
 }
@@ -89,4 +93,14 @@ pub fn machine_shutdown() -> ! {
     loop {
         unsafe { core::arch::asm!("idle 0") };
     }
+}
+
+/// 别名：统一 HAL 停机入口按 `machine_shutdown` 命名，`shutdown` 保留给
+/// develop 侧调用方使用同一实现。
+pub fn shutdown() -> ! {
+    machine_shutdown()
+}
+
+pub fn reboot() -> ! {
+    shutdown()
 }

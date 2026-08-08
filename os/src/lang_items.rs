@@ -1,6 +1,6 @@
+use crate::hal::shutdown;
 #[cfg(target_arch = "riscv64")]
 use core::fmt::Write;
-use crate::hal::shutdown;
 use core::panic::PanicInfo;
 
 #[panic_handler]
@@ -14,14 +14,14 @@ fn panic(info: &PanicInfo) -> ! {
     match info.location() {
         Some(location) => {
             println!(
-                "[kernel] panicked at '{}', {}:{}:{}",
+                "[kernel] panicked at {}: {}:{}:{}",
                 info.message(),
                 location.file(),
                 location.line(),
                 location.column()
             );
         }
-        None => println!("[kernel] panicked at '{}'", info.message()),
+        None => println!("[kernel] panicked: {}", info.message()),
     }
     crate::panic_diag::dump_panic_context();
     shutdown()

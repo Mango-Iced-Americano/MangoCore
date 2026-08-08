@@ -15,6 +15,7 @@ linker = "../scripts/loongarch64-clang-lld.sh"
 [target.riscv64gc-unknown-none-elf]
 rustflags = [
     "-Cforce-frame-pointers=yes",
+    "-Ccode-model=medium",
 ]
 
 [source.crates-io]

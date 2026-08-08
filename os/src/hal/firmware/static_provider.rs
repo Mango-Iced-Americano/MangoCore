@@ -5,7 +5,4 @@
 
 /// Re-export the fallback memory constants from the arch config module.
 /// These are used when no firmware description is available.
-pub use crate::config::{
-    FIRMWARE_RESERVED_REGIONS as FIRMWARE_RESERVED_REGIONS_FALLBACK,
-    MEMORY_REGIONS as MEMORY_REGIONS_FALLBACK,
-};
+pub use crate::config::{FIRMWARE_RESERVED_REGIONS_FALLBACK, MEMORY_REGIONS_FALLBACK};

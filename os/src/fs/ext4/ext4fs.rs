@@ -685,7 +685,11 @@ impl Ext4FileSystem {
             let blocks = self.balloc_alloc_contiguous_blocks(inode_ref, goal, run_len);
             if blocks.is_empty() {
                 let elapsed = crate::task::perf::perf_time_now().wrapping_sub(_t0);
-                crate::task::perf::record_ext4_alloc_ensure(total_lblocks, total_new_blocks, elapsed);
+                crate::task::perf::record_ext4_alloc_ensure(
+                    total_lblocks,
+                    total_new_blocks,
+                    elapsed,
+                );
                 return Err(Errno::ENOSPC as isize);
             }
 
@@ -2277,7 +2281,11 @@ impl layout::Ext4OSInode {
                     return Err(SyscallErr::EINVAL);
                 }
                 let mut dotdot_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-                if self.ext4fs.dir_find_entry(cur, "..", &mut dotdot_result).is_err() {
+                if self
+                    .ext4fs
+                    .dir_find_entry(cur, "..", &mut dotdot_result)
+                    .is_err()
+                {
                     break;
                 }
                 let parent_ino = dotdot_result.dentry.inode;

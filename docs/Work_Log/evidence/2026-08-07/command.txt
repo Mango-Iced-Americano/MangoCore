@@ -1,2 +1,0 @@
-docker compose exec -T os-dev bash -lc 'cd /app && make -C os rv64-ktest KTEST=fs_smp CORE_NUM=4 KTIMEOUT_MS=10000 KTEST_QEMU_TIMEOUT=45'
-docker compose exec -T os-dev bash -lc 'cd /app && make -C os rv64-run MODE=release LOG=warn' (bounded by host timeout 120s)

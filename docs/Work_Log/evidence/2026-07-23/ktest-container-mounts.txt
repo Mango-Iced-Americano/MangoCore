@@ -1,1 +1,0 @@
-/home/pxy/projects/MangoCore-cleanup -> /app

@@ -46,12 +46,6 @@ pub trait BlockDevice: Send + Sync + Any {
     /// non-empty multiple of [`BLOCK_SZ`].
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult;
 
-    /// Internal write entry while a byte-level RMW transaction is already locked.
-    #[doc(hidden)]
-    fn write_block_rmw_guarded(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
-        self.write_block(block_id, buf)
-    }
-
     /// Flush previously completed writes to persistent storage.
     ///
     /// A successful return guarantees durability only when

@@ -14,8 +14,10 @@ launcher 的设计。
 | x1 P1 | `disk.img` | `disk-la.img` | 项目 tools ext4 payload |
 | x1 P2 | 同一 x1 的 FAT32 分区 | 同一 x1 的 FAT32 分区 | scratch，LTP 设备合同为 `/dev/vdb2` |
 
-normal/development 与 competition 均严格使用 `x0 x1` 两盘顺序；regression 和
-ktest 是零盘 initramfs profile。不得增加永久第三盘，也不得把 x0/x1 对调。
+normal/development 与 competition 均严格使用 `x0 x1` 两盘顺序；regression 是
+零盘 initramfs profile。KTest 使用每次启动前重新格式化的独立 ext4 `x0` fixture，
+不挂载 x1，确保文件系统契约测试不会依赖可变 rootfs 镜像。不得增加永久第三盘，
+也不得把 normal/competition 的 x0/x1 对调。
 
 ## 输入来源与派生镜像
 
@@ -51,6 +53,6 @@ done
 ```
 
 该检查只读取 Make、脚本和 MBR metadata，不构建外部镜像、不启动 QEMU。它验证
-RV64/LA64 development/competition 消费者均引用角色表、x1 的 P1/P2 所有权、零盘
-profile、禁止第三盘，以及外部 x0 的不可变性。对注入 guard 的 fixture 还以
+RV64/LA64 development/competition 消费者均引用角色表、x1 的 P1/P2 所有权、regression
+零盘和 KTest 独立 ext4 fixture、禁止第三盘，以及外部 x0 的不可变性。对注入 guard 的 fixture 还以
 `cp`、`e2fsck`、`debugfs` 哨兵验证拒绝发生在任何可变操作之前。

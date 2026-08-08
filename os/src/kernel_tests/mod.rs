@@ -18,6 +18,7 @@
 //! 1. Add a test function returning `Result<(), &'static str>` in the appropriate module
 //! 2. Register it in `all_tests()` in this file
 
+pub mod platform;
 pub mod runner;
 mod probe;
 mod fs_smp_fixture;
@@ -41,16 +42,30 @@ mod kt_fs_smp;
 mod kt_net_smp;
 #[path = "fs_fat_smp.rs"]
 mod kt_fs_fat_smp;
-#[path = "ext4_another_lifetime_sync.rs"]
-mod kt_ext4_another_lifetime_sync;
 #[path = "page_cache_sync.rs"]
 mod kt_page_cache_sync;
 #[path = "ext4_another/mod.rs"]
 mod kt_ext4_another;
 
-use runner::KernelTest;
+pub(crate) mod platform_fdt_fixture;
+mod platform_fdt_snapshot;
+#[cfg(target_arch = "riscv64")]
+mod dw_mshc;
+mod platform_resources;
+
+#[path = "block_device.rs"]
+mod kt_block_device;
+#[path = "block_publication.rs"]
+mod kt_block_publication;
+#[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+#[path = "gmac.rs"]
+mod kt_gmac;
+#[path = "ext4_another_lifetime.rs"]
+mod kt_ext4_another_lifetime;
+
 use alloc::vec;
 use alloc::vec::Vec;
+use runner::KernelTest;
 use spin::Mutex;
 
 /// Global storage for ktest boot config.
@@ -70,12 +85,21 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("smp", kt_smp::tests()),
         ("mm", kt_mm::tests()),
         ("ext4", kt_ext4::tests()),
-        ("ext4_another_lifetime", kt_ext4_another_lifetime_sync::tests()),
-        ("page_cache", kt_page_cache_sync::tests()),
+        ("ext4_another_lifetime", kt_ext4_another_lifetime::tests()),
+        ("page_cache_sync", kt_page_cache_sync::tests()),
         ("ext4_another", kt_ext4_another::tests()),
         ("fs_smp", kt_fs_smp::tests()),
         ("net_smp", kt_net_smp::tests()),
         ("fs_fat_smp", kt_fs_fat_smp::tests()),
+        #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+        ("gmac", kt_gmac::tests()),
+        ("block_device", kt_block_device::tests()),
+        ("block_publication", kt_block_publication::tests()),
+        ("platform", platform::tests()),
+        ("platform_fdt_snapshot", platform_fdt_snapshot::tests()),
+        #[cfg(target_arch = "riscv64")]
+        ("dw_mshc", dw_mshc::tests()),
+        ("platform_resources", platform_resources::tests()),
     ]
 }
 

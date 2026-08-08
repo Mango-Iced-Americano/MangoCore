@@ -44,7 +44,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | 后期文档系统与评审材料 | 2026-06-28 至 2026-06-30 | Sisyphus, Oracle, Explore | `Technical-Report-MangoCore.md`、`Engineering-Casebook.md`、FS/Net/MM 文档、README、评审材料事实核查 | 生成和重构大量文档，并经多轮 Oracle fact-check 修正事实错误 |
 | LA64 mmap arena 边界与 trap-context 窗口修复 | 2026-07-21 | Sisyphus, Oracle | `USR_MMAP_END` 边界根因分析、固定映射相交检查、双架构 Docker/QEMU regression 事实核对 | 最终证据修正范围为 `[USR_MMAP_BASE, TRAP_CONTEXT_BASE)`，记录 RV64/LA64 TAP 1..6、LA64 `STATE=PASS STATUS=0`，并经 Oracle 最终验收 |
 | Canonical normal run facade | 2026-07-22 | Sisyphus, Oracle | root/OS Makefile facade 与 dry-run contract 审查 | Oracle 发现并阻止 root logo/preflight 的重复调用；修复后在 `-j8` 下保持 validation-first、一次 setup 与 legacy `comp` 隔离 |
-| 双架构 SMP idle stack | 2026-07-25 | GPT/Codex, DeepSeek | AP boot→idle 栈切换设计、ABI/内存序复核、双架构 8 核证据归纳 | AP 只在独立 idle stack 上发布 online；RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 3/3 PASS |
+| SMP 双架构 idle stack | 2026-07-25 | GPT/Codex, DeepSeek | AP boot→idle 栈切换设计、ABI/内存序复核、双架构 8 核证据归纳 | AP 只在独立 idle stack 上发布 online；RV64/LA64 `CORE_NUM=8 KTEST=smp` 均为 3/3 PASS |
 | SMP 调度所有权交接 | 2026-07-27 | GPT/Codex, DeepSeek | task 状态机收敛、切栈后 owner 交接与丢唤醒竞态复核 | 以六态原子状态机替代分散状态写入；双架构 4 核 SMP focused 测试均为 19/19 PASS |
 | SMP 本地 TLB 提交边界 | 2026-07-27 | GPT/Codex, DeepSeek | 用户 PTE 写入收口、frame 延迟释放、LA64 ASID 边界审查和双架构 Docker/QEMU 验证 | 建立 `MmuGather` LocalOnly 协议；RV64/LA64 `CORE_NUM=1 KTEST=mm KREPEAT=2` 均为 8/8 PASS，远端 shootdown 明确 NOT RUN |
 | SMP Per-CPU current 槽 | 2026-07-27 | GPT/Codex, DeepSeek | current owner 拆分、Arc/noreturn 生命周期审查、双架构 Docker/QEMU 验证 | 删除全局 PROCESSOR 与 current 裸指针；双架构 `CORE_NUM=4 KTEST=smp KREPEAT=2` 均为 19/19 PASS |
@@ -105,6 +105,10 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | develop Batch 7 procfs CPU 拓扑 | 2026-08-03 | GPT/Codex, DeepSeek | Linux procfs ABI 对照、启动门禁/平台模型审查、双架构 8 核 L4 回归 | cpuinfo/stat 输出 8 个逻辑 CPU；修复 regression PID1 缺少 procfs，双架构 8/8 |
 | RV64 全量 LTP removexattr panic 溯源 | 2026-08-06 | GPT/Codex, DeepSeek | 只读检查全量日志、xattr 调用链、vendored/upstream C 控制流和官方 LTP 行为 | 定位 `ext4_xattr_remove()` 传入未初始化 finder 的复制错误；人工复核采纳核心定因，同时纠正模型控制流文字和遗漏的 ENODATA 边界；尚未实施修复 |
 | RV64 removexattr 与 LA64 ASID rollover 修复 | 2026-08-06 | GPT/Codex, DeepSeek | 双架构根因修复、Docker 串行 8 核构建、focused QEMU 回归和只读代码审查 | RV64 musl/glibc 精确用例通过；LA64 ASID rollover ktest 通过，整组另有一个与本补丁无关的 affinity 失败；人工复核纠正模型对该失败历史和预期页权限异常的过度推断 |
+| Firmware DTB safety gate | 2026-07-28 | Oracle, Sisyphus | 固件启动参数信任边界、FDT 保留区与 2K1000 编译验证 | Oracle 指出非 RISC-V FDT 协议的 `a1` 可能为垃圾值；修复协议门控、DTB 边界校验和保留区，并在 Docker 中完成三个目标编译 |
+| VisionFive 2 watchdog reboot | 2026-08-01 | Oracle, GPT-5.6-terra | OpenSBI SRST 固件依赖审查、JH7110 reset 序列与 QEMU 回归验证 | Oracle 定位 U-Boot 关闭 I2C5 后 OpenSBI PMIC cold reboot 会永久挂起；实现内核直接 watchdog reset，保留 QEMU shutdown |
+| another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |
+| another_ext4 close 持久化语义 ktest | 2026-08-01 | Oracle, GPT-5.6-terra | close 不作为 durability barrier 的掉电重启、fsync/global-sync 与 clean-unmount 用例设计 | Oracle 约束可判定边界：close 后不观察 raw 介质；仅 fsync/sync/on_umount 后要求 raw remount；双架构 74/74 ktest 通过 |
 
 ## 4. 详细使用场景
 
@@ -1508,6 +1512,40 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
   相邻语义。当前只完成定因，没有将一行候选 patch 包装成已验证修复。
 - Verification: DeepSeek 审查前后工作树 status/tracked-diff 指纹一致；未运行新构建或
   QEMU，原全量结果继续标记为 red/partial。
+### Case 66: VisionFive 2 firmware-independent reboot
+
+- Evidence: `docs/Work_Log/2026-08-01.md`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: VF2 上 OpenSBI 的 SRST cold reboot 依赖 AXP15060 PMIC I2C；U-Boot 在内核交接前关闭 I2C5 时，固件读取 PMIC 电源寄存器失败并永久挂起。
+- AI contribution: Oracle 给出 JH7110 SYSCRG/WDT 时钟、reset、解锁、两阶段 watchdog 复位序列，并要求实板直连 MMIO、QEMU 保留 SBI/shutdown 行为。
+- Human action: 在 RV64 HAL 增加 platform-gated watchdog reboot route，并复核 pre-heap FDT 非 RAM `reg` 映射与导出层。
+- Verification: Docker 中串行 RV64/LA64 kernel build、RV64 regression（`[L4 REGRESSION RESULT: PASS]`）和 `KTEST=platform`（7/7）通过；QEMU 均打印 shutdown 标记。未部署实板，未将 QEMU 结果外推为实板复位验证。
+### Case 67: another_ext4 小 pwrite 写合并实验及回退
+
+- Evidence: `docs/Work_Log/2026-07-30.md`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: 评估 1 KiB 顺序 pwrite 的小写合并、dirty-cache retain 热路径和 PageCache 原子 radix 目录；该组合没有成为最终实现。
+- AI contribution: Oracle 给出一页上限顺序写合并、原子 pin 及目录并发优化建议；GPT-5.6-terra 协助执行回退、证据归档和双架构验证。
+- Human action: 删除 inode lifetime 缓冲、write-through/flush 边界、一次性 pin 和原子 radix 目录；恢复安全的 `PageEntries` mutexed 向量目录与逐次 dirty-cache 保留，同时保留 UserBuffer 直连、时间戳缓存及其他已批准优化。
+- Verification: Docker 内 RV64→LA64 串行 kernel build、RV64 ktest、四格 lint、两架构各 5 轮 QEMU 基准及 LTP 输出归档于 `docs/Work_Log/evidence/2026-07-30/`；不将该实验或回退后的基准表述为吞吐提升。
+
+### Case 68: read_at_user 多页回归的部分回退与事实校正
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: 单页 `read_at_user` 直连收益存在，但多页 `PageCache::read_user` 对每个缓存页重复从 UserBuffer 首 segment 扫描，原始 5+5 报告还将不存在于日志的 126–131k 数值误写为 +16% 验收通过。
+- AI contribution: Oracle 将多页复杂度定位为 O(pages × segments)，要求保留单页直连、跨文件页回退既有 kbuf 路径，并以状态化顺序 cursor 修复 PageCache 多页复制；同时要求按每日志四次 hot pass 做 N 对 N 比较。
+- Human action: 实现跨页 `ENOSYS` fallback、`UserBufferWriteCursor` 与边界 ktest，撤回原始错误结论，并以同一源码的临时 `ENOSYS` baseline 执行严格交错 QEMU 5+5。
+- Verification: Docker RV64→LA64 build、lint、双架构 71/71 ktest 均通过；受控 A/B 的 1KiB read/reread 中位数为 +7.33%/+6.32%，256KiB 为 +0.41%/+0.09%，不再系统性回归。
+
+### Case 69: another_ext4 close 持久化语义掉电重启 ktest
+
+- Evidence: `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/power-cut-ktest-20260801T000000Z/`。
+- AI tools: Oracle, GPT-5.6-terra。
+- Problem: `Ext4Inode::close()` 去除同步后，需要区分 close 的非保证性介质可见性，与 fsync/global sync/clean unmount 的必须持久化边界。
+- AI contribution: Oracle 规定 barrier 外层的可 arm flush failure、raw remount 前销毁旧 wrapper 对象图、未同步覆盖仅接受完整 OLD/NEW，以及在 writable remount 前直接读取 raw superblock 的 RECOVER 位。
+- Human action: 增加可观测 barrier、可 arm flush-failure wrapper、两项新增和一项更新的 P0 ktest，以及 P1 clean-unmount ktest。
+- Verification: Docker 中 RV64→LA64 serial kernel build、四格 lint、RV64/LA64 ktest 均通过 74/74；未将 close 后 raw state 作为断言。
 
 ## 6. 质量控制与验证方式
 
@@ -1543,6 +1581,9 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-06-29 | `fd735048` | Judge docs | `Ultraworked with Sisyphus`; `Co-authored-by: Sisyphus` | 新增 Technical Report 和 Engineering Casebook |
 | 2026-06-29 | `81a24d2a` | Documentation fact-check | `Oracle-reviewed fixes`; `Co-authored-by: Sisyphus` | 修复多处文档事实问题 |
 | 2026-06-29 | `9b054de8` | Final judge doc review | `final Oracle review fixes`; `Co-authored-by: Sisyphus` | 终审修复评审文档 |
+| 2026-07-30 | 工作树（未提交） | another_ext4 pwrite write combining | Oracle P0/P1 建议；`docs/Work_Log/2026-07-30.md` | 双架构 build、RV64 ktest 与 lint 通过；iozone 测试资产缺失 |
+| 2026-08-01 | 工作树（未提交） | read_at_user 多页回归 | Oracle 根因与回退/游标方案；`docs/Work_Log/2026-08-01.md` | 受控 QEMU 5+5 取消 256KiB 系统性回归，并纠正原始 +16% 误报 |
+| 2026-08-01 | 工作树（未提交） | another_ext4 close 持久化语义 | Oracle 掉电重启测试方案；`docs/Work_Log/2026-08-01.md` | Docker 双架构 build、lint、ktest 74/74；证据保留 raw-remount 与 clean-RECOVER 检查 |
 
 ## 8. Work_Log 证据表
 
@@ -1644,6 +1685,11 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b95-production-ipi-summary.md` | SMP 生产 IPI 协议收口 | 记录测试专用 PING/ROUND_TRIP 状态删除、正式 membarrier sequence/ack 三方向验证、helper kernel-stack 生命周期及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-04.md`、`docs/Work_Log/evidence/2026-08-04/smp-b96-zombie-owner-summary.md` | SMP TCB zombie 唯一 owner | 记录 Running(cpu_id) 终态门禁、interruptible zombie 旧路径删除、错误 CPU CAS 建议纠正及 DeepSeek 双架构 8 核 34/34 冻结证据 |
 | `docs/Work_Log/2026-08-06.md`、`docs/Work_Log/evidence/2026-08-06/smp-full-8g/qemu-rv64.log` | RV64 LTP removexattr panic | 记录 DeepSeek 未初始化 finder 定因、GPT/Codex 对官方 LTP/upstream/反汇编的复核、模型表述纠正及修复尚未实施的边界 |
+| `docs/Work_Log/2026-07-28.md` | Firmware DTB safety gate | 记录 Oracle 识别的 DTB 协议边界、FDT carveout/DTB 页保留与 2K1000 三目标 Docker 编译验证 |
+| `docs/Work_Log/2026-08-01.md` | VisionFive 2 watchdog reboot | 记录 Oracle 固件依赖根因、JH7110 watchdog 序列、双架构构建与 QEMU shutdown 回归验证 |
+| `docs/Work_Log/2026-07-30.md` | another_ext4 小 pwrite 写合并 | 记录 Oracle P0/P1 建议、写缓冲和 atomic dirty-cache pin 实现、双架构/ktest/lint 验证及 iozone 测试资产限制 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*` | read_at_user 多页回归 | 记录 Oracle 的 O(pages × segments) 根因、部分回退/顺序 cursor 方案、原始 +16% 纠正和受控 5+5 验证 |
+| `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/power-cut-ktest-20260801T000000Z/` | another_ext4 close 持久化语义 | 记录 Oracle 对 close 非 durability barrier、fsync/global sync 可判定持久化、journal replay 和 clean RECOVER 检查的边界约束 |
 
 ## 9. 交互记录与留痕方式
 

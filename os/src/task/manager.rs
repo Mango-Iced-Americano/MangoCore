@@ -1145,15 +1145,11 @@ impl WaitQueue {
         Some(task)
     }
 
-    /// 兜底定时器的超时毫秒数，防止丢失唤醒导致永久阻塞。
-    const WAIT_IO_FALLBACK_MS: usize = 10;
-
     fn wait_event_impl<F>(
         wq: &Mutex<Self>,
         cond: &mut F,
         signal_check: bool,
         deadline: Option<TimeSpec>,
-        fallback_ms: Option<usize>,
     ) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
@@ -1206,7 +1202,7 @@ impl WaitQueue {
             }
 
             // 通知若在第二次条件检查期间到达，直接重新检查业务条件，
-            // 不必登记 Blocking，也避免为已结束的一轮等待挂兜底 timer。
+            // 不必登记 Blocking。
             if !entry.is_waiting() {
                 wq.lock().finish_entry(&entry);
                 continue;
@@ -1214,37 +1210,6 @@ impl WaitQueue {
 
             if let Some(deadline) = deadline {
                 wait_with_timeout(Arc::downgrade(&task), deadline);
-            } else if let Some(ms) = fallback_ms {
-                if !task
-                    .wait_io_timer_pending
-                    .swap(true, AtomicOrdering::Relaxed)
-                {
-                    // I/O fallback timer: arm with fallback_ms set so stale
-                    // fallback timers can be detected and re-armed in run_timer().
-                    // Using add_kernel_timer directly instead of wait_with_timeout
-                    // because wait_with_timeout always sets fallback_ms to None,
-                    // which causes stale fallback timers to be silently dropped
-                    // instead of re-armed, leading to permanent task blockage.
-                    let generation = task
-                        .wait_timer_generation
-                        .fetch_add(1, AtomicOrdering::Relaxed)
-                        .wrapping_add(1);
-                    add_kernel_timer(
-                        TimerAction::WakeTask {
-                            task: Arc::downgrade(&task),
-                            generation,
-                            fallback_ms: Some(ms),
-                        },
-                        TimeSpec::now() + TimeSpec::from_ms(ms),
-                    );
-                }
-                // Record the generation for stale-timer detection.
-                // Always set (even when pending was already true), so that
-                // stale fallback timers know the task is still in a
-                // fallback wait and can re-arm with current generation.
-                let gen = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                task.wait_io_fallback_active_generation
-                    .store(gen, AtomicOrdering::Release);
             }
             drop(task);
 
@@ -1268,8 +1233,6 @@ impl WaitQueue {
                 task.wait_timer_generation
                     .fetch_add(1, AtomicOrdering::Relaxed);
             }
-            task.wait_io_fallback_active_generation
-                .store(0, AtomicOrdering::Release);
         }
     }
 
@@ -1462,7 +1425,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+        match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
@@ -1481,7 +1444,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
     /// I/O 等待（不可中断）。
@@ -1491,7 +1454,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        match Self::wait_event_impl(wq, &mut cond, false, None, Some(Self::WAIT_IO_FALLBACK_MS)) {
+        match Self::wait_event_impl(wq, &mut cond, false, None) {
             WaitResult::Ready(value) => value,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
@@ -1506,18 +1469,18 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, Some(Self::WAIT_IO_FALLBACK_MS))
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
-    /// 可中断等待，不启用 fallback timer。
+    /// 可中断等待，条件满足或收到可处理信号时返回。
     pub fn wait_event_interruptible<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, None, None)
+        Self::wait_event_impl(wq, &mut cond, true, None)
     }
 
-    /// 不可中断等待，不启用 fallback timer。
+    /// 不可中断等待，纯事件驱动。
     ///
     /// 用于内核内部具有精确生产者通知的状态转换；调用方必须保证每次
     /// 可能满足 `cond` 的转换都会唤醒该队列。
@@ -1525,7 +1488,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, false, None, None)
+        Self::wait_event_impl(wq, &mut cond, false, None)
     }
 
     /// 不可中断等待直到条件满足或绝对 deadline 到达。
@@ -1533,7 +1496,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, false, Some(deadline), None)
+        Self::wait_event_impl(wq, &mut cond, false, Some(deadline))
     }
 
     /// 可中断等待直到条件满足、信号到达或绝对 deadline 到达。
@@ -1545,7 +1508,7 @@ impl WaitQueue {
     where
         F: FnMut() -> Option<isize>,
     {
-        Self::wait_event_impl(wq, &mut cond, true, Some(deadline), None)
+        Self::wait_event_impl(wq, &mut cond, true, Some(deadline))
     }
 
     /// 在调用方对象锁下检查条件并注册可中断等待。
@@ -1603,10 +1566,6 @@ pub enum TimerAction {
     WakeTask {
         task: Weak<TaskControlBlock>,
         generation: usize,
-        /// Some(ms) when this is an I/O fallback timer (1ms safety net);
-        /// None when this is a deadline timer.  Stale fallback timers are
-        /// re-armed with the current generation instead of spurious-waking.
-        fallback_ms: Option<usize>,
     },
     /// legacy ITIMER_REAL 到期后向所属进程投递 SIGALRM。
     IntervalTimerSignal {
@@ -1829,88 +1788,14 @@ impl KernelTimerQueue {
     /// 调度器锁或重新插入新的 kernel timer。
     pub fn run_timer(timer: KernelTimer, now: TimeSpec) -> bool {
         match timer.action {
-            TimerAction::WakeTask {
-                task,
-                generation,
-                fallback_ms,
-            } => {
+            TimerAction::WakeTask { task, generation } => {
                 let Some(task) = task.upgrade() else {
                     return false;
                 };
                 task.wait_io_timer_pending
                     .store(false, AtomicOrdering::Relaxed);
 
-                if let Some(ms) = fallback_ms {
-                    // I/O fallback timer — check if stale
-                    let active = task
-                        .wait_io_fallback_active_generation
-                        .load(AtomicOrdering::Acquire);
-                    if active == 0 {
-                        return false; // task not in fallback wait, discard
-                    }
-                    if active != generation {
-                        // Stale timer. If task is in a new fallback wait,
-                        // re-arm with current generation instead of waking.
-                        let current = task.wait_timer_generation.load(AtomicOrdering::Relaxed);
-                        if active == current {
-                            // Task waiting with new generation but no timer armed
-                            if !task
-                                .wait_io_timer_pending
-                                .swap(true, AtomicOrdering::Relaxed)
-                            {
-                                let new_gen = task
-                                    .wait_timer_generation
-                                    .fetch_add(1, AtomicOrdering::Relaxed)
-                                    + 1;
-                                add_kernel_timer(
-                                    TimerAction::WakeTask {
-                                        task: Arc::downgrade(&task),
-                                        generation: new_gen,
-                                        fallback_ms: Some(ms),
-                                    },
-                                    TimeSpec::now() + TimeSpec::from_ms(ms),
-                                );
-                                task.wait_io_fallback_active_generation
-                                    .store(new_gen, AtomicOrdering::Release);
-                            }
-                        }
-                        return false; // Don't wake — stale timer
-                    }
-                    // active == generation: current fallback, wake normally
-                    //
-                    // 先确认任务已经登记阻塞意图。若仍为 Running，说明 timer
-                    // 触发在 wait_event_impl arm 与 sleep_interruptible 之间，
-                    // Re-arm instead of consuming the timer, or the task
-                    // will sleep forever with no wakeup.
-                    if !matches!(
-                        task.task_status(),
-                        super::TaskStatus::Blocking(_) | super::TaskStatus::Blocked
-                    ) {
-                        if !task
-                            .wait_io_timer_pending
-                            .swap(true, AtomicOrdering::Relaxed)
-                        {
-                            let new_gen = task
-                                .wait_timer_generation
-                                .fetch_add(1, AtomicOrdering::Relaxed)
-                                + 1;
-                            add_kernel_timer(
-                                TimerAction::WakeTask {
-                                    task: Arc::downgrade(&task),
-                                    generation: new_gen,
-                                    fallback_ms: Some(ms),
-                                },
-                                TimeSpec::now() + TimeSpec::from_ms(ms),
-                            );
-                            task.wait_io_fallback_active_generation
-                                .store(new_gen, AtomicOrdering::Release);
-                        }
-                        return false;
-                    }
-                    // Blocking 和 Blocked 都交给统一 CAS 唤醒入口处理。
-                }
-
-                // Normal wake (deadline or current fallback)
+                // Normal wake (deadline)
 
                 if task.wait_timer_generation.load(AtomicOrdering::Relaxed) != generation {
                     crate::task::perf::record_ktimer_stale_waketask();
@@ -2239,7 +2124,6 @@ pub fn wait_with_timeout(task: Weak<TaskControlBlock>, timeout: TimeSpec) {
         TimerAction::WakeTask {
             task: Arc::downgrade(&task),
             generation,
-            fallback_ms: None,
         },
         timeout,
     );

@@ -170,6 +170,7 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
+            let pagefault_entry_start = crate::task::perf::perf_memory_io_time_now();
             let task = current_task().unwrap();
             let addr = VirtAddr::from(stval);
             // This is where we handle the page fault.
@@ -183,6 +184,10 @@ pub fn trap_handler() -> ! {
             };
             let _pf_start =
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
+            crate::task::perf::record_pagefault_stage(
+                0,
+                crate::task::perf::perf_memory_io_time_now().wrapping_sub(pagefault_entry_start),
+            );
             crate::task::perf::record_page_fault();
             // VM update 会在解锁后等待远端 TLB ack；task.inner 只能在结果
             // 返回后获取，否则会把普通锁带过 shootdown 等待点。
@@ -230,6 +235,8 @@ pub fn trap_handler() -> ! {
                     }
                 }
             };
+            task.process.notify_signal_waiters();
+            crate::task::perf::arm_pagefault_return();
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
@@ -237,6 +244,8 @@ pub fn trap_handler() -> ! {
             let mut inner = task.acquire_inner_lock();
             inner.sigmask.remove(Signals::SIGILL);
             inner.add_signal_with_code(Signals::SIGILL, SigInfo::ILL_ILLOPC);
+            drop(inner);
+            task.process.notify_signal_waiters();
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             handle_timer_interrupt();
@@ -268,6 +277,11 @@ pub fn trap_return() -> ! {
     // 只能在这个统一边界让出 CPU，不能从 hard IRQ 直接切换任务。
     crate::task::run_task_safe_point();
     let task = do_signal();
+    let pagefault_return_start = if crate::task::perf::take_pagefault_return_pending() {
+        crate::task::perf::perf_memory_io_time_now()
+    } else {
+        0
+    };
     set_user_trap_entry();
     // Refresh after signal/exec context changes and on every future migration:
     // the CPU performing this return owns the pointer installed on next trap.
@@ -291,6 +305,12 @@ pub fn trap_return() -> ! {
     let user_vm = task.process.activate_user_vm();
     let user_satp = super::sv39::satp_with_asid(user_vm.token, user_vm.asid);
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    if pagefault_return_start != 0 {
+        crate::task::perf::record_pagefault_stage(
+            6,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(pagefault_return_start),
+        );
+    }
     // 安全点、信号递送和 MM 激活都仍属于内核态。必须到真正执行 SRET 前
     // 才闭合 system 区间并开启 user 区间，否则安全点调度出去的时间会被
     // 错算为 user time，并在迁移后归到错误 CPU。

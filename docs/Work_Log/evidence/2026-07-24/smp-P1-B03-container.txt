@@ -1,5 +1,0 @@
-container=/lzm-cagent-run image_id=sha256:a89ceaf40ef5049b5103f7f0685311c3b499d56781bdc4c9605bf4ac597dd581 created=2026-07-19T11:28:07.697595896Z image_ref=zhouzhouyi/os-contest:20260104
-QEMU emulator version 10.0.2
-Copyright (c) 2003-2025 Fabrice Bellard and the QEMU Project developers
-QEMU emulator version 10.0.2
-Copyright (c) 2003-2025 Fabrice Bellard and the QEMU Project developers

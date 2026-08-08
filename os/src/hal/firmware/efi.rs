@@ -46,12 +46,12 @@ pub(super) fn contains_firmware_range(address: usize, size: usize) -> bool {
 
     // LA QEMU 把 EFI 表和 FDT 放在 256 MiB 低端启动 RAM；原有静态配置只
     // 描述 0x8000_0000 起的内核加载区，所以需单独承认这段固件 RAM。
-    #[cfg(feature = "board_laqemu")]
+    #[cfg(feature = "boot_la_qemu")]
     if end <= 0x1000_0000 {
         return true;
     }
 
-    crate::config::MEMORY_REGIONS
+    crate::config::MEMORY_REGIONS_FALLBACK
         .iter()
         .any(|&(start, region_end)| start <= address && end <= region_end)
 }

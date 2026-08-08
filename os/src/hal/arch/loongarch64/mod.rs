@@ -3,10 +3,10 @@
 //! 汇总平台配置、CSR 寄存器包装、LAFlex 页表、trap、SBI 兼容层、时间源和上下文切换。
 
 // 平台常量不可混用，尤其是 QEMU 与 2K1000 使用不同的 UART 地址和 MMIO 访问路径。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 #[path = "../../platform/loongarch64/qemu.rs"]
 pub mod board;
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 #[path = "../../platform/loongarch64/2k1000.rs"]
 pub mod board;
 pub mod config;
@@ -16,7 +16,7 @@ mod mem_reg_macro;
 mod acpi;
 // boot.rs 定义 QEMU 的 `_start`。实板必须从 U-Boot 继承的 DMW 地址环境切换出去，
 // 因而使用 entry.asm。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 mod boot;
 mod sbi;
 pub mod switch;
@@ -27,7 +27,7 @@ pub type KernelPageTableImpl = laflex::LAFlexPageTable;
 pub type PageTableImpl = laflex::LAFlexPageTable;
 pub use sbi::{
     console_flush, console_getchar, console_putchar, console_write_bytes, irq_enabled,
-    local_irq_restore, local_irq_save, machine_shutdown, panic_console_write,
+    local_irq_restore, local_irq_save, machine_shutdown, panic_console_write, reboot, shutdown,
 };
 pub use switch::__switch;
 pub use tlb::{set_asid, tlb_global_invalidate, tlb_invalidate};
@@ -116,13 +116,13 @@ const CPUCFG2_LSPW: usize = 1 << 21;
 const CPUCFG2_LAM: usize = 1 << 22;
 const CPUCFG2_PTW: usize = 1 << 24;
 
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 const IOCSR_IPI_ENABLE: usize = 0x1004;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 const IOCSR_IPI_CLEAR: usize = 0x100c;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 const IOCSR_IPI_SEND: usize = 0x1040;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 const RUNTIME_IPI_VECTOR: u32 = 1;
 
 fn read_cpucfg(index: usize) -> usize {
@@ -195,7 +195,7 @@ pub fn machine_init() {
     get_timer_freq_first_time();
     let user_asids = tlb::init_asid_allocator();
     boot_trace!("[machine_init] user ASIDs: {}", user_asids);
-    #[cfg(any(not(feature = "board_2k1000"), feature = "board_bringup_trace"))]
+    #[cfg(any(feature = "boot_la_qemu", feature = "bringup_trace"))]
     {
         let cfg1 = CPUCfg1::read();
         boot_trace!(
@@ -222,7 +222,7 @@ pub fn machine_init() {
         boot_trace!("{:?}", RVACfg::read());
         boot_trace!("[machine_init] MMAP_BASE: {:#x}", MMAP_BASE);
     }
-    #[cfg(feature = "board_laqemu")]
+    #[cfg(feature = "boot_la_qemu")]
     {
         // CPU0 需要接收 AP 的运行期回复；先清/开放 IOCSR vector，再把
         // ECFG.IPI 加入本地 mask。2K1000 单核路径不执行这段代码。
@@ -396,7 +396,7 @@ pub fn cpu_local_ptr() -> usize {
 }
 
 /// Wake one LA64 QEMU AP from the slave boot ROM and send it to `_start`.
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize> {
     // QEMU 9.2.1's direct-boot ROM waits for IPI vector 0, then reads the
     // 64-bit entry address from the target CPU's first mailbox buffer.
@@ -432,7 +432,7 @@ pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize
 }
 
 /// 向一个硬件 CPU 发送运行期 IPI；vector 1 与 slave ROM 的 vector 0 分离。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
     if hardware_id >= crate::smp::configured_cpu_count() {
         return Err(-3);
@@ -450,12 +450,12 @@ pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
     Ok(())
 }
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub fn send_ipi(_hardware_id: usize) -> Result<(), isize> {
     Err(-2)
 }
 
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 fn configure_local_ipi() {
     let bit = 1u32 << RUNTIME_IPI_VECTOR;
     // boot ROM 已在跳转前清除启动 vector 0；这里清掉可能残留的运行期
@@ -474,11 +474,11 @@ fn configure_local_ipi() {
     }
 }
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 fn configure_local_ipi() {}
 
 /// 清除本 CPU 的 level-triggered 运行期 IPI 源。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub(super) fn clear_local_ipi() {
     let bit = 1u32 << RUNTIME_IPI_VECTOR;
     // Safety: CORE_CLEAR 写 1 清对应 status bit；handler 不访问普通锁或堆。
@@ -491,7 +491,7 @@ pub(super) fn clear_local_ipi() {
     }
 }
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub(super) fn clear_local_ipi() {}
 
 /// 在全局 IE 关闭时等待一个中断唤醒。
@@ -509,7 +509,7 @@ pub fn prepare_secondary_cpu_stop() {
     // line-based interrupt。QEMU CORE_EN 是直接赋值寄存器（不是 set-only）。
     CrMd::read().set_ie(false).write();
     ECfg::empty().write();
-    #[cfg(feature = "board_laqemu")]
+    #[cfg(feature = "boot_la_qemu")]
     unsafe {
         core::arch::asm!(
             "iocsrwr.w $zero, {addr}",
@@ -529,7 +529,7 @@ pub fn secondary_cpu_stop() -> ! {
 }
 
 /// The 2K1000LA remains intentionally single-core in this QEMU-only phase.
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub fn start_secondary_cpu(_cpu_id: usize, _start_addr: usize) -> Result<(), isize> {
     Err(-2)
 }

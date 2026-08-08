@@ -22,7 +22,7 @@ pub fn cpuinfo_content(
     let model = crate::hal::platform::platform_info()
         .model
         .as_deref()
-        .unwrap_or(if cfg!(feature = "board_2k1000") {
+        .unwrap_or(if cfg!(feature = "boot_la_uboot_dmw") {
             "loongson,2k1000"
         } else {
             "unspecified"

@@ -1,7 +1,0 @@
-build-rv=make -C /app/os -f make/rv64.mk PROFILE=normal MODE=release BUILD_ROOT=/tmp/rseq-rv CORE_NUM=8 build
-build-la=make -C /app/os -f make/la64.mk PROFILE=normal MODE=release BUILD_ROOT=/tmp/rseq-la CORE_NUM=8 build
-tools=make -C /app/os PROFILE=normal MODE=release BUILD_ROOT=/tmp/rseq-rv tools-disk-rv
-qemu-1=timeout 600 qemu-system-riscv64 ... > /tmp/rseq-buildstorm.log
-qemu-2=timeout 1200 qemu-system-riscv64 ... > /tmp/rseq-buildstorm-2.log
-qemu-3=timeout 1800 qemu-system-riscv64 -accel tcg,thread=multi ... > /tmp/rseq-buildstorm-3.log
-qemu-result=all attempts stopped before BUILDSTORM_COMPILE; qemu-1/2 timed out with rc=124, qemu-3 was stopped after 10m31s for evidence collection

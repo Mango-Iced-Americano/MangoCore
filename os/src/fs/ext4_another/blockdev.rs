@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use core::convert::TryFrom;
 
 use crate::drivers::block::BlockDevice;
+use crate::task::perf;
 
 use super::errno::from_block_device;
 
@@ -92,23 +93,23 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
     }
 
     fn diagnostic_enabled(&self) -> bool {
-        crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+        self.diagnostic_cycles() != 0
     }
 
     fn diagnostic_cycles(&self) -> usize {
-        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+        perf::perf_memory_io_time_now()
     }
 
     fn record_journal_commit(&self, bytes: usize) {
-        crate::task::perf::record_journal_commit(bytes);
+        perf::record_journal_commit(bytes);
     }
 
     fn record_writeback_data_write(&self, bytes: usize, cycles: usize) {
-        crate::task::perf::record_wb_data_write(bytes, cycles);
+        perf::record_wb_tx_data_write(bytes, cycles);
     }
 
     fn record_writeback_alloc_extent(&self, pages: usize, cycles: usize) {
-        crate::task::perf::record_wb_alloc_extent(pages, cycles);
+        perf::record_wb_tx_alloc_extent(pages, cycles);
     }
 
     fn record_writeback_journal_commit(
@@ -118,7 +119,15 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         cycles: usize,
         _reason: another_ext4::JournalCommitReason,
     ) {
-        crate::task::perf::record_wb_tx_journal_commit(transaction_id, staged_blocks, cycles);
+        perf::record_wb_tx_journal_commit(transaction_id, staged_blocks, cycles);
+        #[cfg(feature = "perf_diag")]
+        crate::println!(
+            "[wb_txn] commit tx={} reason={:?} staged_blocks={} ticks={}",
+            transaction_id,
+            _reason,
+            staged_blocks,
+            cycles,
+        );
     }
 
     fn record_writeback_journal_flush(
@@ -127,7 +136,14 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         _phase: another_ext4::JournalFlushPhase,
         cycles: usize,
     ) {
-        crate::task::perf::record_wb_tx_journal_flush(cycles);
+        perf::record_wb_tx_journal_flush(cycles);
+        #[cfg(feature = "perf_diag")]
+        crate::println!(
+            "[wb_txn] flush tx={} phase={:?} ticks={}",
+            _transaction_id,
+            _phase,
+            cycles,
+        );
     }
 
     fn record_writeback_flush_boundary(
@@ -135,6 +151,12 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         _reason: another_ext4::JournalCommitReason,
         cycles: usize,
     ) {
-        crate::task::perf::record_wb_flush_boundary(cycles);
+        perf::record_wb_tx_boundary_flush(cycles);
+        #[cfg(feature = "perf_diag")]
+        crate::println!(
+            "[wb_txn] boundary_flush reason={:?} ticks={}",
+            _reason,
+            cycles
+        );
     }
 }

@@ -1,3 +1,0 @@
-container id: a99062375fdbde7b8989f6b9622438229a8609991a3aad86443a5eafcc4acfca
-mount: /home/lzm/projects/MangoCore-smp-integration-20260725 -> /app
-container name: mangocore-smp-integration-20260725-os-dev-1

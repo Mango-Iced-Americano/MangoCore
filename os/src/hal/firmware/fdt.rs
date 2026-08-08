@@ -1,21 +1,20 @@
 //! FDT (Flattened Device Tree) parser.
 //!
 //! Wraps the `fdt` crate. Pre-heap parsing operates on raw bytes;
-//! post-heap full parsing uses the external `fdt` crate.
+//! post-heap full parsing uses the `fdt::Fdt` type.
 
 use crate::hal::boot::BootProtocol;
 use crate::hal::firmware::{MAX_FDT_SNAPSHOT_SIZE, MAX_MEMORY_REGIONS};
-use crate::hal::platform::{
-    ConsoleInfo, DeviceInfo, DeviceKind, DeviceStatus, FirmwareKind, MmioRange, PciHost,
-    PlatformInfo, RawProperty, RawPropertyValidity, ResourceValidity,
+use crate::hal::platform::info::{
+    ConsoleInfo, DeviceInfo, DeviceKind, DeviceStatus, FirmwareKind, MmioRange, PlatformInfo,
+    PciHost, RawProperty, RawPropertyValidity, ResourceValidity,
 };
-use ::fdt as devicetree;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::{TryFrom, TryInto};
 use core::slice;
 
-use super::{FDT_SNAPSHOT_BYTES, FDT_SNAPSHOT_META};
+use super::FDT_SNAPSHOT;
 
 /// Read the `totalsize` field from the FDT header at `paddr`.
 /// FDT header layout: magic(u32 BE) totalsize(u32 BE) at offset 4.
@@ -77,17 +76,17 @@ pub(super) fn capture_fdt_snapshot(dtb_paddr: usize) -> bool {
         // handoff supplies an identity-mapped FDT at `dtb_paddr`; LA64 also
         // proves the complete range is DRAM. Magic and size were checked above.
         let blob = unsafe { slice::from_raw_parts(dtb_paddr as *const u8, total_size) };
-        if devicetree::Fdt::new_unaligned_fallible(blob).is_err() {
+        if fdt::Fdt::new_unaligned_fallible(blob).is_err() {
             return false;
         }
         blob.as_ptr()
     };
 
-    let metadata = core::ptr::addr_of_mut!(FDT_SNAPSHOT_META);
+    let snapshot = core::ptr::addr_of_mut!(FDT_SNAPSHOT);
     // SAFETY: [Categories 1 and 2 — aliasing and data races] This function
     // runs once during single-threaded boot. A nonzero length makes the
     // snapshot immutable, and all later access is read-only.
-    if unsafe { (*metadata).len } != 0 {
+    if unsafe { (*snapshot).len } != 0 {
         return false;
     }
     // SAFETY: [Categories 1, 10, and 11 — aliasing, bounds, provenance] The
@@ -96,10 +95,9 @@ pub(super) fn capture_fdt_snapshot(dtb_paddr: usize) -> bool {
     // deliberately permits overlapping source and destination ranges. Length
     // publication follows only after the complete copy.
     unsafe {
-        let destination = core::ptr::addr_of_mut!(FDT_SNAPSHOT_BYTES).cast::<u8>();
+        let destination = core::ptr::addr_of_mut!((*snapshot).bytes).cast::<u8>();
         core::ptr::copy(source, destination, total_size);
-        (*metadata).source_paddr = dtb_paddr;
-        (*metadata).len = total_size;
+        (*snapshot).len = total_size;
     }
     true
 }
@@ -109,42 +107,64 @@ fn fdt_snapshot() -> Option<&'static [u8]> {
     // SAFETY: [Categories 1 and 2 — aliasing and data races] Early boot
     // publishes the length only after the complete copy, before `mm::init()`
     // and scheduler startup. The snapshot is never mutated afterwards.
-    let metadata = unsafe { &*core::ptr::addr_of!(FDT_SNAPSHOT_META) };
-    if metadata.len == 0 || metadata.len > MAX_FDT_SNAPSHOT_SIZE {
+    let snapshot = unsafe { &*core::ptr::addr_of!(FDT_SNAPSHOT) };
+    if snapshot.len == 0 {
         return None;
     }
-    // SAFETY: `capture_fdt_snapshot` 在发布非零 len 前已写完这些字节，且后续
-    // 不再修改缓冲；专用 linker section 保证 `mem_clear()` 不会覆盖它。
-    Some(unsafe {
-        slice::from_raw_parts(
-            core::ptr::addr_of!(FDT_SNAPSHOT_BYTES).cast::<u8>(),
-            metadata.len,
-        )
-    })
+    snapshot.bytes.get(..snapshot.len)
 }
 
 /// Parse `/memory` nodes from the durable DTB snapshot.
 /// Fills the static `MEMORY_BUF`. Returns true on success.
 ///
 /// Called pre-heap — does NOT allocate.
-pub(super) fn parse_early_resources() -> bool {
+pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
     let blob = match fdt_snapshot() {
         Some(blob) => blob,
         None => return false,
     };
     let total_size = blob.len();
-    let fdt = match devicetree::Fdt::new_unaligned_fallible(blob) {
+    let fdt = match fdt::Fdt::new_unaligned_fallible(blob) {
         Ok(fdt) => fdt,
         Err(_) => return false,
     };
+    let memory = match fdt
+        .root()
+        .and_then(|root| root.memory())
+        .and_then(|memory| memory.reg())
+    {
+        Ok(memory) => memory,
+        Err(_) => return false,
+    };
+
     // SAFETY: [Categories 1 and 2 — aliasing and data races]
-    // `discover_early_resources()` 仅由 BSP 在 `mm::init()` 前调用；
-    // AP 尚未启动，后续对 MEMORY_BUF 的访问全部只读。
+    // `populate_memory_regions()` runs once during single-threaded boot before
+    // `mm::init()`; all later access to MEMORY_BUF is read-only.
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(crate::hal::firmware::MEMORY_BUF) };
     buf.region_count = 0;
     buf.reserved_count = 0;
 
-    if !parse_memory_nodes(&fdt, buf) {
+    for region in memory.iter::<u64, usize>() {
+        if buf.region_count >= MAX_MEMORY_REGIONS {
+            break;
+        }
+        let region = match region {
+            Ok(region) => region,
+            Err(_) => return false,
+        };
+        let start = region.address as usize;
+        let size = region.len;
+        if size == 0 {
+            continue;
+        }
+        let Some(end) = start.checked_add(size) else {
+            return false;
+        };
+        buf.regions[buf.region_count] = (start, end);
+        buf.region_count += 1;
+    }
+
+    if buf.region_count == 0 {
         return false;
     }
 
@@ -155,18 +175,7 @@ pub(super) fn parse_early_resources() -> bool {
         buf.timebase_frequency = 0;
     }
 
-    // FDT 是运行期拓扑来源，但板级静态 carveout 仍表达固件所有权。例如
-    // RV64 的 OpenSBI 区域通常不会出现在 QEMU 自动生成的 reserved-memory 中。
-    // 先加入这些必需保留区，再与 DTB/memreserve/reserved-memory 统一合并。
-    for &range in crate::config::FIRMWARE_RESERVED_REGIONS {
-        if !push_range(&mut buf.reserved, &mut buf.reserved_count, range) {
-            return false;
-        }
-    }
-
     // Keep the DTB blob out of the frame allocator as well.
-    // SAFETY: metadata 与快照由同一个 BSP-only 提交点一次性发布。
-    let dtb_paddr = unsafe { (*core::ptr::addr_of!(FDT_SNAPSHOT_META)).source_paddr };
     let dtb_start = dtb_paddr & !0xFFF;
     let dtb_end = match dtb_paddr
         .checked_add(total_size)
@@ -175,76 +184,19 @@ pub(super) fn parse_early_resources() -> bool {
         Some(end) => end & !0xFFF,
         None => return false,
     };
-    if !push_range(
-        &mut buf.reserved,
-        &mut buf.reserved_count,
-        (dtb_start, dtb_end),
-    ) {
+    if !push_range(&mut buf.reserved, &mut buf.reserved_count, (dtb_start, dtb_end)) {
         return false;
     }
 
-    if !parse_memreserve(blob, buf) || !parse_node_resources(&fdt, buf) {
-        return false;
-    }
-    buf.reserved[..buf.reserved_count].sort_unstable_by_key(|range| range.0);
     #[cfg(target_arch = "riscv64")]
     {
-        return buf.timebase_frequency != 0;
+        parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf) && buf.timebase_frequency != 0
     }
-    #[cfg(target_arch = "loongarch64")]
-    true
-}
-
-/// 收集所有根级 `memory@...` 节点，而不是只取第一个 `/memory`。
-///
-/// Devicetree 允许一个 memory 节点含多个 `reg`，也允许多个 memory 节点。
-/// 固定表满时必须失败，不能静默少报 RAM；排序后拒绝重叠，给后续 frame
-/// allocator 提供稳定的半开区间合同。
-fn parse_memory_nodes(
-    fdt: &FallibleFdt<'_>,
-    buffer: &mut crate::hal::firmware::MemoryRegionBuf,
-) -> bool {
-    let Ok(nodes) = fdt.all_nodes() else {
-        return false;
-    };
-    for entry in nodes {
-        let Ok((depth, node)) = entry else {
-            return false;
-        };
-        let Ok(name) = node.name() else {
-            return false;
-        };
-        if depth != 1 || &*name.name != "memory" {
-            continue;
-        }
-        let Ok(Some(regions)) = node.reg() else {
-            return false;
-        };
-        for region in regions.iter::<usize, usize>() {
-            let Ok(region) = region else {
-                return false;
-            };
-            if region.len == 0 {
-                continue;
-            }
-            if buffer.region_count == MAX_MEMORY_REGIONS {
-                return false;
-            }
-            let Some(end) = region.address.checked_add(region.len) else {
-                return false;
-            };
-            buffer.regions[buffer.region_count] = (region.address, end);
-            buffer.region_count += 1;
-        }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        // LA64 timer 频率由 CPUCFG 探测，不要求 FDT `/cpus/timebase-frequency`。
+        parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf)
     }
-    if buffer.region_count == 0 {
-        return false;
-    }
-
-    buffer.regions[..buffer.region_count].sort_unstable_by_key(|range| range.0);
-    buffer.regions[..buffer.region_count]
-        .windows(2)
-        .all(|pair| pair[0].1 <= pair[1].0)
 }
 
 fn push_range<const N: usize>(
@@ -315,11 +267,7 @@ fn parse_memreserve(blob: &[u8], buffer: &mut crate::hal::firmware::MemoryRegion
         let Some(end) = start.checked_add(size) else {
             return false;
         };
-        if !push_range(
-            &mut buffer.reserved,
-            &mut buffer.reserved_count,
-            (start, end),
-        ) {
+        if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, (start, end)) {
             return false;
         }
     }
@@ -370,44 +318,39 @@ fn parse_node_resources(
                 }
             }
         }
-        // `reg` 只在根总线或一层 SoC 总线下能直接解释为 CPU 物理地址。
-        // PCI 子节点的 `reg` 是 BDF/PCI address cells，不能冒充 early MMIO；
-        // `/reserved-memory` 子树则不受深度限制，所有 carveout 都必须保留。
-        if reserved_memory_depth.is_some() || depth <= 2 {
-            let Ok(Some(regions)) = node.reg() else {
-                continue;
+        let Ok(Some(regions)) = node.reg() else {
+            continue;
+        };
+        for region in regions.iter::<usize, usize>() {
+            let Ok(region) = region else {
+                return false;
             };
-            for region in regions.iter::<usize, usize>() {
-                let Ok(region) = region else {
-                    return false;
-                };
-                if region.len == 0 {
-                    continue;
-                }
-                let Some(end) = region.address.checked_add(region.len) else {
-                    return false;
-                };
-                let range = (region.address, end);
-                let page_range = (
-                    range.0 & !0xfff,
-                    match range.1.checked_add(0xfff) {
-                        Some(end) => end & !0xfff,
-                        None => return false,
-                    },
-                );
-                if reserved_memory_depth.is_some() {
-                    if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, range) {
-                        return false;
-                    }
-                } else if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
-                    && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, range)
-                {
+            if region.len == 0 {
+                continue;
+            }
+            let Some(end) = region.address.checked_add(region.len) else {
+                return false;
+            };
+            let range = (region.address, end);
+            let page_range = (
+                range.0 & !0xfff,
+                match range.1.checked_add(0xfff) {
+                    Some(end) => end & !0xfff,
+                    None => return false,
+                },
+            );
+            if reserved_memory_depth.is_some() {
+                if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, range) {
                     return false;
                 }
+            } else if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
+                && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, range)
+            {
+                return false;
             }
         }
         let is_pci_host = node
-            .property::<devicetree::properties::Compatible<'_>>()
+            .property::<fdt::properties::Compatible<'_>>()
             .ok()
             .flatten()
             .is_some_and(|compatible| {
@@ -465,11 +408,11 @@ fn parse_pci_mmio_ranges(
     true
 }
 
-type FallibleFdt<'a> = devicetree::Fdt<
+type FallibleFdt<'a> = fdt::Fdt<
     'a,
     (
-        devicetree::parsing::unaligned::UnalignedParser<'a>,
-        devicetree::parsing::NoPanic,
+        fdt::parsing::unaligned::UnalignedParser<'a>,
+        fdt::parsing::NoPanic,
     ),
 >;
 
@@ -526,13 +469,8 @@ fn walk_nodes(fdt: &FallibleFdt<'_>, devices: &mut Vec<DeviceInfo>) {
                 let mut raw_property_validity = RawPropertyValidity::Valid;
                 for property in properties {
                     match property {
-                        Ok(property)
-                            if raw_properties
-                                .iter()
-                                .all(|entry: &RawProperty| entry.name != property.name) =>
-                        {
-                            raw_properties
-                                .push(RawProperty::new(property.name, property.value.to_vec()));
+                        Ok(property) if raw_properties.iter().all(|entry: &RawProperty| entry.name != property.name) => {
+                            raw_properties.push(RawProperty::new(property.name, property.value.to_vec()));
                         }
                         Ok(_) | Err(_) => {
                             raw_property_validity = RawPropertyValidity::Malformed;
@@ -544,7 +482,7 @@ fn walk_nodes(fdt: &FallibleFdt<'_>, devices: &mut Vec<DeviceInfo>) {
             }
             Err(_) => (Vec::new(), RawPropertyValidity::Malformed),
         };
-        let compatible = match node.property::<devicetree::properties::Compatible<'_>>() {
+        let compatible = match node.property::<fdt::properties::Compatible<'_>>() {
             Ok(Some(compatible)) => compatible.all().map(String::from).collect(),
             Ok(None) | Err(_) => Vec::new(),
         };
@@ -575,7 +513,7 @@ fn walk_nodes(fdt: &FallibleFdt<'_>, devices: &mut Vec<DeviceInfo>) {
                 ResourceValidity::Malformed
             }
         };
-        let status = match node.property::<devicetree::properties::Status<'_>>() {
+        let status = match node.property::<fdt::properties::Status<'_>>() {
             Ok(Some(status)) => DeviceStatus::from_fdt(Some(&status)),
             Ok(None) => DeviceStatus::from_fdt(None),
             Err(_) => DeviceStatus::Malformed,
@@ -619,25 +557,18 @@ fn classify_device(compatible: &[String]) -> DeviceKind {
 
 fn property_cstr<'a>(device: &'a DeviceInfo, property_name: &str) -> Option<&'a str> {
     let value = device.raw_property(property_name).ok()?;
-    let terminator = value
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(value.len());
+    let terminator = value.iter().position(|byte| *byte == 0).unwrap_or(value.len());
     core::str::from_utf8(&value[..terminator]).ok()
 }
 
 fn resolve_stdout_path(devices: &[DeviceInfo]) -> Option<String> {
-    let chosen = devices
-        .iter()
-        .find(|device| device.node_path == "/chosen")?;
+    let chosen = devices.iter().find(|device| device.node_path == "/chosen")?;
     let stdout = property_cstr(chosen, "stdout-path")?;
     let node_path = stdout.split(':').next()?;
     if node_path.starts_with('/') {
         return Some(String::from(node_path));
     }
-    let aliases = devices
-        .iter()
-        .find(|device| device.node_path == "/aliases")?;
+    let aliases = devices.iter().find(|device| device.node_path == "/aliases")?;
     property_cstr(aliases, node_path).map(String::from)
 }
 
@@ -703,7 +634,7 @@ fn resolve_pci_host(devices: &[DeviceInfo]) -> Option<PciHost> {
 ///
 /// Must be called AFTER `mm::init()` — uses `alloc`.
 /// Returns `None` if the snapshot is absent or invalid.
-pub(super) fn build_platform_info() -> Option<PlatformInfo> {
+pub fn build_platform_info() -> Option<PlatformInfo> {
     let boot = *crate::hal::boot::boot_info();
     if !matches!(
         boot.protocol,
@@ -713,7 +644,8 @@ pub(super) fn build_platform_info() -> Option<PlatformInfo> {
     }
 
     let blob = fdt_snapshot()?;
-    let fdt = devicetree::Fdt::new_unaligned_fallible(blob).ok()?;
+    let fdt = fdt::Fdt::new_unaligned_fallible(blob).ok()?;
+
     let root = fdt.root().ok()?;
     let model = root.model().ok().map(String::from);
 
@@ -724,7 +656,7 @@ pub(super) fn build_platform_info() -> Option<PlatformInfo> {
         .and_then(|chosen| chosen.bootargs().ok())
         .flatten()
         .map(String::from)
-        .unwrap_or_else(|| crate::bootargs::compiled_cmdline().into());
+        .unwrap_or_else(|| crate::bootargs::get_cmdline().into());
 
     let mut devices = enumerate_devices(&fdt);
     // Sort by MMIO base address so devices are probed in a deterministic

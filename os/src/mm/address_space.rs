@@ -29,6 +29,7 @@ use crate::fs::vfs;
 use crate::fs::vfs::IndexNode;
 use crate::fs::vfs_lookup_absolute;
 use crate::fs::PageCache;
+use crate::hal::boot::kernel_linked_to_phys;
 use crate::hal::TrapContext;
 use crate::hal::TICKS_PER_SEC;
 use crate::should_map_trampoline;
@@ -1065,6 +1066,32 @@ impl<T: PageTable> AddressSpaceInner<T> {
             .map_err(memory_error_to_errno)
     }
 
+    /// Return an already-mapped user physical address without faulting it in.
+    ///
+    /// The PTE must already satisfy every requested user permission.  A miss
+    /// deliberately falls through to the fault path so lazy mappings, CoW,
+    /// shared-write permission restoration, and guard pages retain their
+    /// existing semantics.
+    pub(crate) fn mapped_user_va(
+        &self,
+        addr: VirtAddr,
+        access: UserAccess,
+    ) -> Result<Option<PhysAddr>, isize> {
+        let vpn = addr.floor();
+        if !self.page_table.user_access_ok(vpn, access).unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let pa = self
+            .page_table
+            .translate_va(addr)
+            .ok_or(crate::syscall::errno::EFAULT)?;
+        if !super::is_allocatable_ram_phys_addr(pa.0) {
+            return Err(crate::syscall::errno::EFAULT);
+        }
+        Ok(Some(pa))
+    }
+
     pub fn fault_in_trap_va(
         &mut self,
         addr: VirtAddr,
@@ -1236,7 +1263,7 @@ impl<T: PageTable> AddressSpaceInner<T> {
         mapper
             .map_privileged_user_page(
                 VirtAddr::from(TRAMPOLINE).into(),
-                PhysAddr::from(strampoline as usize).into(),
+                PhysAddr::from(kernel_linked_to_phys(strampoline as *const () as usize)).into(),
                 MapPermission::R | MapPermission::X,
             )
             .unwrap();
@@ -1248,7 +1275,8 @@ impl<T: PageTable> AddressSpaceInner<T> {
         mapper
             .map_user_page(
                 VirtAddr::from(SIGNAL_TRAMPOLINE).into(),
-                PhysAddr::from(ssignaltrampoline as usize).into(),
+                PhysAddr::from(kernel_linked_to_phys(ssignaltrampoline as *const () as usize))
+                    .into(),
                 MapPermission::R | MapPermission::X | MapPermission::U,
             )
             .unwrap();

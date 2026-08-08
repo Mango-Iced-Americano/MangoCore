@@ -74,7 +74,7 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
   +-------------------------------------------------------------------+
 |                  PageCache 层 (缓存 + 回写)                         |
 |    Loading -> UpToDate <-> Dirty -> Writeback                     |
-|    后台写回约 32MB，节流约 64MB，批量 256 页                       |
+|    正常 write 延迟回写；仅 fsync/close 或紧急内存压力批量 256 页    |
   +-------------------------------------------------------------------+
   +-------------------------------------------------------------------+
   |                  BlockDevice 层 (驱动抽象)                          |
@@ -87,13 +87,15 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 
 **File 结构体 (os/src/fs/vfs/file.rs):** fd 层与 VFS 的接口。每个打开的 fd 对应一个 `Arc<File>` 实例，持有 inode 引用和打开标志。提供 `read()`、`write()`、`ioctl()`、`poll()`、`mmap()` 等方法。通过 `FdTable` 管理每个进程的文件描述符空间。
 
-**IndexNode trait (os/src/fs/vfs/index_node.rs):** VFS 的核心抽象，对标 Linux inode。所有具体文件系统 inode 都实现此 trait。方法包括 `read_at()`、`write_at()`、`find()`、`create()`、`link()`、`unlink()`、`rename()`、`symlink()`、`metadata()`、`resize()`、`page_cache()`、`poll()`、`ioctl()`。每个 inode 有全局唯一的 `InodeId`。
+**IndexNode trait (os/src/fs/vfs/index_node.rs):** VFS 的核心抽象，对标 Linux inode。所有具体文件系统 inode 都实现此 trait。方法包括 `read_at()`、`write_at()`、`touch_modified()`、`find()`、`create()`、`link()`、`unlink()`、`rename()`、`symlink()`、`metadata()`、`resize()`、`page_cache()`、`poll()`、`ioctl()`。每个 inode 有全局唯一的 `InodeId`。
 
 **FileSystem trait (os/src/fs/vfs/file_system.rs):** 具体文件系统的抽象接口。提供 `root_inode()`、`info()`、`name()`、`super_block()`、`statfs()` 等方法。
 
 **MountFS (os/src/fs/vfs/mount.rs):** 包装层，处理跨文件系统边界的路径解析和挂载传播。每个 MountFS 持有 `BTreeMap<InodeId, Arc<MountFS>>` 挂载点表，在 `find()` 时检查子挂载点并将操作委托到对应 FS。支持 bind mount、recursive bind mount、mount propagation（shared / private / slave）。
 
-**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。后台写回阈值约 32MB、节流阈值约 64MB，批量为 256 页；`reclaim.rs` 周期性探测并回收。
+**PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。单个 packed `PG_*` 原子位负责每页写入、回写和截断之间的序列化；正常 write 仅发布每页脏位，后台写回从 32 MiB 水位开始按空闲帧比例协作执行，`fsync`/最后一次 `close` 负责持久化，`reclaim.rs` 周期性探测并回收。
+
+**another_ext4 时间戳缓存：** regular-file 写成功后只在 `InodeLifetime` 更新 mtime/ctime 原子缓存，不读取或修改 ext4 inode 块。`metadata()` 在缓存 dirty 时返回新时间戳；`fsync`、`syncfs` 与全局 `sync` 在数据回写后将两个时间戳合并为一次 `setattr`，仅在最终设备 flush 成功后清除 dirty 标记。
 
 ### 特殊文件描述符
 

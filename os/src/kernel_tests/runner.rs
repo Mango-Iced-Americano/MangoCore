@@ -7,11 +7,11 @@
 //!
 //! A machine-parseable result marker is printed before shutdown for CI integration.
 
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::bootargs::BootConfig;
 use crate::hal;
 use crate::timer;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // ── ANSI color constants ────────────────────────────────────────
 const COLOR_GREEN: &str = "\x1b[32m";
@@ -96,11 +96,17 @@ fn skipped_test_stub() -> Result<(), &'static str> {
 /// Get the architecture name string for diagnostic output.
 fn arch_name() -> &'static str {
     #[cfg(feature = "riscv")]
-    { "riscv64" }
+    {
+        "riscv64"
+    }
     #[cfg(feature = "loongarch64")]
-    { "loongarch64" }
+    {
+        "loongarch64"
+    }
     #[cfg(not(any(feature = "riscv", feature = "loongarch64")))]
-    { "unknown" }
+    {
+        "unknown"
+    }
 }
 
 /// Test result summary returned by the runner.
@@ -306,33 +312,39 @@ pub fn run_tests(config: &BootConfig, test_groups: &[(&str, Vec<KernelTest>)]) -
 
 fn shutdown_success() -> ! {
     crate::println!("# ktest: tests passed; committing filesystems before shutdown.");
-    let _ = crate::fs::flush_all_page_caches();
+    if let Err(error) = crate::fs::flush_all_page_caches() {
+        crate::println!("# ktest: page-cache writeback failed: {:?}", error);
+    }
     match crate::fs::vfs::mount::shutdown_all_backends() {
         Ok(()) => {
             crate::println!("{}[KTEST RESULT: PASS]{}", COLOR_GREEN, COLOR_RESET);
-            crate::println!("# ktest: all tests and filesystem teardown passed. shutting down.");
         }
         Err(error) => {
             crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
             crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
         }
     }
-    for _ in 0..1000 {
+    for _ in 0..100000 {
         core::hint::spin_loop();
     }
-    hal::shutdown();
+    ktest_exit();
 }
 
 fn shutdown_failure() -> ! {
     crate::println!("# ktest: tests FAILED; attempting filesystem teardown.");
-    let _ = crate::fs::flush_all_page_caches();
+    if let Err(error) = crate::fs::flush_all_page_caches() {
+        crate::println!("# ktest: page-cache writeback failed: {:?}", error);
+    }
     if let Err(error) = crate::fs::vfs::mount::shutdown_all_backends() {
         crate::println!("# ktest: filesystem shutdown failed: {:?}", error);
     }
     crate::println!("{}[KTEST RESULT: FAIL]{}", COLOR_RED, COLOR_RESET);
-    crate::println!("# ktest: shutting down.");
-    for _ in 0..1000 {
+    for _ in 0..100000 {
         core::hint::spin_loop();
     }
-    hal::shutdown();
+    ktest_exit();
+}
+
+fn ktest_exit() -> ! {
+    hal::finish_test_run();
 }

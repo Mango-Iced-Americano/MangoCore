@@ -4,7 +4,7 @@ module: os/src/net/adapter.rs
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: "2026-06-29"
+last_updated: "2026-08-09"
 code_paths:
   - "os/src/net/adapter.rs"
   - "os/src/drivers/net/mod.rs"
@@ -44,6 +44,12 @@ related_docs:
 - **零开销抽象**：枚举分发消除 trait 对象的虚表开销，同时规避 smoltcp `Device` trait 的 GAT object-safety 限制
 - **容错启动**：`NullNetDevice` 保证无物理网卡时协议栈仍可正常工作（仅限环回）
 
+### VirtIO-MMIO FDT 探测约束
+
+FDT 的 `virtio,mmio` 节点可同时包含块与网络设备。探测器必须在设备初始化前按
+`DeviceType` 过滤；对未匹配设备创建的只读 transport 不能触发其析构重置，否则后续
+跨类型枚举会破坏已初始化设备的 virtqueue。
+
 ## 架构
 
 ```
@@ -74,6 +80,14 @@ related_docs:
 | `VirtIONetWrapper` | `os/src/drivers/net/virtio_net.rs` | virtio-net 设备的具体驱动实现（MMIO 和 PCI 两种传输层） |
 | `NullNetDevice` | `os/src/net/adapter.rs` | 无物理网卡时的空设备，`transmit` 静默丢包 |
 | `VethDriver` | `os/src/drivers/net/veth.rs` | 虚拟以太网对的 smoltcp `Device` 实现 |
+
+### VirtIO 设备发现
+
+RV64 上的块设备和网络设备优先从 `platform_info().devices` 构造的
+`DeviceManager` 查询 `virtio,mmio` transport 条目。FDT 条目按 MMIO 基址升序
+排列，驱动逐项探测并由 VirtIO 设备头决定块设备或网络设备类型；该目录缺失或
+无可响应设备时则继续使用原有的固定 MMIO 地址探测。LA64 的 virtio PCI 枚举和
+2K1000 GMAC 初始化路径不变。
 
 ## 核心数据结构
 

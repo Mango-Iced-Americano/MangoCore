@@ -1,19 +1,16 @@
-//! Generation/lifetime sync error-precedence regression for another_ext4.
+//! Final-barrier error-precedence regression for another_ext4 lifetime sync.
 
+#[cfg(feature = "ext4_another_backend")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "ext4_another_backend")]
 use crate::fs::ext4_another::Ext4FileSystem;
-use crate::kernel_tests::runner::KernelTest;
+#[cfg(feature = "ext4_another_backend")]
 use crate::utils::error::SyscallErr;
 
-pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
-    alloc::vec![KernelTest::new(
-        "ext4_another_lifetime::partial_reclaim_runs_final_barrier",
-        test_partial_reclaim_runs_final_barrier,
-    )]
-}
-
-fn test_partial_reclaim_runs_final_barrier() -> Result<(), &'static str> {
+#[cfg(feature = "ext4_another_backend")]
+pub(super) fn test_partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error(
+) -> Result<(), &'static str> {
     let completed_reclaims = AtomicUsize::new(0);
     let final_flushes = AtomicUsize::new(0);
     let result = Ext4FileSystem::complete_lifetime_sync(
@@ -29,13 +26,13 @@ fn test_partial_reclaim_runs_final_barrier() -> Result<(), &'static str> {
     );
 
     if completed_reclaims.load(Ordering::SeqCst) != 1 {
-        return Err("lifetime sync did not run the reclaim phase");
+        return Err("lifetime sync fixture did not model partial reclaim progress");
     }
     if final_flushes.load(Ordering::SeqCst) != 1 {
-        return Err("lifetime sync skipped the final device barrier");
+        return Err("partial reclaim failure skipped the final device barrier");
     }
     match result {
         Err(SyscallErr::EIO) => Ok(()),
-        _ => Err("final barrier error replaced the scoped reclaim error"),
+        _ => Err("final barrier error overrode the scoped reclaim error"),
     }
 }

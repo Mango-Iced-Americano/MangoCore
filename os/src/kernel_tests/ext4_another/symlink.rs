@@ -101,4 +101,3 @@ fn remove_if_present(
         Err(_) => Err("stale symlink cleanup failed"),
     }
 }
-

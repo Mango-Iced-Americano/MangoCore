@@ -56,14 +56,12 @@ overall=0
 case "$arch" in
     rv64)
         target="riscv64gc-unknown-none-elf"
-        board="rvqemu"
         # initramfs is the canonical boot root for lint builds.
-        features="board_${board},block_virt,oom_handler,initramfs"
+        features="riscv,block_virt,oom_handler,initramfs"
         ;;
     la64)
         target="loongarch64-unknown-linux-gnu"
-        board="laqemu"
-        features="board_${board},block_virt_pci,oom_handler,initramfs"
+        features="boot_la_qemu,block_virt_pci,oom_handler,initramfs"
         ;;
 esac
 
@@ -104,19 +102,13 @@ case "$arch" in
 esac
 
 preload_dir="$user_output_root/$target_arch_dir/$mode"
-mkdir -p "$preload_dir" "$repo_root/user/tools/$arch/bin" "$repo_root/user/tools/$arch/lib"
+mkdir -p "$preload_dir"
 
 # Create stub binaries needed by build.rs generate_preload_assembly()
 for f in initproc fs_test ltprunner; do
     [ -f "$preload_dir/$f" ] || create_stub_elf > "$preload_dir/$f"
 done
 
-# Create stub tool binaries needed for preload
-[ -f "$repo_root/user/tools/$arch/bin/bash" ] || create_stub_elf > "$repo_root/user/tools/$arch/bin/bash"
-[ -f "$repo_root/user/tools/$arch/bin/busybox" ] || create_stub_elf > "$repo_root/user/tools/$arch/bin/busybox"
-# Determine LTP compat library name based on arch
-ltp_compat="ltp_proto_compat-$arch.so"
-[ -f "$repo_root/user/tools/$arch/lib/$ltp_compat" ] || create_stub_elf > "$repo_root/user/tools/$arch/lib/$ltp_compat"
 [ -f "$repo_root/os_test.conf" ] || touch "$repo_root/os_test.conf"
 
 # ---- 3. Run cargo check, capture stderr ----

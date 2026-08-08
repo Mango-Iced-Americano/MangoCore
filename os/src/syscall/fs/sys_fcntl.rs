@@ -1,4 +1,5 @@
 use super::common::*;
+use crate::fs::Pipe;
 
 pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
     let task = current_task().unwrap();
@@ -12,7 +13,10 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
         arg
     );
 
-    let command = match FcntlCommand::try_from_primitive(cmd) { Ok(c) => c, Err(_) => return -(SyscallErr::EINVAL as isize), };
+    let command = match FcntlCommand::try_from_primitive(cmd) {
+        Ok(c) => c,
+        Err(_) => return -(SyscallErr::EINVAL as isize),
+    };
     match command {
         FcntlCommand::DupFd | FcntlCommand::DupFdCloexec => {
             let cloexec = matches!(command, FcntlCommand::DupFdCloexec);
@@ -28,11 +32,17 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
         }
         FcntlCommand::GetFd => {
             // Check that fd is valid first
-            match fd_table.get_file(fd) { Ok(_) => {}, Err(e) => return -(e as isize), };
+            match fd_table.get_file(fd) {
+                Ok(_) => {}
+                Err(e) => return -(e as isize),
+            };
             fd_table.get_cloexec(fd) as isize
         }
         FcntlCommand::SetFd => {
-            match fd_table.set_cloexec(fd, (arg & vfs::FD_CLOEXEC) != 0) { Ok(_) => {}, Err(e) => return -(e as isize), };
+            match fd_table.set_cloexec(fd, (arg & vfs::FD_CLOEXEC) != 0) {
+                Ok(_) => {}
+                Err(e) => return -(e as isize),
+            };
             if (arg & !vfs::FD_CLOEXEC) != 0 {
                 warn!("[fcntl] Unsupported flag exists: {:X}", arg);
             }
@@ -92,8 +102,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             drop(fd_table);
             fcntl_getlk_ofd(&file, arg)
         }
-        FcntlCommand::SetLock
-        | FcntlCommand::SetLockWait => {
+        FcntlCommand::SetLock | FcntlCommand::SetLockWait => {
             let file = match fd_table.get_file(fd) {
                 Ok(file) => file,
                 Err(e) => return -(e as isize),
@@ -103,8 +112,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
             drop(fd_table);
             fcntl_setlk(&file, arg, owner_pid, wait)
         }
-        FcntlCommand::OfdSetLock
-        | FcntlCommand::OfdSetLockWait => {
+        FcntlCommand::OfdSetLock | FcntlCommand::OfdSetLockWait => {
             let file = match fd_table.get_file(fd) {
                 Ok(file) => file.clone(),
                 Err(e) => return -(e as isize),
@@ -222,9 +230,7 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Err(e) => return -(e as isize),
             };
             let token = current_user_token();
-            let oe: vfs::FOwnerEx = match UserPtr::<vfs::FOwnerEx>::from_addr(arg)
-                .read(token)
-            {
+            let oe: vfs::FOwnerEx = match UserPtr::<vfs::FOwnerEx>::from_addr(arg).read(token) {
                 Ok(v) => v,
                 Err(e) => return e,
             };
@@ -271,15 +277,13 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Err(e) => return -(e as isize),
             };
             let t = arg as i16;
-            use crate::fs::vfs::fcntl::{F_RDLCK, F_WRLCK, F_UNLCK};
+            use crate::fs::vfs::fcntl::{F_RDLCK, F_UNLCK, F_WRLCK};
             match t {
                 F_RDLCK => {
                     if !file.flags().is_readable() {
                         return -(SyscallErr::EAGAIN as isize);
                     }
-                    if !file.flags().is_read_only()
-                        || is_writable_inode_busy(&file.inode)
-                    {
+                    if !file.flags().is_read_only() || is_writable_inode_busy(&file.inode) {
                         return -(SyscallErr::EAGAIN as isize);
                     }
                     *file.lease.lock() = Some(F_RDLCK);
@@ -307,7 +311,11 @@ pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
                 Ok(f) => f,
                 Err(e) => return -(e as isize),
             };
-            if file.created_by_open() { 1 } else { 0 }
+            if file.created_by_open() {
+                1
+            } else {
+                0
+            }
         }
         FcntlCommand::CancelLock => ENOSYS,
         FcntlCommand::GetRwHint | FcntlCommand::GetFileRwHint => {

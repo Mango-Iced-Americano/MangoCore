@@ -24,6 +24,7 @@ pub use arch::program_timer_delta;
 pub use arch::quiesce_local_timer_interrupt;
 pub use arch::reclaim_retired_kernel_stacks;
 pub use arch::remote_user_tlb_invalidate_range;
+pub use arch::reboot;
 pub use arch::tlb_invalidate;
 pub use arch::user_tlb_invalidate;
 pub use arch::user_tlb_invalidate_page;
@@ -38,6 +39,8 @@ pub use arch::{
 pub use arch::{
     console_flush, console_getchar, console_putchar, console_write_bytes, panic_console_write,
 };
+#[cfg(target_arch = "riscv64")]
+pub use arch::configure_runtime_console;
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
 pub use arch::{irq_enabled, local_irq_restore, local_irq_save};
@@ -47,8 +50,18 @@ pub use arch::{
     KernelPageTableImpl, KernelStack, MachineContext, PageTableImpl, TrapContext, TrapImpl,
     UserContext, UserSignalMask,
 };
-pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END};
-pub use arch::{MMIO, TICKS_PER_SEC};
+pub use arch::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, TICKS_PER_SEC};
+pub use arch::{MEMORY_END, MMIO};
+pub use boot::{boot_info, save_boot_info, BootProtocol, RawBootInfo};
+
+pub fn finish_test_run() -> ! {
+    if platform::is_real_board() {
+        crate::println!("[exit] rebooting to firmware (real board)");
+        reboot()
+    }
+    crate::println!("[exit] shutting down (emulator or unknown platform)");
+    shutdown()
+}
 
 /// 动态内核栈保留映射的上限。
 ///

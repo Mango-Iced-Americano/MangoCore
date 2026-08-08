@@ -222,13 +222,7 @@ impl Router {
                 IpCidr::Ipv4(cidr) => IpCidr::Ipv4(cidr.network()),
                 IpCidr::Ipv6(cidr) => IpCidr::Ipv6(cidr),
             };
-            self.add_route(
-                network,
-                None,
-                eth0_ifindex,
-                0,
-                RouteType::Connected,
-            );
+            self.add_route(network, None, eth0_ifindex, 0, RouteType::Connected);
 
             if let Some(gw) = crate::net::net_core::default_gateway() {
                 self.add_route(

@@ -4,6 +4,12 @@ use super::NetDevice;
 use crate::drivers::block::virtio_blk::VirtioHal;
 #[cfg(feature = "block_virt_pci")]
 use crate::drivers::block::virtio_blk_pci::{enumerate_virtio_pci, VirtioHal};
+#[cfg(feature = "block_virt")]
+use crate::hal::device::DeviceManager;
+#[cfg(not(feature = "block_virt"))]
+use alloc::sync::Arc;
+#[cfg(feature = "block_virt")]
+use alloc::{sync::Arc, vec::Vec};
 
 #[cfg(feature = "block_virt")]
 use core::ptr::NonNull;
@@ -11,14 +17,14 @@ use spin::Mutex;
 use virtio_drivers::device::net::{TxBuffer, VirtIONet};
 #[cfg(feature = "block_virt")]
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
+#[cfg(feature = "block_virt")]
+use virtio_drivers::transport::{DeviceType, Transport};
 #[cfg(feature = "block_virt_pci")]
 use virtio_drivers::transport::{pci::PciTransport, DeviceType};
 
 // 网卡需要额外的缓冲区大小，通常 2048 足够容纳以太网最大帧
 const NET_BUF_SIZE: usize = 2048;
 
-#[cfg(feature = "block_virt")]
-const VIRTIO_NET_BASE: usize = 0x10008000;
 // 网卡接收队列的大小
 const QUEUE_SIZE: usize = 16;
 
@@ -29,13 +35,21 @@ pub struct VirtIONetWrapper(Mutex<VirtIONet<VirtioHal, PciTransport, QUEUE_SIZE>
 
 #[cfg(feature = "block_virt")]
 impl VirtIONetWrapper {
-    pub fn new() -> Option<Self> {
+    pub fn try_new(base_addr: usize) -> Option<Self> {
+        // SAFETY: [Categories 6 and 13 — aligned access and library contract]
+        // Platform device discovery supplies a mapped, page-aligned VirtIO MMIO
+        // region that remains valid for the kernel lifetime.
         unsafe {
-            let transport = MmioTransport::new(
-                NonNull::new_unchecked(VIRTIO_NET_BASE as *mut VirtIOHeader),
-                0x1000,
-            )
-            .ok()?;
+            let transport =
+                MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?;
+
+            if transport.device_type() != DeviceType::Network {
+                // `MmioTransport::drop` resets the device. This transport only read the
+                // immutable device ID while filtering the FDT catalogue, so it must not
+                // reset a device owned by another driver.
+                core::mem::forget(transport);
+                return None;
+            }
 
             // 创建网卡设备，注意这里直接把 VirtioHal 传进去了
             let net = VirtIONet::<VirtioHal, MmioTransport<'static>, QUEUE_SIZE>::new(
@@ -47,6 +61,31 @@ impl VirtIONetWrapper {
             Some(Self(Mutex::new(net)))
         }
     }
+}
+
+/// Probe a VirtIO network device described by the platform device catalogue.
+#[cfg(feature = "block_virt")]
+pub fn probe_net_from_device_manager(dm: &DeviceManager) -> Option<Arc<dyn NetDevice>> {
+    let mut virtio_devices: Vec<_> = dm
+        .find_enabled_by_compatible("virtio,mmio")
+        .into_iter()
+        .filter(|device| device.mmio_range(0).is_some())
+        .collect();
+    virtio_devices
+        .sort_by_key(|device| device.mmio_range(0).map(|range| range.base).unwrap_or(usize::MAX));
+
+    for dev_info in virtio_devices {
+        let Some(range) = dev_info.mmio_range(0) else {
+            continue;
+        };
+        let base_addr = range.base;
+        let Some(net_device) = VirtIONetWrapper::try_new(base_addr) else {
+            continue;
+        };
+        return Some(Arc::new(net_device));
+    }
+
+    None
 }
 
 #[cfg(feature = "block_virt_pci")]

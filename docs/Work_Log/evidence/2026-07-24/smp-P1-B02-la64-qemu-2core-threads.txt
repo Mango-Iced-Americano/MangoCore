@@ -1,6 +1,0 @@
-[qemu-process] pid=47842
-  47842   47842 qemu-system-loo
-  47842   47844 qemu-system-loo
-  47842   47845 qemu-system-loo
-  47842   47846 qemu-system-loo
-  47842   47847 qemu-system-loo

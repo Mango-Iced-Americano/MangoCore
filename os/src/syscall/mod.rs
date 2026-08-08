@@ -15,8 +15,10 @@ use crate::fs::timerfd::{
     sys_timerfd_create, sys_timerfd_gettime, sys_timerfd_settime, TimerFdSpec,
 };
 use crate::net::syscall::*;
+use alloc::collections::BTreeSet;
 use core::convert::TryFrom;
 use flock::*;
+use spin::Mutex;
 use fs::*;
 use log::{error, info};
 use process::*;
@@ -306,6 +308,9 @@ use crate::{
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
+/// Log each unknown syscall id exactly once (first hit) to stop rseq/fsopen spam.
+static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
     let _syscall_start = crate::task::perf::perf_time_now();
@@ -530,12 +535,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4],
             args[5] as u32,
         ),
-        SYSCALL_TEE => sys_tee(
-            args[0],
-            args[1],
-            args[2],
-            args[3] as u32,
-        ),
+        SYSCALL_TEE => sys_tee(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3] as u32),
         SYSCALL_READLINKAT => {
             sys_readlinkat(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])
@@ -860,7 +860,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MUNLOCKALL => sys_munlockall(),
         SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2]),
         #[cfg(feature = "riscv")]
-        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4]),
+        SYSCALL_RISCV_HWPROBE => {
+            sys_riscv_hwprobe(args[0] as *const u8, args[1], args[2], args[3], args[4])
+        }
         #[cfg(feature = "riscv")]
         SYSCALL_RISCV_FLUSH_ICACHE => sys_riscv_flush_icache(args[0], args[1], args[2]),
         SYSCALL_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
@@ -968,19 +970,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
                     );
                 }
             }
-            println!(
-                "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
-                syscall_name(syscall_id),
-                syscall_id,
-                args
-            );
-            error!(
-                "Unsupported syscall:{} ({}), calling over arguments:",
-                syscall_name(syscall_id),
-                syscall_id
-            );
-            for i in 0..args.len() {
-                error!("args[{}]: {:X}", i, args[i]);
+            if REPORTED_UNSUPPORTED.lock().insert(syscall_id) {
+                println!(
+                    "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
+                    syscall_name(syscall_id),
+                    syscall_id,
+                    args
+                );
+                error!(
+                    "Unsupported syscall:{} ({}), calling over arguments:",
+                    syscall_name(syscall_id),
+                    syscall_id
+                );
+                for i in 0..args.len() {
+                    error!("args[{}]: {:X}", i, args[i]);
+                }
             }
             /*
             crate::task::current_task()
@@ -1099,6 +1103,12 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
 }
 
 #[cfg(feature = "riscv")]
-pub fn sys_riscv_hwprobe(_pairs: *const u8, _count: usize, _cpusetsize: usize, _cpuset: usize, _flags: usize) -> isize {
+pub fn sys_riscv_hwprobe(
+    _pairs: *const u8,
+    _count: usize,
+    _cpusetsize: usize,
+    _cpuset: usize,
+    _flags: usize,
+) -> isize {
     errno::ENOSYS
 }

@@ -4,10 +4,10 @@
 
 // Sizes
 /// QEMU la64 exposes high memory as memory@80000000 with size 0x30000000.
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const MEMORY_SIZE: usize = 0x3000_0000;
 /// 2K1000LA exposes two DRAM banks whose combined capacity is 2 GiB.
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const MEMORY_SIZE: usize = 0x8000_0000;
 pub const USER_STACK_SIZE: usize = PAGE_SIZE * 0x100;
 pub const USER_STACK_INIT_SIZE: usize = PAGE_SIZE * 0x40;
@@ -52,15 +52,15 @@ pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x10000;
 
 // Addresses
 /// QEMU 提供 48 位物理/虚拟地址模型。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const PALEN: usize = 48;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const VALEN: usize = 48;
 /// 2K1000LA 在 CPUCFG1 中报告 PABITS=VABITS=40。如果误用 QEMU 的 48 位模型，
 /// 内核会接受非规范地址，CPU 将在硬件页表遍历器读取有效 PTE 前抛出 AddressError。
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const PALEN: usize = 40;
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const VALEN: usize = 40;
 /// Maximum address in virtual address space.
 /// May be used to extract virtual address from a segmented address
@@ -113,15 +113,15 @@ pub const SUC_DMW_VSEG: usize = 8;
 pub const MEMORY_HIGH_BASE: usize = HIGH_BASE_ZERO;
 pub const MEMORY_HIGH_BASE_VPN: usize = MEMORY_HIGH_BASE >> PAGE_SIZE_BITS;
 pub const USER_STACK_BASE: usize = TASK_SIZE - PAGE_SIZE | LA_START;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const MEMORY_START: usize = 0x0000_0000_8000_0000;
 // `MEMORY_START` remains the kernel load bank base. It is not the lowest DRAM
-// address on 2K1000LA; callers that need all RAM must iterate MEMORY_REGIONS.
-#[cfg(feature = "board_2k1000")]
+// address on 2K1000LA; callers that need all RAM must iterate firmware regions.
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const MEMORY_START: usize = 0x0000_0000_9000_0000;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const MEMORY_END: usize = MEMORY_SIZE + MEMORY_START;
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const MEMORY_END: usize = 0x0000_0001_0000_0000;
 
 /// Physical DRAM banks as half-open byte ranges.
@@ -129,17 +129,17 @@ pub const MEMORY_END: usize = 0x0000_0001_0000_0000;
 /// The 2K1000LA hole at 0x10000000..0x90000000 contains MMIO/non-RAM and must
 /// never be converted into allocatable frames. U-Boot enters MangoCore through
 /// a DMW alias, but these are the raw physical addresses used in PTEs and DMA.
-#[cfg(feature = "board_laqemu")]
-pub const MEMORY_REGIONS: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
-#[cfg(feature = "board_2k1000")]
-pub const MEMORY_REGIONS: &[(usize, usize)] =
+#[cfg(feature = "boot_la_qemu")]
+pub const MEMORY_REGIONS_FALLBACK: &[(usize, usize)] = &[(MEMORY_START, MEMORY_END)];
+#[cfg(feature = "boot_la_uboot_dmw")]
+pub const MEMORY_REGIONS_FALLBACK: &[(usize, usize)] =
     &[(0x0000_0000, 0x1000_0000), (0x9000_0000, MEMORY_END)];
 
 /// DRAM ranges still owned by firmware or active devices after `bootm`.
-#[cfg(feature = "board_laqemu")]
-pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[];
-#[cfg(feature = "board_2k1000")]
-pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
+#[cfg(feature = "boot_la_qemu")]
+pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[];
+#[cfg(feature = "boot_la_uboot_dmw")]
+pub const FIRMWARE_RESERVED_REGIONS_FALLBACK: &[(usize, usize)] = &[
     // U-Boot LMB/stack, the active DVO framebuffer, CPU1's U-Boot park loop,
     // and BPI/SMBIOS data. This can be split and reclaimed only after those
     // owners have been explicitly quiesced or copied.
@@ -151,11 +151,13 @@ pub const FIRMWARE_RESERVED_REGIONS: &[(usize, usize)] = &[
 /// `MEMORY_SIZE` is the installed DRAM capacity. Linux-compatible memory
 /// statistics use this smaller value until the board handoff code explicitly
 /// quiesces the firmware owners and releases their carveouts.
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const USABLE_MEMORY_SIZE: usize = MEMORY_SIZE;
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const USABLE_MEMORY_SIZE: usize =
-    MEMORY_SIZE - (FIRMWARE_RESERVED_REGIONS[0].1 - FIRMWARE_RESERVED_REGIONS[0].0) - PAGE_SIZE;
+    MEMORY_SIZE
+        - (FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 - FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0)
+        - PAGE_SIZE;
 
 pub const SV39_SPACE: usize = 1 << 39;
 pub const USR_SPACE_LEN: usize = SV39_SPACE >> 2;
@@ -175,12 +177,12 @@ pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & 
 // 512G的虚拟内存？
 pub const MMAP_BASE: usize = 0xFFFF_FF80_0000_0000;
 pub const MMAP_END: usize = 0xFFFF_FFFF_FFFF_0000;
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const KERNEL_STACK_TOP: usize = MMAP_BASE - PAGE_SIZE;
 // 当 VALEN=40 时，MMAP_BASE 是高半区第一个规范地址。若将栈放在它下方，会产生
 // 位于非规范空洞中的 0xffffff7... 地址，并在页表转换开始前触发 AddressError。
 // 因此改为从规范高半区顶部向下分配栈槽。
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const KERNEL_STACK_TOP: usize = MMAP_END - PAGE_SIZE;
 pub const KERNEL_STACK_BOTTOM: usize =
     KERNEL_STACK_TOP - KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS;
@@ -213,15 +215,15 @@ const _: () = {
     assert!(KERNEL_PROGRAM_END & PAGE_TABLE_VA_MASK == KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
 };
 
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 const _: () = {
     assert!(MEMORY_SIZE == 0x1000_0000 + 0x7000_0000);
     assert!(MEMORY_END == 0x1_0000_0000);
-    assert!(MEMORY_REGIONS[0].1 <= MEMORY_REGIONS[1].0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].0 % PAGE_SIZE == 0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].1 % PAGE_SIZE == 0);
-    assert!(MEMORY_REGIONS[0].0 <= FIRMWARE_RESERVED_REGIONS[0].0);
-    assert!(FIRMWARE_RESERVED_REGIONS[0].1 <= MEMORY_REGIONS[0].1);
+    assert!(MEMORY_REGIONS_FALLBACK[0].1 <= MEMORY_REGIONS_FALLBACK[1].0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0 % PAGE_SIZE == 0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 % PAGE_SIZE == 0);
+    assert!(MEMORY_REGIONS_FALLBACK[0].0 <= FIRMWARE_RESERVED_REGIONS_FALLBACK[0].0);
+    assert!(FIRMWARE_RESERVED_REGIONS_FALLBACK[0].1 <= MEMORY_REGIONS_FALLBACK[0].1);
     assert!(USABLE_MEMORY_SIZE == 0x7cbf_3000);
     assert!(KERNEL_STACK_TOP == 0xFFFF_FFFF_FFFE_F000);
     assert!(KERNEL_STACK_BOTTOM == 0xFFFF_FFFF_F7BE_F000);
@@ -229,11 +231,11 @@ const _: () = {
 };
 
 // QEMU 将传统内存磁盘镜像放在 RAM 起点以上 256MiB 处。
-#[cfg(feature = "board_laqemu")]
+#[cfg(feature = "boot_la_qemu")]
 pub const DISK_IMAGE_BASE: usize = 0x1000_0000 + MEMORY_START;
 // 2K1000 上板阶段不启用该旧内存根路径；将占位地址放到帧分配器管理范围之外，避免与
 // 内核镜像发生冲突。
-#[cfg(feature = "board_2k1000")]
+#[cfg(feature = "boot_la_uboot_dmw")]
 pub const DISK_IMAGE_BASE: usize = MEMORY_END;
 // 256
 pub const BUFFER_CACHE_NUM: usize = 256 * 1024 * 1024 / 2048 * 4 / 2048;

@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(linkage)]
+#![feature(lint_reasons)]
 #![feature(asm_const)]
 #![feature(naked_functions)]
 #![feature(asm_experimental_arch)]
@@ -30,6 +31,17 @@ pub use hal::config;
 extern crate alloc;
 extern crate core;
 
+#[cfg(all(
+    target_arch = "loongarch64",
+    not(any(feature = "boot_la_qemu", feature = "boot_la_uboot_dmw"))
+))]
+compile_error!("LA64 requires a LoongArch boot profile");
+#[cfg(all(
+    target_arch = "loongarch64",
+    all(feature = "boot_la_qemu", feature = "boot_la_uboot_dmw")
+))]
+compile_error!("LoongArch boot profiles are mutually exclusive");
+
 #[macro_use]
 extern crate bitflags;
 
@@ -53,11 +65,13 @@ mod timer;
 mod trace;
 mod utils;
 
-use crate::hal::bootstrap_init;
-use crate::hal::machine_init;
-#[cfg(all(feature = "loongarch64", feature = "board_2k1000"))]
+use crate::hal::{bootstrap_init, machine_init};
+
+#[cfg(all(feature = "loongarch64", feature = "boot_la_uboot_dmw"))]
 core::arch::global_asm!(include_str!("hal/arch/loongarch64/entry.asm"));
-#[cfg(feature = "riscv")]
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(include_str!("hal/arch/riscv/image_header.S"));
+#[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(include_str!("hal/arch/riscv/entry.asm"));
 
 // ── Initramfs root cpio (small boot root filesystem) ──
@@ -77,7 +91,9 @@ fn mem_clear() {
         fn ebss();
     }
     unsafe {
-        core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
+        let start = sbss as *const () as usize;
+        let end = ebss as *const () as usize;
+        core::slice::from_raw_parts_mut(start as *mut u8, end - start)
             .fill(0);
     }
 
@@ -87,7 +103,11 @@ fn mem_clear() {
         // 按编译期 MEMORY_END 清一段连续地址：LA64 有内存洞，QEMU 的 `-m`
         // 也会改变 RAM 末端。复用固件 region 迭代器，并排除整个内核镜像，既
         // 保护 boot stack/FDT 快照，也与随后 frame allocator 的所有权边界一致。
-        let kernel_image = [(skernel as usize, ekernel as usize)];
+        // 内核以 KERNEL_LINK_VADDR 链接，排除前必须先转成物理地址（与
+        // `frame_allocator::for_each_usable_frame_region` 保持同一所有权边界）。
+        let kernel_start = hal::boot::kernel_linked_to_phys(skernel as *const () as usize);
+        let kernel_end = hal::boot::kernel_linked_to_phys(ekernel as *const () as usize);
+        let kernel_image = [(kernel_start, kernel_end)];
         hal::firmware::for_each_usable_ram_range(&kernel_image, |start, end| unsafe {
             core::slice::from_raw_parts_mut(start as *mut u8, end - start).fill(0);
         });
@@ -112,28 +132,31 @@ pub extern "C" fn rust_main(cpu_id: usize, boot_arg: usize) -> ! {
 /// 只有逻辑 CPU0 可以进入原有的 MangoCore 全局初始化路径。
 fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     task::perf::record_boot_stage(task::perf::BOOT_STAGE_ENTRY);
-    // 入口参数必须在任何架构初始化之前冻结，避免固件寄存器语义丢失；
-    // AP 不得重复覆盖这份 `.data.boot` 快照。
-    hal::boot::init_bsp(hardware_id, boot_arg);
+    // 入口参数由 entry.asm 冻结到 RAW_* 槽，这里在任何架构初始化之前
+    // 读取为不可变快照；AP 不得重复覆盖这份 `.data.boot` 数据。
+    crate::hal::boot::save_boot_info();
     // Phase 1 中 AP 只执行 CPU-local 初始化并 park，因此 BSS、堆、驱动、
     // 文件系统和旧全局调度器仍由 CPU0 单独拥有。
     bootstrap_init(cpu_id);
     // LA64 必须先建立 DMW、异常入口和页表寄存器基线；RV64 的 FDT 又必须
     // 在清 BSS 前复制，所以固件资源发现固定在这两个启动边界之间。
-    hal::firmware::discover_early_resources();
+    crate::hal::firmware::populate_memory_regions();
     mem_clear();
     console::log_init();
     trace::init();
+    // bsp_main 的参数当前只用于 BSP/AP 分流；启动寄存器已由 entry.asm
+    // 冻结进 RAW_* 槽并经 save_boot_info 快照，不再重复保存硬件参数。
+    let _ = (hardware_id, boot_arg);
+    let bi = crate::hal::boot::boot_info();
+    println!(
+        "[kernel] Boot protocol: {:?}, hart_id={}, dtb_paddr={:#x}",
+        bi.protocol, bi.hart_id, bi.dtb_paddr
+    );
     println!("[kernel] Console initialized.");
     mm::init();
     // PlatformInfo 内含 String/Vec，只能在堆可用后构造；bring_up AP 之前
     // 完成 Once 发布，保证 AP 后续只能看到完整的不可变对象。
     hal::platform::init_platform();
-    let boot_info = hal::boot::boot_info();
-    println!(
-        "[kernel] Boot protocol: {:?}, hardware_id={}, firmware_arg={:#x}",
-        boot_info.protocol, boot_info.hardware_id, boot_info.firmware_arg_paddr
-    );
     let platform_info = hal::platform::platform_info();
     println!(
         "[kernel] Firmware resources: ram_regions={}, reserved={}, early_mmio={}, usable={} MiB",
@@ -149,9 +172,10 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
         platform_info.devices.len(),
     );
     println!("[kernel] Hello, world!");
-    // note that remap_test is currently NOT supported by LA64, for the whole kernel space is RW!
-    // #[cfg(feature = "riscv")]
-    // mm::remap_test();
+    // `init_platform()`（SMP 兼容入口）已在 mm::init() 后发布 PlatformInfo，
+    // develop 侧 `init_platform_info()` 由它内部调用，无需再次初始化。
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::configure_runtime_console();
 
     machine_init();
     crate::task::timer_cpu_init();
@@ -163,27 +187,21 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     // AP 只发布 online 并 park，后续 initramfs、驱动和 PID1 仍由 CPU0 执行。
     smp::bring_up_secondary_cpus();
 
-    // 尽早加载 bootargs — Regression/Ktest 模式需要跳过某些 init 步骤
     let boot_config = crate::bootargs::load();
 
-    // ── Initramfs 启动路径 ──
     #[cfg(feature = "initramfs")]
     {
-        // 在 mm::init() 之后创建 VFS_ROOT: 创建 RamFS + 解包 cpio + 挂载 devfs bootstrap
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
-
-        // Regression 模式：跳过网卡和块设备初始化（纯 initramfs，无外部磁盘）
         if boot_config.mode != crate::bootargs::BootMode::Regression {
             drivers::init_net_device();
             net::config::init();
-
-            // 先探测块设备并注册 devfs 节点（需要连续物理页 DMA）。
-            // PID1 owns the later x0/x1 mount policy.
-            fs::register_boot_block_devices();
+            fs::mount_boot_block_devices(&boot_config);
         } else {
-            crate::println!("[kernel] Regression mode — skipping net/block init");
+            crate::println!("[kernel] Regression mode — skipping block init");
         }
+        // Network always initialised: Unix sockets, eventfd, epoll, futex
+        // all depend on NET_INTERFACE being up regardless of NIC presence.
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
@@ -203,7 +221,6 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
             boot_config.tests,
             boot_config.repeat,
         );
-        // Store the config so the fn()-only trampoline can access it.
         *crate::kernel_tests::KTEST_BOOT_CONFIG.lock() = Some(boot_config);
         // ktest 也必须由任务上下文推进 smoltcp；hard IRQ 只发布 poll generation。
         // worker 和 runner 都固定在 CPU0，按 FIFO 顺序先让 worker建立等待协议。
@@ -213,11 +230,9 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
         // Spawned test helpers (wakers, additional waiters) run and exit
         // within the scheduler before the runner finishes.
         crate::task::spawn_ktest_task(crate::kernel_tests::run_ktest_entry);
-        // Enter scheduler — ktest runner runs as a scheduled task.
         task::run_tasks();
     }
 
-    // ── Normal boot ──
     task::add_initproc();
     if boot_config.mode != crate::bootargs::BootMode::Regression {
         // 先发布 PID1，再发布常驻 worker，确保 normal 启动仍由 PID1 首次获得

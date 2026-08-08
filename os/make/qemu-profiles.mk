@@ -14,6 +14,10 @@ define qemu_zero_drives
 
 endef
 
+define qemu_ktest_command
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(1) -drive if=none,file=$(QEMU_KTEST_X0),format=raw,id=x0 $(BLK_DEV_x0) $(2)
+endef
+
 define qemu_competition_command
 $(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_COMPETITION_BEFORE_DRIVES) $(call qemu_two_drives,$(1),$(QEMU_ROLE_ARCH)) $(QEMU_COMPETITION_AFTER_DRIVES)
 endef
@@ -35,7 +39,7 @@ $(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(1) $(call qemu_zero_drives) $(2)
 endef
 
 define qemu_profile_command
-$(strip $(if $(filter normal derived-competition,$(1)),$(call qemu_competition_command,$(QEMU_DERIVED_X0)),$(if $(filter competition,$(1)),$(call qemu_competition_command,$(QEMU_COMPETITION_X0)),$(if $(filter buildstorm,$(1)),$(call qemu_buildstorm_command),$(if $(filter development,$(1)),$(call qemu_development_command),$(if $(filter debug,$(1)),$(call qemu_development_command) -S -s,$(if $(filter regression,$(1)),$(call qemu_zero_drive_command,$(QEMU_REGRESSION_BEFORE_DRIVES),$(QEMU_REGRESSION_AFTER_DRIVES)),$(if $(filter ktest,$(1)),$(call qemu_zero_drive_command,$(QEMU_KTEST_BEFORE_DRIVES),$(QEMU_KTEST_AFTER_DRIVES)),$(error unsupported QEMU profile: $(1))))))))))
+$(strip $(if $(filter normal derived-competition,$(1)),$(call qemu_competition_command,$(QEMU_DERIVED_X0)),$(if $(filter competition,$(1)),$(call qemu_competition_command,$(QEMU_COMPETITION_X0)),$(if $(filter buildstorm,$(1)),$(call qemu_buildstorm_command),$(if $(filter development,$(1)),$(call qemu_development_command),$(if $(filter debug,$(1)),$(call qemu_development_command) -S -s,$(if $(filter regression,$(1)),$(call qemu_zero_drive_command,$(QEMU_REGRESSION_BEFORE_DRIVES),$(QEMU_REGRESSION_AFTER_DRIVES)),$(if $(filter ktest,$(1)),$(call qemu_ktest_command,$(QEMU_KTEST_BEFORE_DRIVES),$(QEMU_KTEST_AFTER_DRIVES)),$(error unsupported QEMU profile: $(1))))))))))
 endef
 
 qemu-profile-dry-run:

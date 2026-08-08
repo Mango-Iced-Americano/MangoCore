@@ -205,4 +205,3 @@ pub(super) fn test_metadata_mode_persists_across_independent_mounts() -> Result<
     root.sync()
         .map_err(|_| "fsync after mode update cleanup failed")
 }
-

@@ -1,5 +1,0 @@
-cpu0_slot_size=0x40000 expected=0x40000
-stack_array_size=0x200000 expected=0x200000
-remaining_slots_size=0x1c0000 expected=0x1c0000
-upper_equals_sbss=yes
-instruction_pattern_check=pass

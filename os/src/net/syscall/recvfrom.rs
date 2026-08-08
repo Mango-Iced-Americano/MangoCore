@@ -106,14 +106,14 @@ pub fn sys_recvfrom(
         let mut recv = || match socket.socket_type() {
             PSOCK::Stream => {
                 // TCP (SOCK_STREAM): recvfrom behaves like recv, ignores from/addrlen
-                let ret = socket.try_recv(&mut kernel_buf)?;
+                let ret = socket.try_recv_without_poll(&mut kernel_buf)?;
                 Ok(ret)
             }
             PSOCK::Datagram | PSOCK::Raw => {
                 let (ret, src_ep) = if is_peek {
-                    socket.try_peek_recvmsg(&mut kernel_buf)?
+                    socket.try_peek_recvmsg_without_poll(&mut kernel_buf)?
                 } else {
-                    socket.try_recvmsg(&mut kernel_buf)?
+                    socket.try_recvmsg_without_poll(&mut kernel_buf)?
                 };
                 log::info!("[sys_recvfrom] Datagram try_recvmsg returned {} bytes", ret);
                 // `ret >= 0` 而非 `ret > 0`：UDP 允许发送 0 字节的数据报（空 payload）。

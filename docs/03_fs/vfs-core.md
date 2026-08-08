@@ -74,6 +74,7 @@ pub struct File {
 **读写语义**：
 - `read(buf)`：检查 readable 权限，获取当前 offset（流式文件取 0），调用 `inode.read_at()`，实际读取后退还更新 offset。
 - `write(buf)`：检查 writable 权限。普通模式取当前 offset 写入；O_APPEND 模式下从文件末尾写入（每次重新调用 `inode.metadata()` 获取最新大小）。流式文件始终使用 offset 0。
+- 成功写入后调用 `IndexNode::touch_modified()`。默认实现维持原有 metadata 更新；`another_ext4` 覆盖该钩子，将 mtime/ctime 写入 inode lifetime 缓存，避免每次 `write()` 的同步 inode 块读改写。缓存时间戳立即对 `metadata()` 可见，并在 `fsync`/`syncfs`/`sync` 的持久化边界合并提交。
 - `pread(offset, buf)` 和 `pwrite(offset, buf)`：不更新 offset，O_PATH 文件返回 EBADF，流式文件返回 ESPIPE。
 - `read_user` 和 `write_user`：直连 UserBuffer 版本，优先调用 `inode.read_at_user()` / `inode.write_at_user()` 实现零拷贝，fallback 到内核缓冲区的 kbuf 路径。
 

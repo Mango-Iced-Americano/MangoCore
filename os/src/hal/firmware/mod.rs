@@ -1,61 +1,85 @@
-//! 固件资源发现层。
+#![allow(static_mut_refs)]
+
+//! Firmware description providers.
 //!
-//! 初始化分为两个阶段：BSP 在清 BSS、建堆前把 FDT 复制进 `.bss.boot`
-//! 并解析固定容量的早期资源；堆可用后再构造拥有内存所有权的
-//! [`crate::hal::platform::PlatformInfo`]。AP 只读取发布后的结果。
+//! Abstracts how the kernel discovers hardware: Flattened Device Tree (FDT),
+//! ACPI tables, or compile-time static configuration.
+//!
+//! # Two-phase initialization
+//!
+//! 1. **Pre-heap** (`populate_memory_regions`): Validate and retain the raw
+//!    DTB, then parse only `/memory` nodes to populate `MEMORY_BUF`. Called
+//!    before `mm::init()` and BSS clear. Zero-allocation.
+//!
+//! 2. **Post-heap** (`build_platform_info`): Full FDT parse producing
+//!    `PlatformInfo` with device nodes, cmdline, etc. Called after `mm::init()`.
+//!
+//! RV64 直接使用 SBI 传入的 FDT；LA64 先从 EFI system table（`a2`）按
+//! `EFI_FDT_GUID` 查找 FDT，仅在 2K1000 实板 EFI 缺失时退回静态板级配置。
 
 #[cfg(target_arch = "loongarch64")]
 mod efi;
 mod fdt;
-#[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
 mod static_provider;
 
+pub use fdt::build_platform_info;
+
 use crate::hal::boot;
-use core::mem::MaybeUninit;
-#[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
 use static_provider::{FIRMWARE_RESERVED_REGIONS_FALLBACK, MEMORY_REGIONS_FALLBACK};
 
+/// Maximum number of DRAM banks supported.
 pub const MAX_MEMORY_REGIONS: usize = 8;
+/// Maximum number of firmware-reserved regions.
 pub const MAX_FIRMWARE_RESERVED: usize = 16;
+/// Maximum FDT-defined MMIO intervals mapped before driver probing.
 pub const MAX_EARLY_MMIO_RANGES: usize = 128;
+/// Maximum validated FDT size retained across BSS clear.
 pub const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
 
-/// 建堆前固定容量的固件资源表；只允许 BSP 写一次。
+/// Static buffer for memory regions populated during early boot.
+///
+/// `populate_memory_regions()` writes here before `mm::init()`; frame allocation
+/// reads the finalized data for the remainder of the kernel lifetime.
 #[link_section = ".data.boot"]
-static mut MEMORY_BUF: MemoryRegionBuf = MemoryRegionBuf::new();
+pub static mut MEMORY_BUF: MemoryRegionBuf = MemoryRegionBuf::new();
 
-struct FdtSnapshotMeta {
+/// Fixed-capacity FDT bytes retained before BSS clear.
+///
+/// The pre-heap boot path copies validated firmware bytes, then publishes
+/// `len` as its final write. The snapshot is immutable for the remainder of
+/// the kernel lifetime.
+struct FdtSnapshot {
+    bytes: [u8; MAX_FDT_SNAPSHOT_SIZE],
     len: usize,
-    source_paddr: usize,
 }
 
-impl FdtSnapshotMeta {
+impl FdtSnapshot {
     const fn new() -> Self {
         Self {
+            bytes: [0; MAX_FDT_SNAPSHOT_SIZE],
             len: 0,
-            source_paddr: 0,
         }
     }
 }
 
-/// 大缓冲放在 `sbss` 之前的 NOBITS 区，既躲过 `mem_clear()`，也不把 2 MiB
-/// 零字节写进内核镜像。只有元数据需要真实的 `.data.boot` 初值。
-#[link_section = ".bss.boot"]
-static mut FDT_SNAPSHOT_BYTES: MaybeUninit<[u8; MAX_FDT_SNAPSHOT_SIZE]> = MaybeUninit::uninit();
-
-/// 复制完成后才发布 `len`；BSP 在启动 AP 前不再修改该快照。
 #[link_section = ".data.boot"]
-static mut FDT_SNAPSHOT_META: FdtSnapshotMeta = FdtSnapshotMeta::new();
+static mut FDT_SNAPSHOT: FdtSnapshot = FdtSnapshot::new();
 
-struct MemoryRegionBuf {
-    regions: [(usize, usize); MAX_MEMORY_REGIONS],
-    reserved: [(usize, usize); MAX_FIRMWARE_RESERVED],
-    mmio: [(usize, usize); MAX_EARLY_MMIO_RANGES],
-    region_count: usize,
-    reserved_count: usize,
-    mmio_count: usize,
+/// Fixed-capacity buffer holding the FDT resources needed before allocation.
+///
+/// Populated by `populate_memory_regions()` from firmware data.
+/// Read by `memory_regions()` and `firmware_reserved_regions()`.
+pub struct MemoryRegionBuf {
+    pub regions: [(usize, usize); MAX_MEMORY_REGIONS],
+    pub reserved: [(usize, usize); MAX_FIRMWARE_RESERVED],
+    pub mmio: [(usize, usize); MAX_EARLY_MMIO_RANGES],
+    pub region_count: usize,
+    pub reserved_count: usize,
+    pub mmio_count: usize,
     #[cfg(target_arch = "riscv64")]
-    timebase_frequency: usize,
+    pub timebase_frequency: usize,
 }
 
 impl MemoryRegionBuf {
@@ -72,34 +96,43 @@ impl MemoryRegionBuf {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.region_count == 0
     }
 }
 
-/// BSP 在清 BSS 前冻结固件资源。该路径不得分配内存或等待 AP。
-pub fn discover_early_resources() {
-    assert_eq!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+/// Only the standard RV64 protocol provides an FDT in a1.
+#[cfg(target_arch = "riscv64")]
+fn has_valid_dtb() -> bool {
+    let bi = boot::boot_info();
+    matches!(bi.protocol, crate::hal::boot::BootProtocol::RiscvFdt)
+        && bi.dtb_paddr != 0
+        && bi.dtb_paddr & 0x3 == 0
+}
+
+/// Populate MEMORY_BUF from firmware data (FDT) or static fallback.
+///
+/// Called before `mem_clear()` and `mm::init()`.
+/// Must NOT allocate — operates on raw bytes.
+pub fn populate_memory_regions() {
     #[cfg(target_arch = "riscv64")]
     {
-        let info = boot::boot_info();
-        let dtb_paddr = info.firmware_arg_paddr;
-        if !matches!(info.protocol, crate::hal::boot::BootProtocol::RiscvFdt)
-            || dtb_paddr == 0
-            || dtb_paddr & 0x3 != 0
-        {
+        if !has_valid_dtb() {
             panic!("RV64 boot requires an aligned FDT in a1");
         }
-        if fdt::capture_fdt_snapshot(dtb_paddr) && fdt::parse_early_resources() {
+        let dtb_paddr = boot::boot_info().dtb_paddr;
+        if fdt::capture_fdt_snapshot(dtb_paddr) && fdt::parse_memory_regions(dtb_paddr) {
             return;
         }
-        panic!("RV64 FDT validation or early resource discovery failed");
+        panic!("RV64 boot FDT validation or pre-heap discovery failed");
     }
     #[cfg(target_arch = "loongarch64")]
     {
+        // LoongArch 优先从 EFI system table 查找 FDT（设备自动探测是最终目标）；
+        // 只有 boot_la_uboot_dmw 在 EFI 失败时才允许退回静态板级描述。
         let info = boot::boot_info();
-        let fdt_result = efi::find_fdt(info.firmware_arg_paddr).and_then(|dtb_paddr| {
-            if fdt::capture_fdt_snapshot(dtb_paddr) && fdt::parse_early_resources() {
+        let fdt_result = efi::find_fdt(info.dtb_paddr).and_then(|dtb_paddr| {
+            if fdt::capture_fdt_snapshot(dtb_paddr) && fdt::parse_memory_regions(dtb_paddr) {
                 Ok(())
             } else {
                 Err(efi::EfiFdtError::InvalidFdtBlob)
@@ -109,14 +142,15 @@ pub fn discover_early_resources() {
             return;
         }
 
-        #[cfg(feature = "board_2k1000")]
+        #[cfg(feature = "boot_la_uboot_dmw")]
         {
             // 部分 2K1000 U-Boot 环境没有安装 EFI_FDT_GUID；现有静态板级
             // 内存保留区经过实板验证，因此允许显式退回这份保守描述。
             populate_from_static();
+            crate::println!("[firmware] Using static memory configuration");
             return;
         }
-        #[cfg(feature = "board_laqemu")]
+        #[cfg(feature = "boot_la_qemu")]
         panic!(
             "LA64 QEMU requires a valid EFI/FDT handoff: {:?}",
             fdt_result
@@ -124,30 +158,35 @@ pub fn discover_early_resources() {
     }
 }
 
-/// 堆就绪后把早期固件快照转换为拥有所有权的平台描述。
-pub(crate) fn build_platform_info() -> Option<crate::hal::platform::PlatformInfo> {
-    fdt::build_platform_info()
+/// BSP 在清 BSS 前冻结固件资源的兼容入口（SMP 分支旧 API）。
+/// 该路径不得分配内存或等待 AP。
+pub fn discover_early_resources() {
+    assert_eq!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+    populate_memory_regions();
 }
 
+/// Return the active memory regions as a slice.
+/// Called by `for_each_usable_frame_region()` in the frame allocator.
 pub fn memory_regions() -> &'static [(usize, usize)] {
-    // Safety: BSP 在启动 AP、初始化 frame allocator 前完成唯一写入，之后只读。
+    // SAFETY: MEMORY_BUF is populated before mm::init() and never modified after.
     let buffer = unsafe { &*core::ptr::addr_of!(MEMORY_BUF) };
     if buffer.is_empty() {
-        #[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
+        #[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
         return MEMORY_REGIONS_FALLBACK;
-        #[cfg(not(all(target_arch = "loongarch64", feature = "board_2k1000")))]
+        #[cfg(not(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw")))]
         panic!("firmware memory resources were not initialized");
     }
     &buffer.regions[..buffer.region_count]
 }
 
+/// Return the active firmware-reserved regions as a slice.
 pub fn firmware_reserved_regions() -> &'static [(usize, usize)] {
-    // Safety: 与 `memory_regions()` 相同，表在 AP 启动前已经冻结。
+    // SAFETY: MEMORY_BUF is populated before mm::init() and never modified after.
     let buffer = unsafe { &*core::ptr::addr_of!(MEMORY_BUF) };
     if buffer.is_empty() {
-        #[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
+        #[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
         return FIRMWARE_RESERVED_REGIONS_FALLBACK;
-        #[cfg(not(all(target_arch = "loongarch64", feature = "board_2k1000")))]
+        #[cfg(not(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw")))]
         panic!("firmware reserved resources were not initialized");
     }
     &buffer.reserved[..buffer.reserved_count]
@@ -227,15 +266,19 @@ pub fn for_each_usable_ram_range(
     }
 }
 
+/// Return FDT MMIO ranges which must be identity-mapped before drivers probe.
 pub fn early_mmio_ranges() -> &'static [(usize, usize)] {
-    // Safety: 页表构造者只读取 BSP 已冻结的早期表。
+    // SAFETY: The pre-heap parser completes before the page-table constructor.
     let buffer = unsafe { &*core::ptr::addr_of!(MEMORY_BUF) };
     &buffer.mmio[..buffer.mmio_count]
 }
 
+/// Return the runtime FDT timebase frequency captured before timer setup.
+///
+/// LA64 不使用该入口：timer 频率由 CPUCFG 探测，见 `hal/arch/loongarch64/time.rs`。
 #[cfg(target_arch = "riscv64")]
 pub fn timebase_frequency() -> usize {
-    // Safety: 标量与资源表在同一 BSP-only 阶段写入。
+    // SAFETY: The pre-heap parser publishes this scalar before timer users run.
     let frequency = unsafe { (*core::ptr::addr_of!(MEMORY_BUF)).timebase_frequency };
     if frequency == 0 {
         panic!("firmware timebase frequency was not initialized");
@@ -243,6 +286,7 @@ pub fn timebase_frequency() -> usize {
     frequency
 }
 
+/// Sum discovered usable RAM ranges for runtime accounting.
 pub fn usable_memory_size() -> usize {
     let mut total = 0usize;
     for_each_usable_ram_range(&[], |start, end| {
@@ -251,9 +295,10 @@ pub fn usable_memory_size() -> usize {
     total
 }
 
-#[cfg(all(target_arch = "loongarch64", feature = "board_2k1000"))]
+/// Fill MEMORY_BUF from compile-time constants (2K1000 板级回退)。
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
 fn populate_from_static() {
-    // Safety: 只有 BSP 在清 BSS 前调用，AP 尚未被启动。
+    // SAFETY: This runs during single-threaded early boot before mm::init().
     let buffer = unsafe { &mut *core::ptr::addr_of_mut!(MEMORY_BUF) };
     buffer.region_count = 0;
     buffer.reserved_count = 0;

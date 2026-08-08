@@ -1,5 +1,0 @@
-rv_stack_span=0x200000
-rv_upper_equals_sbss=yes
-la_stack_size=0x200000
-la_stack_end=0x80e13000
-la_end_equals_sbss=yes

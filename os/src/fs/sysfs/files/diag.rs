@@ -548,11 +548,23 @@ fn stats_anon_unmap_content(
     counter!("anon_unmap_calls_total", ANON_UNMAP_CALLS_TOTAL);
     counter!("anon_unmap_range_calls", ANON_UNMAP_RANGE_CALLS);
     counter!("anon_unmap_area_calls", ANON_UNMAP_AREA_CALLS);
-    counter!("anon_unmap_requested_pages_total", ANON_UNMAP_REQUESTED_PAGES_TOTAL);
-    counter!("anon_unmap_resident_pages_total", ANON_UNMAP_RESIDENT_PAGES_TOTAL);
-    counter!("anon_unmap_active_before_total", ANON_UNMAP_ACTIVE_BEFORE_TOTAL);
+    counter!(
+        "anon_unmap_requested_pages_total",
+        ANON_UNMAP_REQUESTED_PAGES_TOTAL
+    );
+    counter!(
+        "anon_unmap_resident_pages_total",
+        ANON_UNMAP_RESIDENT_PAGES_TOTAL
+    );
+    counter!(
+        "anon_unmap_active_before_total",
+        ANON_UNMAP_ACTIVE_BEFORE_TOTAL
+    );
     counter!("anon_unmap_active_before_max", ANON_UNMAP_ACTIVE_BEFORE_MAX);
-    counter!("anon_unmap_retain_scan_steps_total", ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL);
+    counter!(
+        "anon_unmap_retain_scan_steps_total",
+        ANON_UNMAP_RETAIN_SCAN_STEPS_TOTAL
+    );
     counter!("anon_unmap_ticks_total", ANON_UNMAP_TICKS_TOTAL);
     counter!("anon_unmap_ticks_max", ANON_UNMAP_TICKS_MAX);
     counter!("anon_unmap_errors_total", ANON_UNMAP_ERRORS_TOTAL);
@@ -614,7 +626,8 @@ fn stats_resource_content(
     let _ = writeln!(s, "pc_entries_len={}", pc_ent_len);
     let _ = writeln!(s, "pc_entries_live={}", pc_ent_live);
     let _ = writeln!(s, "pc_entries_holes={}", pc_ent_holes);
-    // lwext4 metadata probes (legacy backend only).
+    // lwext4 metadata probes (legacy backend only; embedded here so old
+    // initproc can see them).
     #[cfg(feature = "ext4_lwext4_backend")]
     {
         let lw = crate::fs::ext4_lwext4::counters::snapshot();
@@ -1087,6 +1100,316 @@ fn stats_blockio_content(
     );
     let _ = writeln!(
         s,
+        "journal_commit_count={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "journal_commit_bytes={}",
+        read_counter(&crate::task::perf::JOURNAL_COMMIT_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "device_flush_count={}",
+        read_counter(&crate::task::perf::DEVICE_FLUSH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_write_requests={}",
+        read_counter(&crate::task::perf::VIRTIO_WRITE_REQUESTS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_write_bytes={}",
+        read_counter(&crate::task::perf::VIRTIO_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_read_requests={}",
+        read_counter(&crate::task::perf::VIRTIO_READ_REQUESTS)
+    );
+    let _ = writeln!(
+        s,
+        "writeback_batch_count={}",
+        read_counter(&crate::task::perf::WRITEBACK_BATCH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "writeback_page_count={}",
+        read_counter(&crate::task::perf::WRITEBACK_PAGE_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_data_write_calls={}",
+        read_counter(&crate::task::perf::WB_TX_DATA_WRITE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_data_write_bytes={}",
+        read_counter(&crate::task::perf::WB_TX_DATA_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_data_write_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_DATA_WRITE_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_alloc_extent_calls={}",
+        read_counter(&crate::task::perf::WB_TX_ALLOC_EXTENT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_alloc_extent_pages={}",
+        read_counter(&crate::task::perf::WB_TX_ALLOC_EXTENT_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_alloc_extent_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_ALLOC_EXTENT_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_commit_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_COMMIT_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_staged_blocks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_STAGED_BLOCKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_tx_first={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_TX_FIRST)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_tx_last={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_TX_LAST)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_flush_count={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_FLUSH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_journal_flush_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_JOURNAL_FLUSH_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_boundary_flush_count={}",
+        read_counter(&crate::task::perf::WB_TX_BOUNDARY_FLUSH_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "wb_tx_boundary_flush_ticks={}",
+        read_counter(&crate::task::perf::WB_TX_BOUNDARY_FLUSH_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_uaccess_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_UACCESS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_file_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_FILE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_ext4_setup_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_EXT4_SETUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_ext4_post_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_EXT4_POST_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_total_count={}",
+        read_counter(&crate::task::perf::PWRITE_TOTAL_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_mode_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_seals_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_SEALS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_vfs_touch_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_VFS_TOUCH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pwrite_mount_writable_cycles={}",
+        read_counter(&crate::task::perf::PWRITE_MOUNT_WRITABLE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_fd_prep_cycles={}",
+        read_counter(&crate::task::perf::WRITE_FD_PREP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_uaccess_cycles={}",
+        read_counter(&crate::task::perf::WRITE_UACCESS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_file_cycles={}",
+        read_counter(&crate::task::perf::WRITE_FILE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_vfs_mode_cycles={}",
+        read_counter(&crate::task::perf::WRITE_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_vfs_seals_cycles={}",
+        read_counter(&crate::task::perf::WRITE_VFS_SEALS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_offset_cycles={}",
+        read_counter(&crate::task::perf::WRITE_OFFSET_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "write_total_count={}",
+        read_counter(&crate::task::perf::WRITE_TOTAL_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pread_uaccess_cycles={}",
+        read_counter(&crate::task::perf::PREAD_UACCESS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_file_cycles={}",
+        read_counter(&crate::task::perf::PREAD_FILE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_ext4_logical_size_cycles={}",
+        read_counter(&crate::task::perf::PREAD_EXT4_LOGICAL_SIZE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_ext4_page_cache_cycles={}",
+        read_counter(&crate::task::perf::PREAD_EXT4_PAGE_CACHE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pread_total_count={}",
+        read_counter(&crate::task::perf::PREAD_TOTAL_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "pread_vfs_mode_cycles={}",
+        read_counter(&crate::task::perf::PREAD_VFS_MODE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_lease_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_LEASE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_write_commit_cycles={}",
+        read_counter(&crate::task::perf::PC_WRITE_COMMIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_calls={}",
+        read_counter(&crate::task::perf::PC_READ_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_pages={}",
+        read_counter(&crate::task::perf::PC_READ_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_user_calls={}",
+        read_counter(&crate::task::perf::PC_READ_USER_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_user_pages={}",
+        read_counter(&crate::task::perf::PC_READ_USER_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss={}",
+        read_counter(&crate::task::perf::PC_READ_MISS)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_hit_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_HIT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_miss_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_MISS_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_valid_fill_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_VALID_FILL_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_READ_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_lookup_cycles={}",
+        read_counter(&crate::task::perf::PC_LOOKUP_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_copy_cycles={}",
+        read_counter(&crate::task::perf::PC_COPY_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "pc_read_cycles_total={}",
+        read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL)
+    );
+    let _ = writeln!(
+        s,
         "sata_read_reqs={}",
         read_counter(&crate::task::perf::SATA_READ_REQS)
     );
@@ -1286,26 +1609,106 @@ fn stats_ext4_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(768);
-    let _ = writeln!(s, "ext4_map_lblock_calls={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CALLS));
-    let _ = writeln!(s, "ext4_map_lblock_cycles={}", read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CYCLES));
-    let _ = writeln!(s, "ext4_map_cache_hits={}", read_counter(&crate::task::perf::EXT4_MAP_CACHE_HITS));
-    let _ = writeln!(s, "ext4_map_holes={}", read_counter(&crate::task::perf::EXT4_MAP_HOLES));
-    let _ = writeln!(s, "ext4_find_extent_calls={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CALLS));
-    let _ = writeln!(s, "ext4_find_extent_cycles={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CYCLES));
-    let _ = writeln!(s, "ext4_find_extent_depth={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_DEPTH_SUM));
-    let _ = writeln!(s, "ext4_find_extent_meta_reads={}", read_counter(&crate::task::perf::EXT4_FIND_EXTENT_META_READS));
-    let _ = writeln!(s, "ext4_pc_readpages_calls={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_CALLS));
-    let _ = writeln!(s, "ext4_pc_readpages_pages={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_PAGES));
-    let _ = writeln!(s, "ext4_pc_readpages_runs={}", read_counter(&crate::task::perf::EXT4_PC_READPAGES_RUNS));
-    let _ = writeln!(s, "ext4_pc_writepages_calls={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_CALLS));
-    let _ = writeln!(s, "ext4_pc_writepages_pages={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_PAGES));
-    let _ = writeln!(s, "ext4_pc_writepages_runs={}", read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_RUNS));
-    let _ = writeln!(s, "ext4_pc_512b_fallback={}", read_counter(&crate::task::perf::EXT4_PC_512B_FALLBACK_PAGES));
-    let _ = writeln!(s, "ext4_alloc_ensure_calls={}", read_counter(&crate::task::perf::EXT4_ALLOC_ENSURE_CALLS));
-    let _ = writeln!(s, "ext4_alloc_lblocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_LBLOCKS));
-    let _ = writeln!(s, "ext4_alloc_new_blocks={}", read_counter(&crate::task::perf::EXT4_ALLOC_NEW_BLOCKS));
-    let _ = writeln!(s, "ext4_alloc_cycles={}", read_counter(&crate::task::perf::EXT4_ALLOC_CYCLES));
-    let _ = writeln!(s, "ext4_direct_write_at_calls={}", read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS));
+    let _ = writeln!(
+        s,
+        "ext4_map_lblock_calls={}",
+        read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_map_lblock_cycles={}",
+        read_counter(&crate::task::perf::EXT4_MAP_LBLOCK_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_map_cache_hits={}",
+        read_counter(&crate::task::perf::EXT4_MAP_CACHE_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_map_holes={}",
+        read_counter(&crate::task::perf::EXT4_MAP_HOLES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_find_extent_calls={}",
+        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_find_extent_cycles={}",
+        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_find_extent_depth={}",
+        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_DEPTH_SUM)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_find_extent_meta_reads={}",
+        read_counter(&crate::task::perf::EXT4_FIND_EXTENT_META_READS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_readpages_calls={}",
+        read_counter(&crate::task::perf::EXT4_PC_READPAGES_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_readpages_pages={}",
+        read_counter(&crate::task::perf::EXT4_PC_READPAGES_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_readpages_runs={}",
+        read_counter(&crate::task::perf::EXT4_PC_READPAGES_RUNS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_writepages_calls={}",
+        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_writepages_pages={}",
+        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_writepages_runs={}",
+        read_counter(&crate::task::perf::EXT4_PC_WRITEPAGES_RUNS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_pc_512b_fallback={}",
+        read_counter(&crate::task::perf::EXT4_PC_512B_FALLBACK_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_alloc_ensure_calls={}",
+        read_counter(&crate::task::perf::EXT4_ALLOC_ENSURE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_alloc_lblocks={}",
+        read_counter(&crate::task::perf::EXT4_ALLOC_LBLOCKS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_alloc_new_blocks={}",
+        read_counter(&crate::task::perf::EXT4_ALLOC_NEW_BLOCKS)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_alloc_cycles={}",
+        read_counter(&crate::task::perf::EXT4_ALLOC_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "ext4_direct_write_at_calls={}",
+        read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -1371,8 +1774,8 @@ fn stats_mount_content(
 ) -> Result<usize, SyscallErr> {
     let mnt = crate::fs::vfs::mount::counters::mount_perf_snapshot();
     let lc = crate::fs::vfs::mount::counters::lifecycle_snapshot();
-    let diag_on = crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
-        .load(core::sync::atomic::Ordering::Relaxed);
+    let diag_on =
+        crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG.load(core::sync::atomic::Ordering::Relaxed);
     let mut s = String::with_capacity(512);
     let _ = writeln!(s, "mount_diag_on={}", if diag_on { 1 } else { 0 });
     let _ = writeln!(s, "mount_propagate_calls={}", mnt.0);
@@ -1389,14 +1792,26 @@ fn stats_mount_content(
     let _ = writeln!(s, "mount_lifecycle_detach={}", lc.2);
     let _ = writeln!(s, "mount_lifecycle_drop={}", lc.3);
     // BackendLifecycle counters
-    let _ = writeln!(s, "lc_new={}",
-        crate::fs::vfs::mount::LC_NEW.load(core::sync::atomic::Ordering::Relaxed));
-    let _ = writeln!(s, "lc_acquire={}",
-        crate::fs::vfs::mount::LC_ACQUIRE.load(core::sync::atomic::Ordering::Relaxed));
-    let _ = writeln!(s, "lc_release_dying={}",
-        crate::fs::vfs::mount::LC_RELEASE_DYING.load(core::sync::atomic::Ordering::Relaxed));
-    let _ = writeln!(s, "lc_drain={}",
-        crate::fs::vfs::mount::LC_DRAIN.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(
+        s,
+        "lc_new={}",
+        crate::fs::vfs::mount::LC_NEW.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        s,
+        "lc_acquire={}",
+        crate::fs::vfs::mount::LC_ACQUIRE.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        s,
+        "lc_release_dying={}",
+        crate::fs::vfs::mount::LC_RELEASE_DYING.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        s,
+        "lc_drain={}",
+        crate::fs::vfs::mount::LC_DRAIN.load(core::sync::atomic::Ordering::Relaxed)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -1410,9 +1825,7 @@ fn mount_diag_on_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let val = if crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG
-        .load(Ordering::Relaxed)
-    {
+    let val = if crate::fs::vfs::mount::MOUNT_LIFECYCLE_DIAG.load(Ordering::Relaxed) {
         "1\n"
     } else {
         "0\n"
@@ -1434,18 +1847,55 @@ fn mount_diag_on_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usiz
 //  STATS: Pipe
 // ═══════════════════════════════════════════════════════════════════════
 
-fn stats_pipe_content(_extra: usize, offset: usize, len: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+fn stats_pipe_content(
+    _extra: usize,
+    offset: usize,
+    len: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(384);
     let _ = writeln!(s, "read_calls={}", crate::fs::dev::pipe::pipe_read_calls());
     let _ = writeln!(s, "read_bytes={}", crate::fs::dev::pipe::pipe_read_bytes());
-    let _ = writeln!(s, "read_eagain={}", crate::fs::dev::pipe::pipe_read_eagain());
-    let _ = writeln!(s, "read_cycles_total={}", crate::fs::dev::pipe::pipe_read_cycles());
-    let _ = writeln!(s, "read_cycles_max={}", crate::fs::dev::pipe::pipe_read_cycles_max());
-    let _ = writeln!(s, "write_calls={}", crate::fs::dev::pipe::pipe_write_calls());
-    let _ = writeln!(s, "write_bytes={}", crate::fs::dev::pipe::pipe_write_bytes());
-    let _ = writeln!(s, "write_eagain={}", crate::fs::dev::pipe::pipe_write_eagain());
-    let _ = writeln!(s, "write_cycles_total={}", crate::fs::dev::pipe::pipe_write_cycles());
-    let _ = writeln!(s, "write_cycles_max={}", crate::fs::dev::pipe::pipe_write_cycles_max());
+    let _ = writeln!(
+        s,
+        "read_eagain={}",
+        crate::fs::dev::pipe::pipe_read_eagain()
+    );
+    let _ = writeln!(
+        s,
+        "read_cycles_total={}",
+        crate::fs::dev::pipe::pipe_read_cycles()
+    );
+    let _ = writeln!(
+        s,
+        "read_cycles_max={}",
+        crate::fs::dev::pipe::pipe_read_cycles_max()
+    );
+    let _ = writeln!(
+        s,
+        "write_calls={}",
+        crate::fs::dev::pipe::pipe_write_calls()
+    );
+    let _ = writeln!(
+        s,
+        "write_bytes={}",
+        crate::fs::dev::pipe::pipe_write_bytes()
+    );
+    let _ = writeln!(
+        s,
+        "write_eagain={}",
+        crate::fs::dev::pipe::pipe_write_eagain()
+    );
+    let _ = writeln!(
+        s,
+        "write_cycles_total={}",
+        crate::fs::dev::pipe::pipe_write_cycles()
+    );
+    let _ = writeln!(
+        s,
+        "write_cycles_max={}",
+        crate::fs::dev::pipe::pipe_write_cycles_max()
+    );
     let _ = writeln!(s, "buf_alive={}", crate::fs::dev::pipe::pipe_buf_alive());
     let _ = writeln!(s, "buf_bytes={}", crate::fs::dev::pipe::pipe_buf_bytes());
     write_str(offset, len, buf, &s)
@@ -1476,7 +1926,11 @@ fn stats_syscall_top_content(
     for &(id, count, ticks) in entries.iter().take(20) {
         let name = crate::syscall::syscall_name(id);
         let avg = if count > 0 { ticks / count } else { 0 };
-        let _ = writeln!(s, "{}:{} count:{} ticks:{} avg:{}", id, name, count, ticks, avg);
+        let _ = writeln!(
+            s,
+            "{}:{} count:{} ticks:{} avg:{}",
+            id, name, count, ticks, avg
+        );
     }
     write_str(offset, len, buf, &s)
 }
@@ -1491,12 +1945,22 @@ fn stats_pagefault_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
     let names = &crate::task::perf::PF_ACTION_NAMES;
     for tag in 0..names.len() {
         let count = crate::task::perf::pf_action_count(tag);
         let ticks = crate::task::perf::pf_action_ticks(tag);
-        let _ = writeln!(s, "{} count={} ticks={}", names[tag], count, ticks);
+        let _ = writeln!(s, "action_{} count={} ticks={}", names[tag], count, ticks);
+    }
+    let stage_names = &crate::task::perf::PF_STAGE_NAMES;
+    for stage in 0..stage_names.len() {
+        let count = crate::task::perf::pf_stage_count(stage);
+        let ticks = crate::task::perf::pf_stage_ticks(stage);
+        let _ = writeln!(
+            s,
+            "stage_{} count={} ticks={}",
+            stage_names[stage], count, ticks
+        );
     }
     write_str(offset, len, buf, &s)
 }
@@ -1512,18 +1976,66 @@ fn stats_vm_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
-    let _ = writeln!(s, "filemap_fault_frames={}", read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES));
-    let _ = writeln!(s, "filemap_fault_ticks={}", read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS));
-    let _ = writeln!(s, "filemap_private_copy_ticks={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS));
-    let _ = writeln!(s, "filemap_map_user_ticks={}", read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS));
-    let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
-    let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
-    let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));
-    let _ = writeln!(s, "execve_map_elf_ticks={}", read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS));
-    let _ = writeln!(s, "execve_kernel_map_ticks={}", read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS));
-    let _ = writeln!(s, "execve_interp_ticks={}", read_counter(&crate::task::perf::EXECVE_INTERP_TICKS));
-    let _ = writeln!(s, "execve_stack_tables_ticks={}", read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS));
-    let _ = writeln!(s, "execve_teardown_ticks={}", read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS));
+    let _ = writeln!(
+        s,
+        "filemap_fault_frames={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_private_copy_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_map_user_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_page_flush_cycles={}",
+        read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_full_flush_cycles={}",
+        read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_activate_cycles={}",
+        read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "execve_map_elf_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_kernel_map_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_interp_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_INTERP_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_stack_tables_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_teardown_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS)
+    );
     write_str(offset, len, buf, &s)
 }
 

@@ -21,6 +21,12 @@ pub struct Sighand {
     signalfd_events: Arc<EventWaitQueue>,
 }
 
+impl Clone for Sighand {
+    fn clone(&self) -> Self {
+        Self::from_existing(self)
+    }
+}
+
 impl Sighand {
     /// 创建空动作表。
     ///
@@ -45,6 +51,11 @@ impl Sighand {
     }
 
     pub fn signalfd_events(&self) -> Arc<EventWaitQueue> {
+        self.signalfd_events.clone()
+    }
+
+    /// develop 兼容别名：signalfd 的 read/poll 动态解析同一通知域。
+    pub fn signal_event_queue(&self) -> Arc<EventWaitQueue> {
         self.signalfd_events.clone()
     }
 

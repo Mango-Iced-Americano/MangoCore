@@ -128,6 +128,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         }
         crate::task::perf::record_ext4_pc_readpages_calls();
         crate::task::perf::record_ext4_pc_readpages_pages(pages.len());
+
         let start_offset = Self::page_offset(start_index)?;
         let total_bytes = pages
             .len()
@@ -176,7 +177,8 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         }
         crate::task::perf::record_ext4_pc_writepages_calls();
         crate::task::perf::record_ext4_pc_writepages_pages(pages.len());
-        // Reuse staging storage, but do not hold its mutex across backend I/O.
+        // Keep the pool lock short: storage I/O may block, so move the reusable
+        // allocation out before preparing or committing the write.
         let mut staging = core::mem::take(&mut *self.writeback_staging.lock());
         staging.clear();
         staging.resize(total_bytes, 0);

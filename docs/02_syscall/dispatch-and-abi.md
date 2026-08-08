@@ -296,19 +296,21 @@ SYSCALL_CLONE => sys_clone(
 未匹配 id 进入 `_` 分支：
 
 ```rust
-println!(
-    "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
-    syscall_name(syscall_id),
-    syscall_id,
-    args
-);
-error!(
-    "Unsupported syscall:{} ({}), calling over arguments:",
-    syscall_name(syscall_id),
-    syscall_id
-);
-for i in 0..args.len() {
-    error!("args[{}]: {:X}", i, args[i]);
+if REPORTED_UNSUPPORTED.lock().insert(syscall_id) {
+    println!(
+        "[syscall] Unsupported syscall: {} ({}), calling over arguments: {:?}",
+        syscall_name(syscall_id),
+        syscall_id,
+        args
+    );
+    error!(
+        "Unsupported syscall:{} ({}), calling over arguments:",
+        syscall_name(syscall_id),
+        syscall_id
+    );
+    for i in 0..args.len() {
+        error!("args[{}]: {:X}", i, args[i]);
+    }
 }
 /*
 crate::task::current_task()
@@ -318,6 +320,8 @@ crate::task::current_task()
 */
 errno::ENOSYS
 ```
+
+`REPORTED_UNSUPPORTED` 是 `static Mutex<BTreeSet<usize>>`：每个编号只打印一次（首次命中），后续命中静默返回 `ENOSYS`（与 Linux 行为一致），避免实板上 `rseq(293)`/`fsopen(430)` 等未知 syscall 刷屏。
 
 分支中保留了向当前任务注入 `SIGSYS` 的注释代码，但当前运行路径不发送该信号。
 

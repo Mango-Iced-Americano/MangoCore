@@ -22,14 +22,15 @@ use super::{
     NetNamespace, TidHandle, INIT_IPC_NAMESPACE, INIT_MOUNT_NAMESPACE,
     PROCESS_CPU_ACCOUNT_BATCH_US,
 };
-use crate::config::{MMAP_BASE, PAGE_SIZE};
+use crate::config::PAGE_SIZE;
 use crate::fs::vfs;
 use crate::fs::{vfs_lookup_absolute, vfs_root};
 use crate::hal::{kstack_alloc, KernelStack};
 use crate::hal::{trap_handler, TrapContext};
 use crate::mm::PageTableImpl;
 use crate::mm::{
-    AddressSpace, AddressSpaceInner, FaultAccess, PhysPageNum, VirtAddr, KERNEL_SPACE,
+    kernel_program_base, AddressSpace, AddressSpaceInner, FaultAccess, PhysPageNum, VirtAddr,
+    KERNEL_SPACE,
 };
 use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
@@ -264,11 +265,6 @@ pub struct TaskControlBlock {
     /// Generation for timeout wake timers.  Each newly armed wake timer bumps
     /// this value so older stale timers can expire without waking the task.
     pub wait_timer_generation: AtomicUsize,
-    /// Non-zero when the task is sleeping in a fallback wait (wait_event_impl
-    /// with fallback_ms). Stores the generation of the current fallback timer.
-    /// Zero when not in a fallback wait. Used by stale timer callbacks to
-    /// re-arm instead of spurious-wake.
-    pub wait_io_fallback_active_generation: AtomicUsize,
     /// 常见 nice=0 runqueue 路径使用的无锁调度提示。
     pub sched_nice_hint: AtomicI32,
     /// runqueue 选择使用的 vruntime 快照，避免持队列锁再获取 `task.inner`。
@@ -1171,14 +1167,14 @@ impl TaskControlBlock {
     pub fn new(elf: Arc<vfs::File>) -> Arc<Self> {
         macro_rules! init_task_trace {
             ($($arg:tt)*) => {
-                #[cfg(all(feature = "board_2k1000", feature = "board_bringup_trace"))]
+                #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
                 println!("[bringup][tcb] {}", format_args!($($arg)*));
             };
         }
 
         // 将ELF文件映射到内核空间
         init_task_trace!("01 map init ELF into kernel space");
-        let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        let elf_data = elf.map_to_kernel_space(kernel_program_base());
         if elf_data.is_empty() {
             panic!("[TCB::new] initproc ELF is empty");
         }
@@ -1189,8 +1185,9 @@ impl TaskControlBlock {
             AddressSpaceInner::<PageTableImpl>::from_elf(elf_data)
                 .expect("initproc ELF is invalid");
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
-        // 在内核空间中删除ELF区域
-        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor()).unwrap();
+        // 在内核空间中删除ELF区域（与上面 map_to_kernel_space 同一基底）
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(kernel_program_base()).floor())
+            .unwrap();
         init_task_trace!("04 temporary kernel ELF mapping removed");
 
         // 获取用户资源槽位分配器
@@ -1315,7 +1312,6 @@ impl TaskControlBlock {
             thread_quota: Mutex::new(None),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
-            wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
@@ -1442,7 +1438,6 @@ impl TaskControlBlock {
             thread_quota: Mutex::new(None),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
-            wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
@@ -1619,7 +1614,7 @@ impl TaskControlBlock {
 
         // 将ELF文件映射到内核空间
         let _t_kmap = perf::perf_time_now();
-        let elf_data = elf.map_to_kernel_space(MMAP_BASE);
+        let elf_data = elf.map_to_kernel_space(kernel_program_base());
         if elf_data.is_empty() {
             log::error!("[load_elf] ELF file is empty (size=0)");
             return Err(ENOEXEC);
@@ -1636,7 +1631,8 @@ impl TaskControlBlock {
         let _t_teardown = perf::perf_time_now();
         // ELF 内容只在解析期间映射进共享内核页表；清 PTE 后必须等远端
         // shootdown ack，再让文件映射 frame 回到分配器。
-        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(MMAP_BASE).floor()).unwrap();
+        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(kernel_program_base()).floor())
+            .unwrap();
         let _td_ticks = perf::perf_time_now().wrapping_sub(_t_teardown);
         perf::EXECVE_TEARDOWN_TICKS.fetch_add(_td_ticks, Ordering::Relaxed);
 
@@ -2014,7 +2010,6 @@ impl TaskControlBlock {
             thread_quota: Mutex::new(thread_quota),
             wait_io_timer_pending: AtomicBool::new(false),
             wait_timer_generation: AtomicUsize::new(0),
-            wait_io_fallback_active_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             sched_vruntime_hint: AtomicU64::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),

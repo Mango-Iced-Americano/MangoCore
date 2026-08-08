@@ -3,6 +3,7 @@
 use core::arch::global_asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
@@ -16,6 +17,7 @@ const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_FACCESSAT2: usize = 439;
+const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_SCHED_SETAFFINITY: usize = 122;
@@ -32,6 +34,7 @@ const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_SIGNALFD4: usize = 74;
+const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_NEW_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -44,6 +47,7 @@ const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GRUOP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
@@ -72,6 +76,13 @@ const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_MSGGET: usize = 186;
+const SYSCALL_MSGCTL: usize = 187;
+const SYSCALL_MSGRCV: usize = 188;
+const SYSCALL_MSGSND: usize = 189;
+const SYSCALL_SEMGET: usize = 190;
+const SYSCALL_SEMCTL: usize = 191;
+const SYSCALL_SEMOP: usize = 193;
 const SYSCALL_SBRK: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
@@ -83,6 +94,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_PIDFD_OPEN: usize = 434;
 const SYSCALL_STATX: usize = 291;
 // Not standard POSIX sys_call
 const SYSCALL_LS: usize = 500;
@@ -91,6 +103,10 @@ const SYSCALL_CLEAR: usize = 502;
 const SYSCALL_EXT4_COUNTERS: usize = 503;
 const SYSCALL_OPEN: usize = 506; //where?
 const SYSCALL_GET_TIME: usize = 1690; //you mean get time of day by 169?
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
+const SYSCALL_WAITID: usize = 95;
 
 #[cfg(target_arch = "loongarch64")]
 global_asm!(include_str!("syscall.S"));
@@ -201,6 +217,10 @@ pub fn sys_pipe(pipe: &mut [i32]) -> isize {
     syscall(SYSCALL_PIPE, [pipe.as_mut_ptr() as usize, 0, 0])
 }
 
+pub fn sys_eventfd(initval: u32, flags: u32) -> isize {
+    syscall(SYSCALL_EVENTFD2, [initval as usize, flags as usize, 0])
+}
+
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
     syscall(
         SYSCALL_READ,
@@ -221,6 +241,10 @@ pub fn sys_getrandom(buffer: &mut [u8], flags: u32) -> isize {
 
 pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
     syscall(SYSCALL_WRITE, [fd, buffer.as_ptr() as usize, buffer.len()])
+}
+
+pub fn sys_fcntl(fd: usize, cmd: u32, arg: usize) -> isize {
+    syscall(SYSCALL_FCNTL, [fd, cmd as usize, arg])
 }
 
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
@@ -275,8 +299,8 @@ pub fn sys_chdir(path: &str) -> isize {
     syscall(SYSCALL_CHDIR, [path.as_ptr() as usize, 0, 0])
 }
 
-pub fn sys_chroot(path: *const u8) -> isize {
-    syscall(SYSCALL_CHROOT, [path as usize, 0, 0])
+pub fn sys_chroot(path: &str) -> isize {
+    syscall(SYSCALL_CHROOT, [path.as_ptr() as usize, 0, 0])
 }
 
 pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: *const u8) -> isize {
@@ -496,6 +520,14 @@ pub struct TimeSpec {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
+pub struct SemBuf {
+    pub sem_num: u16,
+    pub sem_op: i16,
+    pub sem_flg: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct TimerFdSpec {
     pub it_interval: TimeSpec,
     pub it_value: TimeSpec,
@@ -519,6 +551,41 @@ pub fn sys_timerfd_settime(
 
 pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimerFdSpec) -> isize {
     syscall(SYSCALL_TIMERFD_GETTIME, [fd, curr_value as usize, 0])
+}
+
+pub fn sys_futex(
+    uaddr: *mut u32,
+    op: u32,
+    val: u32,
+    timeout: *const TimeSpec,
+    uaddr2: *mut u32,
+    val3: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_FUTEX,
+        [uaddr as usize, op as usize, val as usize, timeout as usize, uaddr2 as usize, val3 as usize],
+    )
+}
+
+pub fn sys_futex_cmp_requeue(
+    uaddr: *mut u32,
+    wake_count: u32,
+    requeue_count: u32,
+    uaddr2: *mut u32,
+    expected: u32,
+) -> isize {
+    const FUTEX_CMP_REQUEUE: u32 = 4;
+    syscall6(
+        SYSCALL_FUTEX,
+        [
+            uaddr as usize,
+            FUTEX_CMP_REQUEUE as usize,
+            wake_count as usize,
+            requeue_count as usize,
+            uaddr2 as usize,
+            expected as usize,
+        ],
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -663,6 +730,20 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> isize {
     syscall(SYSCALL_FTRUNCATE, [fd, length as usize, 0])
 }
 
+pub fn sys_splice(
+    fd_in: usize,
+    off_in: *mut usize,
+    fd_out: usize,
+    off_out: *mut usize,
+    len: usize,
+    flags: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_SPLICE,
+        [fd_in, off_in as usize, fd_out, off_out as usize, len, flags as usize],
+    )
+}
+
 pub fn sys_sync() -> isize {
     syscall(SYSCALL_SYNC, [0, 0, 0])
 }
@@ -687,6 +768,13 @@ pub fn sys_faccessat2(dirfd: isize, path: &str, mode: u32, flags: u32) -> isize 
     )
 }
 
+pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32) -> isize {
+    syscall4(
+        SYSCALL_FCHMODAT,
+        [dirfd as usize, path as usize, mode as usize, 0],
+    )
+}
+
 pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> isize {
     syscall(SYSCALL_CLOCK_SETTIME, [clock_id, tp as usize, 0])
 }
@@ -701,6 +789,53 @@ pub fn sys_clock_nanosleep(
         SYSCALL_CLOCK_NANOSLEEP,
         [clock_id, flags as usize, req as usize, rem as usize],
     )
+}
+
+pub fn sys_nanosleep(req: &TimeSpec, rem: &mut TimeSpec) -> isize {
+    syscall(
+        SYSCALL_NANOSLEEP,
+        [req as *const TimeSpec as usize, rem as *mut TimeSpec as usize, 0],
+    )
+}
+
+pub fn sys_semget(key: isize, nsems: usize, semflg: usize) -> isize {
+    syscall(SYSCALL_SEMGET, [key as usize, nsems, semflg])
+}
+
+pub fn sys_msgget(key: isize, msgflg: usize) -> isize {
+    syscall(SYSCALL_MSGGET, [key as usize, msgflg, 0])
+}
+
+pub fn sys_msgctl(msqid: i32, cmd: usize, buf: usize) -> isize {
+    syscall(SYSCALL_MSGCTL, [msqid as usize, cmd, buf])
+}
+
+pub fn sys_msgsnd(msqid: i32, msgp: *const u8, msgsz: usize, msgflg: usize) -> isize {
+    syscall6(
+        SYSCALL_MSGSND,
+        [msqid as usize, msgp as usize, msgsz, msgflg, 0, 0],
+    )
+}
+
+pub fn sys_msgrcv(
+    msqid: i32,
+    msgp: *mut u8,
+    msgsz: usize,
+    msgtyp: isize,
+    msgflg: usize,
+) -> isize {
+    syscall6(
+        SYSCALL_MSGRCV,
+        [msqid as usize, msgp as usize, msgsz, msgtyp as usize, msgflg, 0],
+    )
+}
+
+pub fn sys_semctl(semid: i32, semnum: usize, cmd: usize, arg: usize) -> isize {
+    syscall4(SYSCALL_SEMCTL, [semid as usize, semnum, cmd, arg])
+}
+
+pub fn sys_semop(semid: i32, ops: &[SemBuf]) -> isize {
+    syscall(SYSCALL_SEMOP, [semid as usize, ops.as_ptr() as usize, ops.len()])
 }
 
 // ── mmap / mprotect / munmap wrappers ──────────────────────────────────
@@ -727,4 +862,64 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
 
 pub fn sys_read_raw(fd: usize, buf: *mut u8, len: usize) -> isize {
     syscall(SYSCALL_READ, [fd, buf as usize, len])
+}
+
+/// User-visible epoll event layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EpollEvent {
+    pub events: u32,
+    pub data: u64,
+}
+
+/// User-visible `pollfd` layout used by `ppoll`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PollFd {
+    pub fd: u32,
+    pub events: u16,
+    pub revents: u16,
+}
+
+pub fn sys_epoll_create1(flags: usize) -> isize {
+    syscall(SYSCALL_EPOLL_CREATE1, [flags, 0, 0])
+}
+
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const EpollEvent) -> isize {
+    syscall4(SYSCALL_EPOLL_CTL, [epfd, op, fd, event as usize])
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: *mut EpollEvent,
+    maxevents: isize,
+    timeout: isize,
+) -> isize {
+    syscall6(
+        SYSCALL_EPOLL_PWAIT,
+        [epfd, events as usize, maxevents as usize, timeout as usize, 0, 0],
+    )
+}
+
+pub fn sys_ppoll(fds: &mut [PollFd], timeout: *const TimeSpec) -> isize {
+    syscall4(
+        SYSCALL_PPOLL,
+        [fds.as_mut_ptr() as usize, fds.len(), timeout as usize, 0],
+    )
+}
+
+pub fn sys_pidfd_open(pid: usize, flags: usize) -> isize {
+    syscall(SYSCALL_PIDFD_OPEN, [pid, flags, 0])
+}
+
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: *mut u8,
+    options: u32,
+) -> isize {
+    syscall6(
+        SYSCALL_WAITID,
+        [idtype, id, infop as usize, options as usize, 0, 0],
+    )
 }

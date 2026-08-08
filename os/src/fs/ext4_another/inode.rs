@@ -17,7 +17,6 @@ use crate::utils::error::SyscallErr;
 use super::errno::from_another;
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
-
 use super::page_cache::AnotherExt4PageCacheBackend;
 
 /// Writable VFS inode identified by its stable ext4 inode number.
@@ -391,7 +390,13 @@ impl IndexNode for Ext4Inode {
     }
 
     fn page_cache(&self) -> Option<Arc<PageCache>> {
-        self.lifetime.page_cache()
+        // Fast path: a completed `Once` holds the authoritative cache for this
+        // wrapper. Fall back to the shared lifetime view, which also covers
+        // dirty-cache retention installed by the write path.
+        self.page_cache
+            .get()
+            .and_then(|cache| cache.as_ref().ok().cloned())
+            .or_else(|| self.lifetime.page_cache())
     }
 
     fn ensure_page_cache(&self) -> Option<Arc<PageCache>> {

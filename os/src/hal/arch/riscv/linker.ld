@@ -1,11 +1,14 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
-
 SECTIONS
 {
-    . = BASE_ADDRESS;
+    KERNEL_LINK_VADDR = 0xffffffc000200000;
+    . = KERNEL_LINK_VADDR;
     skernel = .;
+
+    .image_header : {
+        KEEP(*(.image_header))
+    }
 
     stext = .;
     .text : {
@@ -41,8 +44,9 @@ SECTIONS
     sbss_with_stack = .;
     .bss : {
         *(.bss.stack)
-        /* FDT 快照必须躲过 BSP 的 sbss..ebss 清零。 */
+        /* 早期引导页表与 FDT 快照都必须躲过 BSP 的 sbss..ebss 清零。 */
         *(.bss.boot)
+        *(.bss.bootstrap_page_table)
         sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)

@@ -67,7 +67,7 @@ LTP/lmbench/official /L5 →  判断系统兼容性、性能和比赛表现
 | L1 os 侧 wrapper | `os/src/bootargs.rs` |
 | L3 测试框架入口 | `os/src/kernel_tests/mod.rs` |
 | L3 测试运行器 | `os/src/kernel_tests/runner.rs` |
-| L3 waitqueue 测试 | `os/src/kernel_tests/waitqueue.rs` |
+| L3 waitqueue 测试 | `os/src/kernel_tests/waitqueue.rs`, `waitqueue_{blocking,wake,interrupt}.rs` |
 | L3 timer 测试 | `os/src/kernel_tests/timer.rs` |
 | L3 scheduler 测试 | `os/src/kernel_tests/sched.rs` |
 | L3 页分配器测试 | `os/src/kernel_tests/mm.rs` |
@@ -94,7 +94,7 @@ L2: 属性测试 / 模型测试 (规划中)
 
 L3: 内核态 self-test
     mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
-    → 不启动用户态 init。当前覆盖：waitqueue / timer / sched / mm / ext4 (16 个用例)
+    → 不启动用户态 init。WaitQueue 覆盖 one-shot 注册/唤醒、无 fallback 阻塞、多队列、信号、deadline 与压力路径。
 
 L4: 用户态 regression test
     user/src/bin/regression_*.rs  |  make regression
@@ -288,7 +288,10 @@ runqueue/current 清空和 TCB Weak 失效。超时清理才允许发送 RESCHED
 os/src/kernel_tests/
 ├── mod.rs            # 注册所有测试组，run_from_bootargs() 入口
 ├── runner.rs         # TAP 输出、timeout/repeat/failfast
-├── waitqueue.rs      # wake_before_wait_should_not_sleep 等
+├── waitqueue.rs      # WaitQueue 测试注册与基础队列用例
+├── waitqueue_blocking.rs  # 阻塞、deadline、多队列、陈旧 waiter
+├── waitqueue_wake.rs      # FIFO、wake_all、1000-cycle 压力
+├── waitqueue_interrupt.rs # 信号中断与 signal/wake race
 ├── timer.rs          # tick_advances, time_spec_ops
 ├── sched.rs          # current_task_exists, ready_queue_has_init
 ├── smp.rs            # online/IPI/AP 调度、受控用户 trap/exit、TLB/ASID、STOP
@@ -424,13 +427,18 @@ TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elap
 | `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
 | `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
 | `waitqueue::wake_one` | `waitqueue.rs` | 真实调度下阻塞 waiter 被另一个内核任务唤醒 |
+| `waitqueue::basic_block_wake` / `no_spurious_wake_without_fallback` | `waitqueue_blocking.rs` | 条件驱动的阻塞/唤醒，以及无显式唤醒、信号或 deadline 时 200ms 内持续阻塞 |
+| `waitqueue::multi_queue_cleanup` / `deadline_timeout` / `stale_waiter_cleanup` | `waitqueue_blocking.rs` | 双队列清理、deadline 及失效 weak waiter |
+| `waitqueue::wake_one_fifo` / `wake_all_wakes_all` / `thousand_cycle_stress` | `waitqueue_wake.rs` | FIFO 单唤醒、广播和 1000 次无丢失/重复入队压力 |
+| `waitqueue::signal_interrupt` / `signal_wake_race` | `waitqueue_interrupt.rs` | 信号中断与 Ready 优先于同时到达信号的 race 语义 |
 | `ext4::memblk_read_write` | `ext4.rs` | `TestMemBlock` BlockDevice 读写正确性 |
 | `ext4::memblk_isolation` | `ext4.rs` | 两个独立 `TestMemBlock` 实例的数据不互泄露 |
 | `ext4::open_unformatted_returns_err` | `ext4.rs` | 未格式化设备上 `open_ext4rs` 返回错误（不 panic） |
 | `ext4::lw_path_isolation` | `ext4.rs` | lwext4 `lw_path()` 路径翻译的实例隔离语义 |
 
-**规划中**（需要内核线程 spawn API 或格式化块设备）：
+**规划中**（需要内核线程 spawn API、更丰富的 ktest task 参数传递或格式化块设备）：
 - `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
+- 按任务定向注入信号（当前信号测试使用唯一 interruptible ktest worker）
 - `timer::sleep_returns` — 真正阻塞等待 deadline
 - `fs::tmpfs_create_write_read_unlink` — VFS 基础路径
 - `pagecache::basic_insert_lookup_evict` — 页缓存操作

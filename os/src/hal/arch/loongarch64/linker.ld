@@ -1,9 +1,8 @@
 /*
- * U-Boot 的 legacy uImage 头保存低 32 位物理装载地址 0x90000000。U-Boot 可能
- * 通过 0x9000... 缓存 DMW 别名跳转，但 entry.asm 会在进入 Rust 前移除该别名，
- * 因此所有内核绝对符号都必须按低物理地址链接。
+ * QEMU 虚拟机在 0x80000000 装载 ELF。此模板必须与 2K1000 脚本分离，防止实板构建
+ * 遗留的 0x90000000 链接基址污染下一次 QEMU 构建。
  */
-BASE_ADDRESS = 0x0000000090000000;
+BASE_ADDRESS = 0x0000000080000000;
 OUTPUT_ARCH( "loongarch" )
 ENTRY(_start)
 SECTIONS

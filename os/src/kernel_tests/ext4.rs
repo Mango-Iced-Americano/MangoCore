@@ -24,7 +24,7 @@ use crate::{
 
 /// Returns the topology-independent ext4-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
-    vec![
+    let mut tests = vec![
         KernelTest::new(
             "ext4::memblk_read_write",
             block_device::test_memblk_read_write,
@@ -33,27 +33,25 @@ pub fn tests() -> Vec<KernelTest> {
             "ext4::memblk_isolation",
             block_device::test_memblk_isolation,
         ),
-        #[cfg(feature = "ext4_lwext4_backend")]
+    ];
+    #[cfg(feature = "ext4_lwext4_backend")]
+    tests.extend([
         KernelTest::new(
             "ext4::open_unformatted_returns_err",
             block_device::test_open_unformatted_returns_err,
         ),
-        #[cfg(feature = "ext4_lwext4_backend")]
         KernelTest::new(
             "ext4::lw_path_isolation",
             mounted_filesystem::test_lw_path_isolation,
         ),
-        #[cfg(feature = "ext4_lwext4_backend")]
         KernelTest::new(
             "ext4::lwext4_2k_byte_bridge",
             byte_bridge::test_lwext4_2k_byte_bridge,
         ),
-        #[cfg(feature = "ext4_lwext4_backend")]
         KernelTest::new(
             "ext4::partition_unaligned_batching",
             byte_bridge::test_partition_unaligned_batching,
         ),
-        #[cfg(feature = "ext4_lwext4_backend")]
         KernelTest::new(
             "ext4::lwext4_flush_forwarding",
             byte_bridge::test_lwext4_flush_forwarding,
@@ -62,7 +60,8 @@ pub fn tests() -> Vec<KernelTest> {
             "ext4::truncate_tail_zero_after_extend",
             test_truncate_tail_zero_after_extend,
         ),
-    ]
+    ]);
+    tests
 }
 
 /// 顺序数据完整性：extend 后 truncate，被截断的尾部必须归零且不可读。

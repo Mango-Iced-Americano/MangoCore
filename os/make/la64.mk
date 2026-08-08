@@ -22,12 +22,13 @@ BUILDSTORM_KERNEL_LA ?= $(BUILDSTORM_KERNEL_OUTPUT_ROOT)/kernel-la
 QEMU_DEVELOPMENT_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
 QEMU_DEVELOPMENT_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
 QEMU_REGRESSION_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
-QEMU_REGRESSION_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
+QEMU_REGRESSION_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) $(NET_DEV)
 # LoongArch QEMU loads the ELF directly.  Unlike RV64, this architecture has
 # no BOOTLOADER value; pairing an empty `-bios` with `-device loader,...`
 # makes QEMU consume the loader device text as a firmware filename.
-QEMU_KTEST_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_ELF)
+QEMU_KTEST_BEFORE_DRIVES = -kernel $(KERNEL_ELF)
 QEMU_KTEST_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
+QEMU_KTEST_X0 = $(KTEST_EXT4_IMAGE)
 
 BOARD_2K1000_ARTIFACT_ROOT ?= $(PRODUCT_ROOT)/board/2k1000
 BOARD_2K1000_TEST_CONFIG ?= $(abspath ../os_test.conf)
@@ -85,7 +86,7 @@ env: toolchain-preflight
 
 # Build all user programs
 user: toolchain-preflight
-	@cd ../user && make rust-user BOARD=$(BOARD) MODE=$(MODE) USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
+	@cd ../user && make rust-user ARCH=la64 MODE=$(MODE) USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)"
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
@@ -110,9 +111,9 @@ kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
 ifeq ($(MODE), debug)
-	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --features "$(BOOT_PROFILE) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 else
-	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) cargo build --release --features "$(BOOT_PROFILE) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 endif
 
 # uImage (la64-specific: for uboot boot)
@@ -130,10 +131,10 @@ la64-2k1000-run-clean:
 
 la64-2k1000-core-tests:
 	@grep -Eq '^mode=run$$' "$(BOARD_2K1000_TEST_CONFIG)" || { echo "os_test.conf must contain mode=run" >&2; exit 1; }
-	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off EXTRA_FEATURES="sata_scratch_rw board_core_test" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-core-tests.ui"
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off EXTRA_FEATURES="sata_scratch_rw" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-core-tests.ui"
 
 la64-2k1000-shell:
-	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=virt MODE=$(MODE) LOG=off EXTRA_FEATURES="gmac_2k1000 board_shell" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-shell.ui"
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=virt MODE=$(MODE) LOG=off EXTRA_FEATURES="gmac_2k1000" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-shell.ui"
 
 la64-2k1000-apk-persist-shell:
 	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off APK_RUNTIME=1 EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-persist-shell.ui"
@@ -182,7 +183,7 @@ endif
 
 check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=$(LOG) \
-		cargo check $(CHECK_RELEASE_FLAG) --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+		cargo check $(CHECK_RELEASE_FLAG) --features "$(BOOT_PROFILE) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
 # ─────────────────────────────────────────────────────────
 #  L3 Kernel self-test (mango.mode=ktest)
@@ -191,9 +192,9 @@ check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
-		cargo build --release --features "board_$(BOARD) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
+		cargo build --release --features "$(BOOT_PROFILE) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
-ktest-run: toolchain-preflight ktest-build-only
+ktest-run: toolchain-preflight ktest-build-only ktest-clean-ext4
 	@if [ "x$(KTEST_FIXTURE)" = "xborrows-initproc" ]; then \
 		echo "[ktest-fixture] borrows-initproc: checking ktest is independent of INITPROC.process..."; \
 		ktest_refs=$$(grep -n 'INITPROC\.process' ../os/src/task/mod.rs ../os/src/task/task.rs 2>/dev/null | grep -i 'spawn_ktest\|new_ktest\|ktest_trampoline\|zombify_ktest\|KTEST'); \
@@ -212,7 +213,7 @@ regression-run: toolchain-preflight
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
 	@echo "[regression] Launching QEMU (no disks, timeout 60s)..."
-	@timeout --foreground 60 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
+	@timeout --foreground 120 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
 	qemu_status=$$?; \
 	cat /tmp/regression-la.log; \
 	state=$$(../scripts/check-la64-regression-log.sh /tmp/regression-la.log $$qemu_status); \

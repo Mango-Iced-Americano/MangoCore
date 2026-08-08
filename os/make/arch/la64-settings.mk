@@ -46,6 +46,13 @@ LWEXT4_LA_INPUTS := $(shell find "$(LWEXT4_LA_DIR)" -type f ! -path "$(LWEXT4_LA
 
 # BOARD
 BOARD ?= laqemu
+ifeq ($(BOARD),laqemu)
+BOOT_PROFILE := boot_la_qemu
+else ifeq ($(BOARD),2k1000)
+BOOT_PROFILE := boot_la_uboot_dmw
+else
+$(error BOARD must be laqemu or 2k1000 for la64)
+endif
 LINKER_SCRIPT := src/hal/arch/loongarch64/linker-$(BOARD).ld
 
 # Logging

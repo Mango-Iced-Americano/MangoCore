@@ -1,9 +1,8 @@
 use super::common::*;
 
 pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
-    const VALID_FLAGS: OpenFlags = OpenFlags::from_bits_truncate(
-        0o2000000 /* O_CLOEXEC */ | 0o4000, /* O_NONBLOCK */
-    );
+    const VALID_FLAGS: OpenFlags =
+        OpenFlags::from_bits_truncate(0o2000000 /* O_CLOEXEC */ | 0o4000 /* O_NONBLOCK */);
     let flags = match OpenFlags::from_bits(flags) {
         Some(flags) => {
             // only O_CLOEXEC | O_NONBLOCK are valid in pipe2()
@@ -32,7 +31,12 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     let nonblock = flags.contains(OpenFlags::O_NONBLOCK);
     let vf_read = vfs::File::new_without_open(
         pipe_read,
-        vfs::FileFlags::O_RDONLY | if nonblock { vfs::FileFlags::O_NONBLOCK } else { vfs::FileFlags::empty() },
+        vfs::FileFlags::O_RDONLY
+            | if nonblock {
+                vfs::FileFlags::O_NONBLOCK
+            } else {
+                vfs::FileFlags::empty()
+            },
         vfs::FileType::Pipe,
     );
     let read_fd = match fd_table.alloc_fd(vf_read, cloexec) {
@@ -41,7 +45,12 @@ pub fn sys_pipe2(pipefd: usize, flags: u32) -> isize {
     };
     let vf_write = vfs::File::new_without_open(
         pipe_write,
-        vfs::FileFlags::O_WRONLY | if nonblock { vfs::FileFlags::O_NONBLOCK } else { vfs::FileFlags::empty() },
+        vfs::FileFlags::O_WRONLY
+            | if nonblock {
+                vfs::FileFlags::O_NONBLOCK
+            } else {
+                vfs::FileFlags::empty()
+            },
         vfs::FileType::Pipe,
     );
     let write_fd = match fd_table.alloc_fd(vf_write, cloexec) {

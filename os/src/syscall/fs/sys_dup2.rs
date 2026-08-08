@@ -16,12 +16,10 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
             Ok(file) => file,
             Err(e) => return -(e as isize),
         };
-        let replaced_flock = fd_table.get_file(newfd).ok().map(|file| {
-            (
-                file.description_id(),
-                Arc::strong_count(&file),
-            )
-        });
+        let replaced_flock = fd_table
+            .get_file(newfd)
+            .ok()
+            .map(|file| (file.description_id(), Arc::strong_count(&file)));
 
         let (ret, old_file) = match fd_table.alloc_fd_at(newfd, file, false) {
             Ok((fd, old)) => (fd as isize, old),

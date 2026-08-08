@@ -90,15 +90,15 @@ impl MountFlags {
 ///
 /// Most MS_* → ST_* values are identical; only the exceptions are documented.
 /// - `NOSYMFOLLOW`: MS_NOSYMFOLLOW = 0x100 → ST_NOSYMFOLLOW = 0x2000
-pub const ST_RDONLY: u64      = 0x0001;
-pub const ST_NOSUID: u64      = 0x0002;
-pub const ST_NODEV: u64       = 0x0004;
-pub const ST_NOEXEC: u64      = 0x0008;
+pub const ST_RDONLY: u64 = 0x0001;
+pub const ST_NOSUID: u64 = 0x0002;
+pub const ST_NODEV: u64 = 0x0004;
+pub const ST_NOEXEC: u64 = 0x0008;
 pub const ST_SYNCHRONOUS: u64 = 0x0010;
-pub const ST_MANDLOCK: u64    = 0x0040;
-pub const ST_NOATIME: u64     = 0x0400;
-pub const ST_NODIRATIME: u64  = 0x0800;
-pub const ST_RELATIME: u64    = 0x1000;
+pub const ST_MANDLOCK: u64 = 0x0040;
+pub const ST_NOATIME: u64 = 0x0400;
+pub const ST_NODIRATIME: u64 = 0x0800;
+pub const ST_RELATIME: u64 = 0x1000;
 pub const ST_NOSYMFOLLOW: u64 = 0x2000;
 
 /// Convert VFS internal `MountFlags` (MS_* bit assignments) to `statfs`
@@ -108,17 +108,39 @@ pub const ST_NOSYMFOLLOW: u64 = 0x2000;
 /// `NOSYMFOLLOW` (0x100 → 0x2000).
 pub fn mount_flags_to_st_flags(mf: MountFlags) -> u64 {
     let mut st = 0u64;
-    if mf.contains(MountFlags::RDONLY)      { st |= ST_RDONLY; }
-    if mf.contains(MountFlags::NOSUID)      { st |= ST_NOSUID; }
-    if mf.contains(MountFlags::NODEV)       { st |= ST_NODEV; }
-    if mf.contains(MountFlags::NOEXEC)      { st |= ST_NOEXEC; }
-    if mf.contains(MountFlags::SYNCHRONOUS) { st |= ST_SYNCHRONOUS; }
-    if mf.contains(MountFlags::MANDLOCK)    { st |= ST_MANDLOCK; }
-    if mf.contains(MountFlags::DIRSYNC)     { st |= 0x0080; }  // same bit
-    if mf.contains(MountFlags::NOSYMFOLLOW) { st |= ST_NOSYMFOLLOW; }
-    if mf.contains(MountFlags::NOATIME)     { st |= ST_NOATIME; }
-    if mf.contains(MountFlags::NODIRATIME)  { st |= ST_NODIRATIME; }
-    if mf.contains(MountFlags::RELATIME)    { st |= ST_RELATIME; }
+    if mf.contains(MountFlags::RDONLY) {
+        st |= ST_RDONLY;
+    }
+    if mf.contains(MountFlags::NOSUID) {
+        st |= ST_NOSUID;
+    }
+    if mf.contains(MountFlags::NODEV) {
+        st |= ST_NODEV;
+    }
+    if mf.contains(MountFlags::NOEXEC) {
+        st |= ST_NOEXEC;
+    }
+    if mf.contains(MountFlags::SYNCHRONOUS) {
+        st |= ST_SYNCHRONOUS;
+    }
+    if mf.contains(MountFlags::MANDLOCK) {
+        st |= ST_MANDLOCK;
+    }
+    if mf.contains(MountFlags::DIRSYNC) {
+        st |= 0x0080;
+    } // same bit
+    if mf.contains(MountFlags::NOSYMFOLLOW) {
+        st |= ST_NOSYMFOLLOW;
+    }
+    if mf.contains(MountFlags::NOATIME) {
+        st |= ST_NOATIME;
+    }
+    if mf.contains(MountFlags::NODIRATIME) {
+        st |= ST_NODIRATIME;
+    }
+    if mf.contains(MountFlags::RELATIME) {
+        st |= ST_RELATIME;
+    }
     st
 }
 
@@ -361,7 +383,17 @@ pub mod counters {
     pub static RBIND_DIRENT_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static RBIND_SEEN_SCAN: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn mount_perf_snapshot() -> (usize, usize, usize, usize, usize, usize, usize, usize, usize) {
+    pub fn mount_perf_snapshot() -> (
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
         (
             MOUNT_LIST_PROPAGATE_CALLS.load(core::sync::atomic::Ordering::Relaxed),
             MOUNT_LIST_PROPAGATE_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
@@ -408,18 +440,30 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
             return;
         }
         let self_ptr = Arc::as_ptr(mfs) as usize;
-        let lc_count = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) & ((1u64 << 30) - 1);
-        let lc_state = mfs.lifecycle.packed.load(core::sync::atomic::Ordering::Relaxed) >> 62;
+        let lc_count = mfs
+            .lifecycle
+            .packed
+            .load(core::sync::atomic::Ordering::Relaxed)
+            & ((1u64 << 30) - 1);
+        let lc_state = mfs
+            .lifecycle
+            .packed
+            .load(core::sync::atomic::Ordering::Relaxed)
+            >> 62;
         let parent_info = mfs.self_mountpoint().map(|mp| {
             let parent_ptr = Arc::as_ptr(&mp.mount_fs) as usize;
-            let ino = mp.inner_inode.metadata().map(|m| {
-                alloc::format!("{:?}", m.inode_id)
-            }).unwrap_or_else(|_| alloc::string::String::from("?"));
+            let ino = mp
+                .inner_inode
+                .metadata()
+                .map(|m| alloc::format!("{:?}", m.inode_id))
+                .unwrap_or_else(|_| alloc::string::String::from("?"));
             (parent_ptr, ino)
         });
         let flags = mfs.mount_flags();
         let prop = mfs.propagation();
-        let path = mfs.mount_path().unwrap_or_else(|| alloc::string::String::from("(nopath)"));
+        let path = mfs
+            .mount_path()
+            .unwrap_or_else(|| alloc::string::String::from("(nopath)"));
 
         log::warn!(
             "[mount_diag] {} mfs=0x{:x} lc_count={} lc_state={} path={} flags={:?} prop={:?} peer_gid={} master_gid={} parent_mfs={} parent_ino={}",
@@ -462,8 +506,8 @@ fn diag_mount_event(label: &str, mfs: &Arc<MountFS>) {
 const LC_STATE_SHIFT: u64 = 62;
 const LC_COUNT_MASK: u64 = (1u64 << 30) - 1;
 const LC_STATE_ACTIVE: u64 = 0;
-const LC_STATE_DYING: u64  = 1;
-const LC_STATE_DEAD: u64   = 2;
+const LC_STATE_DYING: u64 = 1;
+const LC_STATE_DEAD: u64 = 2;
 
 /// Persistent linear registry of every **acquired** `BackendLifecycle`.
 ///
@@ -539,16 +583,15 @@ impl BackendLifecycle {
                 return None;
             }
             let new = old + 1; // state stays Active, count++
-            match self.packed.compare_exchange_weak(
-                old, new, Ordering::AcqRel, Ordering::Acquire,
-            ) {
+            match self
+                .packed
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
                     LC_ACQUIRE.fetch_add(1, Ordering::Relaxed);
                     // Lazily register on first acquire (0→1).
                     // This guarantee: no count-0 lifecycle ever enters the registry.
-                    if count == 0
-                        && !self.registered.swap(true, Ordering::AcqRel)
-                    {
+                    if count == 0 && !self.registered.swap(true, Ordering::AcqRel) {
                         LIFECYCLE_REGISTRY.lock().push(self.clone());
                     }
                     return Some(self.clone());
@@ -575,7 +618,10 @@ impl BackendLifecycle {
                 // Last reference: transition to Dying.
                 let new = LC_STATE_DYING << LC_STATE_SHIFT;
                 match self.packed.compare_exchange_weak(
-                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                    old,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => {
                         LC_RELEASE_DYING.fetch_add(1, Ordering::Relaxed);
@@ -586,7 +632,10 @@ impl BackendLifecycle {
             } else {
                 let new = (state << LC_STATE_SHIFT) | (count - 1);
                 match self.packed.compare_exchange_weak(
-                    old, new, Ordering::AcqRel, Ordering::Acquire,
+                    old,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => return false,
                     Err(_) => continue,
@@ -602,7 +651,9 @@ impl BackendLifecycle {
     }
 
     #[inline]
-    fn is_dying(&self) -> bool { self.state() == LC_STATE_DYING }
+    fn is_dying(&self) -> bool {
+        self.state() == LC_STATE_DYING
+    }
 }
 
 /// Drain **one** Dying lifecycle from the global registry.
@@ -633,7 +684,8 @@ pub fn drain_one_dying_lifecycle() -> bool {
             Ok(()) => {
                 // Dead is reserved for a backend whose teardown transaction
                 // completed; only then may the lifecycle release its fs Arc.
-                lc.packed.store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
+                lc.packed
+                    .store(LC_STATE_DEAD << LC_STATE_SHIFT, Ordering::Release);
                 LC_DRAIN.fetch_add(1, Ordering::Relaxed);
                 // `lc` drops here → Arc<BackendLifecycle> →
                 // Arc<dyn FileSystem> released.
@@ -790,7 +842,7 @@ impl MountFSInode {
 
     /// 检查挂载是否可写
     fn ensure_mount_writable(&self) -> Result<(), SyscallErr> {
-        if self.mount_fs.mount_flags().contains(MountFlags::RDONLY) {
+        if self.mount_fs.mount_flags.load(Ordering::Acquire) & MountFlags::RDONLY.bits() != 0 {
             return Err(SyscallErr::EROFS);
         }
         Ok(())
@@ -1141,7 +1193,12 @@ impl IndexNode for MountFSInode {
         len: usize,
         src: &crate::mm::UserBuffer,
     ) -> Result<usize, SyscallErr> {
-        self.ensure_mount_writable()?;
+        let writable_start = crate::task::perf::perf_memory_io_time_now();
+        let writable = self.ensure_mount_writable();
+        crate::task::perf::record_pwrite_mount_writable(
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(writable_start),
+        );
+        writable?;
         self.inner_inode.write_at_user(offset, len, src)
     }
 
@@ -1876,7 +1933,7 @@ pub struct MountFS {
     /// DragonOS 存 Arc 而非 Weak——循环由 umount 时 take() 打破。
     self_mountpoint: Mutex<Option<Arc<MountFSInode>>>,
     /// 挂载标志
-    mount_flags: Mutex<MountFlags>,
+    mount_flags: AtomicU32,
     /// 挂载源
     mount_source: Mutex<Option<String>>,
     /// 挂载目标路径
@@ -1906,7 +1963,9 @@ impl MountFS {
     /// `MountFS` holds one reference.  The caller must have pre-registered
     /// the lifecycle via `BackendLifecycle::new()`.
     pub fn new(lifecycle: Arc<BackendLifecycle>, mount_flags: MountFlags) -> Arc<Self> {
-        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
+        let _ = lifecycle
+            .acquire()
+            .expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: None,
@@ -1914,7 +1973,7 @@ impl MountFS {
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
-            mount_flags: Mutex::new(mount_flags),
+            mount_flags: AtomicU32::new(mount_flags.bits()),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
@@ -1936,7 +1995,9 @@ impl MountFS {
         root_inner_inode: Arc<dyn IndexNode>,
         mount_flags: MountFlags,
     ) -> Arc<Self> {
-        let _ = lifecycle.acquire().expect("BackendLifecycle::acquire failed on fresh lifecycle");
+        let _ = lifecycle
+            .acquire()
+            .expect("BackendLifecycle::acquire failed on fresh lifecycle");
         counters::MOUNTFS_ALIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mfs = Arc::new_cyclic(|self_ref| MountFS {
             root_inner_inode: Some(root_inner_inode),
@@ -1944,7 +2005,7 @@ impl MountFS {
             mountpoints: Mutex::new(BTreeMap::new()),
             path_hints: Mutex::new(BTreeMap::new()),
             self_mountpoint: Mutex::new(None),
-            mount_flags: Mutex::new(mount_flags),
+            mount_flags: AtomicU32::new(mount_flags.bits()),
             mount_source: Mutex::new(None),
             mount_path: Mutex::new(None),
             propagation: MountPropagation::new_private(),
@@ -2356,11 +2417,11 @@ impl MountFS {
     }
 
     pub fn mount_flags(&self) -> MountFlags {
-        *self.mount_flags.lock()
+        MountFlags::from_bits_truncate(self.mount_flags.load(Ordering::Acquire))
     }
 
     pub fn set_mount_flags(&self, flags: MountFlags) {
-        *self.mount_flags.lock() = flags;
+        self.mount_flags.store(flags.bits(), Ordering::Release);
     }
 
     pub fn has_writers(&self) -> bool {
@@ -2442,7 +2503,10 @@ impl FileSystem for MountFS {
         sb
     }
 
-    fn statfs(&self, inode: &Arc<dyn IndexNode>) -> Result<super::file_system::SuperBlock, SyscallErr> {
+    fn statfs(
+        &self,
+        inode: &Arc<dyn IndexNode>,
+    ) -> Result<super::file_system::SuperBlock, SyscallErr> {
         // Unwrap MountFSInode to reach the inner filesystem's statfs,
         // then OR in the mount-level flags (converted to ST_* ABI) so
         // that statfs(2) reports ST_RDONLY / ST_NOSYMFOLLOW etc.

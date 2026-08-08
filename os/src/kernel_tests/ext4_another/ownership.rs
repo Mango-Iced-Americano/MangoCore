@@ -23,4 +23,3 @@ pub(super) fn test_root_inode_is_canonical_and_does_not_retain_filesystem(
     }
     Ok(())
 }
-

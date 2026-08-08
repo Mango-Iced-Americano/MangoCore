@@ -1,9 +1,11 @@
 #[cfg(all(
     target_arch = "loongarch64",
-    feature = "board_2k1000",
+    feature = "boot_la_uboot_dmw",
     any(feature = "gmac_probe", feature = "gmac_2k1000")
 ))]
 pub mod gmac_2k1000;
+#[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+pub mod gmac_jh7110;
 pub mod veth;
 #[cfg(any(feature = "block_virt", feature = "block_virt_pci"))]
 pub mod virtio_net;
@@ -26,9 +28,22 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
+    #[cfg(all(target_arch = "riscv64", feature = "block_virt"))]
+    {
+        let platform_info = crate::hal::platform::platform_info();
+        if !platform_info.devices.is_empty() {
+            let device_manager =
+                crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+            if let Some(net_device) = virtio_net::probe_net_from_device_manager(&device_manager) {
+                *NET_DEVICE.lock() = Some(net_device);
+                return;
+            }
+        }
+    }
+
     #[cfg(all(
         target_arch = "loongarch64",
-        feature = "board_2k1000",
+        feature = "boot_la_uboot_dmw",
         feature = "gmac_2k1000"
     ))]
     {
@@ -39,17 +54,23 @@ pub fn init_net_device() {
     }
     #[cfg(all(
         any(feature = "block_virt", feature = "block_virt_pci"),
-        not(all(
-            target_arch = "loongarch64",
-            feature = "board_2k1000",
-            feature = "gmac_2k1000"
+        not(any(
+            all(
+                target_arch = "loongarch64",
+                feature = "boot_la_uboot_dmw",
+                feature = "gmac_2k1000"
+            ),
+            all(target_arch = "riscv64", feature = "gmac_probe")
         ))
     ))]
     {
-        if let Some(net_dev) = virtio_net::VirtIONetWrapper::new() {
-            *NET_DEVICE.lock() = Some(Arc::new(net_dev));
-        } else {
-            println!("[kernel] VirtIO net device not found, skipping network init");
+        #[cfg(feature = "block_virt_pci")]
+        {
+            if let Some(net_dev) = virtio_net::VirtIONetWrapper::new() {
+                *NET_DEVICE.lock() = Some(Arc::new(net_dev));
+            } else {
+                println!("[kernel] VirtIO net device not found, skipping network init");
+            }
         }
     }
 }
