@@ -35,8 +35,40 @@ pub struct Fat {
 }
 
 impl Fat {
-    /// Read one FAT32 entry. The mount path has already adapted `block_device`
-    /// so block IDs are expressed in BPB_BytsPerSec units.
+    /// 把 FAT32 扇区号换算为 BlockDevice 的父块号 + 块内字节偏移。
+    ///
+    /// BlockDevice 的 `read_block`/`write_block` 以 BLOCK_SZ(4096) 字节为单位
+    /// 编址，而 FAT32 内部所有扇区号（FAT 起始、FAT 扇区偏移）均以
+    /// BPB_BytsPerSec(512) 为单位，因此访问磁盘前必须先做换算。
+    #[inline(always)]
+    fn sector_to_parent(&self, sector: usize) -> (usize, usize) {
+        let sectors_per_block = crate::hal::BLOCK_SZ / self.byts_per_sec;
+        let block_id = sector / sectors_per_block;
+        let block_off = (sector % sectors_per_block) * self.byts_per_sec;
+        (block_id, block_off)
+    }
+
+    /// 读取一个 FAT 扇区（byts_per_sec 字节）：整块(4096)读入后切片。
+    fn read_fat_sector(&self, block_device: &Arc<dyn BlockDevice>, sector: usize, buf: &mut [u8]) {
+        assert_eq!(buf.len(), self.byts_per_sec);
+        let (block_id, block_off) = self.sector_to_parent(sector);
+        let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
+        block_device.read_block(block_id, &mut block).ok();
+        buf.copy_from_slice(&block[block_off..block_off + self.byts_per_sec]);
+    }
+
+    /// 写入一个 FAT 扇区（byts_per_sec 字节）：整块读出 → 修改 → 整块写回，
+    /// 避免破坏同一 4096 字节块内相邻扇区的数据。
+    fn write_fat_sector(&self, block_device: &Arc<dyn BlockDevice>, sector: usize, buf: &[u8]) {
+        assert_eq!(buf.len(), self.byts_per_sec);
+        let (block_id, block_off) = self.sector_to_parent(sector);
+        let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
+        block_device.read_block(block_id, &mut block).ok();
+        block[block_off..block_off + self.byts_per_sec].copy_from_slice(buf);
+        block_device.write_block(block_id, &block).ok();
+    }
+
+    /// Read one FAT32 entry.
     fn read_fat_entry(
         &self,
         block_device: &Arc<dyn BlockDevice>,
@@ -50,7 +82,7 @@ impl Fat {
         let sector =
             self.start_block_id + self.active_fat * self.sectors_per_fat + fat_sector_offset;
         let mut buf = alloc::vec![0u8; self.byts_per_sec];
-        block_device.read_block(sector, &mut buf);
+        self.read_fat_sector(block_device, sector, &mut buf);
         u32::from_le_bytes([
             buf[offset],
             buf[offset + 1],
@@ -79,7 +111,7 @@ impl Fat {
         for fat_index in first_fat..first_fat + fat_count {
             let sector = self.start_block_id + fat_index * self.sectors_per_fat + fat_sector_offset;
             let mut buf = alloc::vec![0u8; self.byts_per_sec];
-            block_device.read_block(sector, &mut buf);
+            self.read_fat_sector(block_device, sector, &mut buf);
             let old = u32::from_le_bytes([
                 buf[offset],
                 buf[offset + 1],
@@ -88,7 +120,7 @@ impl Fat {
             ]);
             let updated = (old & 0xF000_0000) | (val & EOC);
             buf[offset..offset + 4].copy_from_slice(&updated.to_le_bytes());
-            block_device.write_block(sector, &buf);
+            self.write_fat_sector(block_device, sector, &buf);
         }
     }
 
