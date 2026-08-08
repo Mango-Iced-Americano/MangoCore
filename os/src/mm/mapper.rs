@@ -55,6 +55,15 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         self.page_table.map_identical(vpn, ppn, flags)
     }
 
+    /// 建立一个 2 MiB 的恒等映射。
+    pub fn map_identical_2m(
+        &mut self,
+        start_vpn: VirtPageNum,
+        flags: MapPermission,
+    ) -> MmResult<()> {
+        self.page_table.try_map_identical_2m(start_vpn, flags)
+    }
+
     /// 解除一个必须存在的映射。
     ///
     /// # Errors

@@ -30,6 +30,7 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | `try_map_no_flush(vpn, ppn, flags)` | 建立映射但不刷新，只允许 `MmuGather` 调用 |
 | `map(vpn, ppn, flags)` | 建立映射，失败时由实现处理 |
 | `map_identical(vpn, ppn, flags)` | 建立恒等映射 |
+| `try_map_identical_2m(start_vpn, flags)` | 建立 2 MiB 恒等映射；SV39 使用二级叶子 PTE，其他架构保留 4 KiB 回退 |
 | `unmap(vpn)` | 删除映射 |
 | `unmap_no_flush(vpn)` | 删除映射但不刷新，只允许 `MmuGather` 调用 |
 | `translate(vpn)` | VPN 到 PPN |

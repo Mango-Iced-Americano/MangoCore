@@ -173,9 +173,11 @@ lazy_static! {
 | `.data` | `R | W | G` | `sdata..edata` |
 | `.bss` | `R | W | G` | `sbss_with_stack..ebss` |
 | usable DRAM regions | `R | W | G` | 运行期 FDT/实板 fallback region 扣除内核和固件 carveout 后的各区间 |
-| MMIO | `R | W | G` | `config::MMIO` 表 |
+| MMIO | `R | W | G` | FDT 早期 MMIO 资源（含 PCI host ECAM 与 memory window） |
 
-映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致。
+映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致。FDT
+MMIO 资源的对齐中段优先使用 2 MiB 映射，避免把 QEMU PCI host 的大 64-bit memory window
+逐个拆成 4 KiB PTE；首尾未对齐部分仍用 4 KiB 映射。
 RV64 为每个动态 RAM 页建立真实叶子 PTE；LA64 的低地址恒等访问由 DMW 提供，并按固件
 最高 DRAM 地址建立软件 dirty bitmap。2K1000LA 和 LA64 QEMU 的多个 bank 分别处理，
 中间 MMIO 空洞不会作为普通内存映射、清零或分配。
@@ -263,6 +265,6 @@ MM 文档不把寄存器细节放在本页展开；架构相关页表实现和 T
 |------|----------|
 | `mm::init()` 前后 panic | 堆初始化是否早于 `Vec/Arc/BTreeMap` 创建 |
 | 早期页故障 | 内核段、usable DRAM region 或 MMIO 映射是否缺失；是否误把地址空洞当 RAM |
-| 驱动初始化访问 MMIO 失败 | `config::MMIO` 是否被 `KernelSpace::new()` 映射 |
+| 驱动初始化访问 MMIO 失败 | FDT 早期 MMIO 资源是否被 `KernelSpace::new()` 映射 |
 | fork/exec 后用户态异常 | 用户地址空间映射，不应从 `KERNEL_SPACE` 查找 |
 | 删除内核映射后悬空访问 | `remove_area_with_start_vpn()` 是否提前释放了仍在使用的映射 |

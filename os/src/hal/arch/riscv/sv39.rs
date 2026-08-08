@@ -329,6 +329,9 @@ impl Sv39PageTableEntry {
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlags::X) != PTEFlags::empty()
     }
+    pub fn is_leaf(&self) -> bool {
+        self.readable() || self.writable() || self.executable()
+    }
     pub fn clear_access(&mut self) {
         self.bits &= !(PTEFlags::A.bits() as usize);
     }
@@ -385,6 +388,8 @@ impl Sv39PageTable {
                 // 非叶子页表项只设置 V，保持 R/W/X 为 0；A/D 只对叶子 PTE 有意义。
                 *pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
+            } else if pte.is_leaf() {
+                return Err(MemoryError::AlreadyMapped);
             }
             ppn = pte.ppn();
         }
@@ -392,22 +397,24 @@ impl Sv39PageTable {
     }
     /// Find the page table entry denoted by vpn, returning Some(&_) if found or None if not.
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&Sv39PageTableEntry> {
+        self.find_pte_with_level(vpn).map(|(pte, _)| pte)
+    }
+
+    fn find_pte_with_level(&self, vpn: VirtPageNum) -> Option<(&Sv39PageTableEntry, usize)> {
         let idxs: [usize; 3] = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&Sv39PageTableEntry> = None;
         for i in 0..3 {
             // Safety: 页表对象保持中间页存活；共享借用只建立只读 PTE 视图。
             let pte = &unsafe { ppn.get_pte_array::<Sv39PageTableEntry>() }[idxs[i]];
             if !pte.is_valid() {
                 return None;
             }
-            if i == 2 {
-                result = Some(pte);
-                break;
+            if i == 2 || pte.is_leaf() {
+                return Some((pte, i));
             }
             ppn = pte.ppn();
         }
-        result
+        None
     }
     /// Find and return reference the page table entry denoted by `vpn`, `None` if not found.
     fn find_pte_refmut(&mut self, vpn: VirtPageNum) -> Option<&mut Sv39PageTableEntry> {
@@ -421,7 +428,7 @@ impl Sv39PageTable {
             if !pte.is_valid() {
                 return None;
             }
-            if i == 2 {
+            if i == 2 || pte.is_leaf() {
                 result = Some(pte);
                 break;
             }
@@ -514,6 +521,44 @@ impl PageTable for Sv39PageTable {
         *pte = Sv39PageTableEntry::new(ppn, pte_flags);
         Ok(())
     }
+    fn try_map_identical_2m(
+        &mut self,
+        start_vpn: VirtPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
+        const PAGES_PER_2M: usize = 512;
+        if start_vpn.0 % PAGES_PER_2M != 0 {
+            return Err(MemoryError::BadAddress);
+        }
+        let idxs: [usize; 3] = start_vpn.indexes();
+        let root_pte = &mut unsafe {
+            self.root_ppn
+                .get_pte_array_mut::<Sv39PageTableEntry>()
+        }[idxs[0]];
+        if !root_pte.is_valid() {
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| MemoryError::OutOfMemory)?;
+            let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+            *root_pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V);
+            self.frames.push(frame);
+        } else if root_pte.is_leaf() {
+            return Err(MemoryError::AlreadyMapped);
+        }
+        let l1_ppn = root_pte.ppn();
+        let pte = &mut unsafe { l1_ppn.get_pte_array_mut::<Sv39PageTableEntry>() }[idxs[1]];
+        if pte.is_valid() {
+            return Err(MemoryError::AlreadyMapped);
+        }
+        let mut pte_flags =
+            PTEFlags::from_bits(flags.bits()).unwrap() | PTEFlags::V | PTEFlags::A | PTEFlags::D;
+        if flags.contains(MapPermission::G) {
+            pte_flags |= PTEFlags::G;
+        }
+        *pte = Sv39PageTableEntry::new(PhysPageNum(start_vpn.0), pte_flags);
+        tlb_invalidate_vpn!(start_vpn);
+        Ok(())
+    }
     #[allow(unused)]
     /// Unmap the `vpn` to `ppn` with the `flags`.
     /// # Exceptions
@@ -530,9 +575,10 @@ impl PageTable for Sv39PageTable {
     /// Translate the `vpn` into its corresponding `Some(PageTableEntry)` if exists
     /// `None` is returned if nothing is found.
     fn translate(&self, vpn: VirtPageNum) -> Option<PhysPageNum> {
-        // This is not the same map as we defined just now...
-        // It is the map for func. programming.
-        self.find_pte(vpn).map(|pte| pte.ppn())
+        self.find_pte_with_level(vpn).map(|(pte, level)| {
+            let lower_vpn_bits = (2 - level) * 9;
+            PhysPageNum(pte.ppn().0 | (vpn.0 & ((1usize << lower_vpn_bits) - 1)))
+        })
     }
     /// Translate the virtual address into its corresponding `PhysAddr` if mapped in current page table.
     /// `None` is returned if nothing is found.

@@ -94,6 +94,21 @@ pub trait PageTable {
     fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.map(vpn, ppn, flags)
     }
+    /// 建立一个 2 MiB 的恒等映射。
+    ///
+    /// 默认实现保留 4 KiB 语义；SV39 覆盖此入口以使用二级叶子 PTE。
+    fn try_map_identical_2m(
+        &mut self,
+        start_vpn: VirtPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
+        const PAGES_PER_2M: usize = 512;
+        for offset in 0..PAGES_PER_2M {
+            let vpn = VirtPageNum(start_vpn.0 + offset);
+            self.try_map(vpn, PhysPageNum(vpn.0), flags)?;
+        }
+        Ok(())
+    }
     /// Unmap the `vpn` to `ppn` with the `flags`.
     ///
     /// # Panics

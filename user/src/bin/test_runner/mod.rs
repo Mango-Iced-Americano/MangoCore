@@ -34,8 +34,10 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
     bootstrap::libraries::link_libraries(&environ);
     bootstrap::libraries::install_embedded_libgcc_s();
     if !bootstrap::packages::install_apk_packages(&environ, cfg.skip_apk) {
-        println!("[initproc] aborting test runner: APK package installation failed");
-        return 1;
+        // APK/e2fsprogs 安装失败不是致命错误：basic/busybox/iozone/lmbench
+        // 等测试组不依赖 e2fsprogs 也能运行，只在用到 mkfs.ext4 的用例中
+        // 表现受限。降级为警告继续，避免网络/DNS 临时失败拖垮整轮测试。
+        println!("[initproc] WARNING: APK package installation failed; continuing without e2fsprogs");
     }
     HAS_BIN_BASH.store(process::run_bash_cmd("test -x /bin/bash\0", &environ) == 0, Ordering::Relaxed);
     if cfg.timer_smoke && !smoke::timerfd::run_timerfd_smoke() { shutdown(); return 1; }

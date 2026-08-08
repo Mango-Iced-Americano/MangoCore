@@ -256,13 +256,13 @@ impl<T: PageTable> KernelSpace<T> {
 
         boot_trace!("mapping memory-mapped registers");
         for &(base, end) in crate::hal::firmware::early_mmio_ranges() {
-            for vpn in VPNRange::new(VirtAddr::from(base).floor(), VirtAddr::from(end).ceil()) {
-                if kernel_space.page_table.translate(vpn).is_none() {
-                    KernelMapper::new(&mut kernel_space.page_table)
-                        .map_identical_page(vpn, MapPermission::R | MapPermission::W | MapPermission::G)
-                        .unwrap();
-                }
-            }
+            KernelMapper::new(&mut kernel_space.page_table)
+                .map_unmapped_identical_range(
+                    VirtAddr::from(base),
+                    VirtAddr::from(end),
+                    MapPermission::R | MapPermission::W | MapPermission::G,
+                )
+                .unwrap();
         }
 
         // Map firmware reserved regions (DTB, initrd) as read-only.

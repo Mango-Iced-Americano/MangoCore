@@ -8,6 +8,8 @@ use spin::Mutex;
 use crate::drivers::block::{BlockDevice, BlockDeviceResult};
 use crate::hal::BLOCK_SZ;
 
+const MEM_BLOCK_TEST_SIZE: usize = 1024 * 1024;
+
 /// Records I/O requests so byte-bridge tests can assert batching semantics.
 pub(super) struct RecordingMemBlock<const BLOCK_SIZE: usize> {
     data: Mutex<Vec<u8>>,
@@ -70,7 +72,7 @@ impl<const BLOCK_SIZE: usize> BlockDevice for RecordingMemBlock<BLOCK_SIZE> {
 
 pub(super) fn test_memblk_read_write() -> Result<(), &'static str> {
     let dev = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
-        64 * 1024 * 1024,
+        MEM_BLOCK_TEST_SIZE,
     ));
     let mut pattern = [0u8; BLOCK_SZ];
     for (index, byte) in pattern.iter_mut().enumerate() {
@@ -103,10 +105,10 @@ pub(super) fn test_memblk_read_write() -> Result<(), &'static str> {
 
 pub(super) fn test_memblk_isolation() -> Result<(), &'static str> {
     let first = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
-        64 * 1024 * 1024,
+        MEM_BLOCK_TEST_SIZE,
     ));
     let second = Arc::new(crate::kernel_tests::mem_block::MemBlockDevice::new(
-        64 * 1024 * 1024,
+        MEM_BLOCK_TEST_SIZE,
     ));
     let first_data = [0x11u8; BLOCK_SZ];
     let second_data = [0x22u8; BLOCK_SZ];
@@ -138,7 +140,7 @@ pub(super) fn test_open_unformatted_returns_err() -> Result<(), &'static str> {
     use crate::fs::ext4_lwext4::ext4fs::Ext4FileSystem;
 
     match Ext4FileSystem::open_ext4rs(Arc::new(
-        crate::kernel_tests::mem_block::MemBlockDevice::new(64 * 1024 * 1024),
+        crate::kernel_tests::mem_block::MemBlockDevice::new(MEM_BLOCK_TEST_SIZE),
     )) {
         Ok(_) => Err("open_ext4rs should fail on an all-zero device"),
         Err(_) => Ok(()),

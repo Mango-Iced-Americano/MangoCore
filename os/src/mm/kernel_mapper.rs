@@ -19,6 +19,8 @@ pub(super) struct KernelMapper<'a, T: PageTable> {
 }
 
 impl<'a, T: PageTable> KernelMapper<'a, T> {
+    const PAGES_PER_2M: usize = 512;
+
     /// 绑定一个内核页表。
     pub(super) fn new(page_table: &'a mut T) -> Self {
         Self {
@@ -59,6 +61,31 @@ impl<'a, T: PageTable> KernelMapper<'a, T> {
     ) -> MmResult<()> {
         for vpn in VPNRange::new(start_va.floor(), end_va.ceil()) {
             self.map_identical_page(vpn, flags)?;
+        }
+        Ok(())
+    }
+
+    /// 对不与既有映射重叠的恒等范围优先使用 2 MiB 叶子映射。
+    ///
+    /// 固件 MMIO 范围在 FDT 解析阶段已合并，且调用方仅把与 RAM 及前序范围
+    /// 不相交的区间交给此入口；未对齐的首尾仍保留 4 KiB 映射。
+    pub(super) fn map_unmapped_identical_range(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        flags: MapPermission,
+    ) -> MmResult<()> {
+        let mut vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        while vpn < end_vpn {
+            let remaining = end_vpn.0 - vpn.0;
+            if vpn.0 % Self::PAGES_PER_2M == 0 && remaining >= Self::PAGES_PER_2M {
+                self.mapper.map_identical_2m(vpn, flags)?;
+                vpn = VirtPageNum(vpn.0 + Self::PAGES_PER_2M);
+            } else {
+                self.map_identical_page(vpn, flags)?;
+                vpn = VirtPageNum(vpn.0 + 1);
+            }
         }
         Ok(())
     }

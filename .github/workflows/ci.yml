@@ -157,7 +157,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && make -C os rv64-ktest
+              cd /app && make -C os rv64-ktest CORE_NUM=4
             '
       - name: ktest la64
         run: |
@@ -165,7 +165,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && make -C os la64-ktest
+              cd /app && make -C os la64-ktest CORE_NUM=4
             '
       - name: Docker compose down
         if: always()
@@ -199,7 +199,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && make test ARCH=rv64 PROFILE=regression
+              cd /app && make test ARCH=rv64 PROFILE=regression CORE_NUM=4
             '
       - name: Regression la64
         run: |
@@ -207,7 +207,7 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app && make test ARCH=la64 PROFILE=regression
+              cd /app && make test ARCH=la64 PROFILE=regression CORE_NUM=4
             '
       - name: Docker compose down
         if: always()
@@ -277,7 +277,7 @@ jobs:
         run: |
           set -o pipefail
           docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
-            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp 2>&1 | tee /tmp/qemu-rv64.log'
+            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-rv64.log'
       - name: Score
         if: always()
         run: |
@@ -349,7 +349,7 @@ jobs:
         run: |
           set -o pipefail
           docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
-            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp 2>&1 | tee /tmp/qemu-la64.log'
+            cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-la64.log'
       - name: Score
         if: always()
         run: |
