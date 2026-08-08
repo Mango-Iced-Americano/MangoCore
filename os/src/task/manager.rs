@@ -278,6 +278,7 @@ impl TaskManager {
                             task.gettid()
                         );
                     }
+                    crate::task::perf::record_wake_local();
                     return Ok(None);
                 }
                 TaskStatus::Blocked => {
@@ -291,6 +292,11 @@ impl TaskManager {
                     // 固定锁序：TASK_MANAGER -> 一个目标 RunQueue。状态 CAS 与
                     // runnable 容器插入由 runqueue 入口在同一锁域提交。
                     super::run_queue::enqueue_woken(task, target_cpu);
+                    if target_cpu == crate::smp::cpu_id() {
+                        crate::task::perf::record_wake_local();
+                    } else {
+                        crate::task::perf::record_wake_remote();
+                    }
                     return Ok(Some(target_cpu));
                 }
                 TaskStatus::Queued(_) | TaskStatus::Migrating | TaskStatus::Running(_) => {
@@ -323,7 +329,11 @@ impl TaskManager {
 /// 否则转向允许集合中的最低负载 CPU。
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
     let last_cpu = task.last_cpu();
-    super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu))
+    let target = super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu));
+    let load = super::run_queue::nr_running(target)
+        + super::processor::cpu_current_count(target);
+    crate::task::perf::record_wake_selection(target == last_cpu, load == 0);
+    target
 }
 
 /// 在所有调度容器锁释放后敲响远程 doorbell。
@@ -436,6 +446,15 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
     loop {
         match task.task_status() {
             TaskStatus::Running(owner) if owner == cpu => {
+                let run_started = task
+                    .run_started_ticks
+                    .swap(0, AtomicOrdering::AcqRel);
+                if run_started != 0 {
+                    crate::task::perf::record_task_run_slice(
+                        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE)
+                            .wrapping_sub(run_started),
+                    );
+                }
                 // current 槽已在 idle 栈清空，但 Running(owner) 仍是唯一
                 // 权威状态。持请求槽锁直到新 runqueue owner 提交，防止
                 // 远程请求落在“检查旧 Running”与“提交 Queued”之间。

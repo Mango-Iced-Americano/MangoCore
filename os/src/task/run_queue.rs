@@ -189,6 +189,10 @@ pub(crate) fn enqueue_woken(task: Arc<TaskControlBlock>, cpu: usize) {
         TaskStatus::Queued(cpu),
         "wake blocked task",
     );
+    task.wake_enqueued_ticks.store(
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE),
+        Ordering::Release,
+    );
     queue.push_front(task);
     add_running(cpu);
 }
@@ -208,6 +212,12 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     if task.note_running_cpu(cpu) {
         state(cpu).record_migration();
     }
+    let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
+    let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
+    if enqueued != 0 {
+        crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
+    }
+    task.run_started_ticks.store(now, Ordering::Release);
     Some(task)
 }
 
@@ -217,6 +227,7 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 /// runqueue 锁和 `Queued -> Migrating` 状态交接决定。候选栈映射的本地 TLB
 /// 同步可能等待，因此先在锁内克隆候选、锁外同步，再回到同一队列复核。
 pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+    crate::task::perf::record_steal_attempt();
     let runnable_cpus = crate::smp::online_cpu_mask()
         & crate::smp::scheduler_cpu_mask()
         & !crate::smp::stopped_cpu_mask()
@@ -241,6 +252,7 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
             .find(|task| task.is_cpu_allowed(cpu) && !task.has_migration_target())
             .cloned();
         if let Some(candidate) = candidate {
+            crate::task::perf::record_steal_candidate();
             break (victim, candidate);
         }
         remaining &= !(1usize << victim);
@@ -248,6 +260,9 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 
     // 新建内核栈只保证发布 CPU 已看见映射；窃取 CPU 必须在接管前刷新本地
     // kernel-global TLB。等待期间任务仍完整留在 victim 队列。
+    let ktlb_start = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_CORE,
+    );
     crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
         panic!(
             "failed to synchronize stolen task {} stack on CPU {}: {:?}",
@@ -256,6 +271,10 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
             error
         )
     });
+    crate::task::perf::record_steal_ktlb_sync(
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE)
+            .wrapping_sub(ktlb_start),
+    );
 
     let mut queue = state(victim).run_queue.lock();
     let index = queue
@@ -266,6 +285,7 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         || !candidate.is_cpu_allowed(cpu)
         || candidate.has_migration_target()
     {
+        crate::task::perf::record_steal_recheck_failed();
         return None;
     }
     candidate.require_sched_transition(
@@ -287,7 +307,14 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     if task.note_running_cpu(cpu) {
         state(cpu).record_migration();
     }
+    let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
+    let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
+    if enqueued != 0 {
+        crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
+    }
+    task.run_started_ticks.store(now, Ordering::Release);
     state(cpu).record_steal();
+    crate::task::perf::record_steal_success();
     Some(task)
 }
 

@@ -144,9 +144,12 @@ impl KernelAllocator {
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         for _ in 0..3 {
+            let lock_start = memory_perf_time_now();
             let mut guard = self.inner.lock();
+            let lock_acquired = memory_perf_time_now();
             let inner = &mut *guard;
             let alloc_start = memory_perf_time_now();
+            let slab_class = slab_class_for(layout).map(|(_, bytes)| bytes);
 
             // Try the slab first for small objects.
             if let Some(result) = {
@@ -156,8 +159,13 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
+                crate::task::perf::record_heap_alloc_path(slab_class);
                 let charge = result.charge;
                 let ptr = result.ptr;
+                crate::task::perf::record_heap_lock(
+                    lock_acquired.wrapping_sub(lock_start),
+                    memory_perf_time_now().wrapping_sub(lock_acquired),
+                );
                 drop(guard);
                 self.record_charge(charge);
                 #[cfg(feature = "heap_trace")]
@@ -171,7 +179,12 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                     crate::task::perf::record_heap_alloc();
                     crate::task::perf::record_heap_alloc_cost(elapsed);
+                    crate::task::perf::record_heap_alloc_path(None);
                     let charge = direct_charge(layout);
+                    crate::task::perf::record_heap_lock(
+                        lock_acquired.wrapping_sub(lock_start),
+                        memory_perf_time_now().wrapping_sub(lock_acquired),
+                    );
                     drop(guard);
                     self.record_charge(charge);
                     #[cfg(feature = "heap_trace")]
@@ -182,6 +195,11 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     let elapsed = memory_perf_time_now().wrapping_sub(alloc_start);
                     crate::task::perf::record_heap_alloc();
                     crate::task::perf::record_heap_alloc_cost(elapsed);
+                    crate::task::perf::record_heap_alloc_path(None);
+                    crate::task::perf::record_heap_lock(
+                        lock_acquired.wrapping_sub(lock_start),
+                        memory_perf_time_now().wrapping_sub(lock_acquired),
+                    );
                     drop(guard);
                     if !self.recover_for(layout) {
                         break;
@@ -204,7 +222,9 @@ unsafe impl GlobalAlloc for KernelAllocator {
         crate::task::perf::record_heap_dealloc();
         let dealloc_start = memory_perf_time_now();
 
+        let lock_start = memory_perf_time_now();
         let mut guard = self.inner.lock();
+        let lock_acquired = memory_perf_time_now();
         let inner = &mut *guard;
 
         // Route to slab if layout fits a slab class.
@@ -214,6 +234,10 @@ unsafe impl GlobalAlloc for KernelAllocator {
             let charge = slab_class_for(layout).unwrap().1;
             let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
+            crate::task::perf::record_heap_lock(
+                lock_acquired.wrapping_sub(lock_start),
+                memory_perf_time_now().wrapping_sub(lock_acquired),
+            );
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
         } else {
@@ -221,6 +245,10 @@ unsafe impl GlobalAlloc for KernelAllocator {
             let charge = direct_charge(layout);
             let elapsed = memory_perf_time_now().wrapping_sub(dealloc_start);
             crate::task::perf::record_heap_dealloc_cost(elapsed);
+            crate::task::perf::record_heap_lock(
+                lock_acquired.wrapping_sub(lock_start),
+                memory_perf_time_now().wrapping_sub(lock_acquired),
+            );
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
         }

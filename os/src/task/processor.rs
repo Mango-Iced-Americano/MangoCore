@@ -276,8 +276,10 @@ pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmCont
             .is_some_and(|current| Arc::ptr_eq(current, &vm));
         (same_mm, if same_mm { None } else { active.take() })
     };
+    crate::task::perf::record_task_switch_mm(same_mm);
 
     if same_mm {
+        crate::task::perf::record_mm_same_already_active();
         return vm.activate_on(cpu);
     }
     if let Some(previous) = previous {
@@ -652,6 +654,7 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         if let Some(task) = next_task {
             dispatch_task(cpu, task_state, task, false, 0);
         } else {
+            super::perf::record_task_switch_idle_no_next();
             // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
             // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
             crate::hal::secondary_cpu_wait();
@@ -669,6 +672,9 @@ fn dispatch_task(
     sched_profile: bool,
     loop_t0: u64,
 ) {
+    if task.is_kernel_only() {
+        crate::task::perf::record_task_switch_to_kernel_only();
+    }
     #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_switch =
         cpu == crate::smp::BOOT_CPU_ID && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);

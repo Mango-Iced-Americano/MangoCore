@@ -727,6 +727,9 @@ impl From<SyscallErr> for WriteAttemptError {
 
 impl RetryWait for PageCacheFaultWait {
     fn wait(&self) {
+        let wait_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         // 此处由 trap/uaccess 外层保证已经释放 VM 锁。I/O 仍可在 op_gate
         // 读侧完成，但任何睡眠都必须发生在释放 op_gate 之后。
         loop {
@@ -745,13 +748,35 @@ impl RetryWait for PageCacheFaultWait {
                     })
             };
             match result {
-                Ok(()) | Err(SyscallErr::EIO) => return,
+                Ok(()) | Err(SyscallErr::EIO) => {
+                    crate::task::perf::record_filemap_retry_wait(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(wait_start),
+                    );
+                    return;
+                }
                 Err(SyscallErr::EAGAIN) => {
                     if self.cache.wait_for_state_progress(observed).is_err() {
+                        crate::task::perf::record_filemap_retry_wait(
+                            crate::task::perf::perf_time_now_for(
+                                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                            )
+                            .wrapping_sub(wait_start),
+                        );
                         return;
                     }
                 }
-                Err(_) => return,
+                Err(_) => {
+                    crate::task::perf::record_filemap_retry_wait(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(wait_start),
+                    );
+                    return;
+                }
             }
         }
     }

@@ -269,6 +269,10 @@ pub struct TaskControlBlock {
     pub sched_nice_hint: AtomicI32,
     /// runqueue 选择使用的 vruntime 快照，避免持队列锁再获取 `task.inner`。
     pub sched_vruntime_hint: AtomicU64,
+    /// 进入 runnable 队列的时间戳，仅用于诊断 wake-to-run 延迟。
+    pub(crate) wake_enqueued_ticks: AtomicUsize,
+    /// 最近一次取得 Running owner 的时间戳，仅用于诊断运行片段长度。
+    pub(crate) run_started_ticks: AtomicUsize,
 }
 
 /// 任务控制块内部状态
@@ -730,6 +734,10 @@ impl TaskControlBlock {
     /// 返回最近一次运行 CPU，供 blocked wake 选择原 CPU。
     pub(crate) fn last_cpu(&self) -> usize {
         self.last_cpu.load(Ordering::Acquire)
+    }
+    #[inline]
+    pub(crate) fn is_kernel_only(&self) -> bool {
+        self.kernel_entry.is_some()
     }
     /// 在任务成为本 CPU current 前记录运行位置，并报告是否真的跨核运行。
     ///
@@ -1314,6 +1322,8 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
+            wake_enqueued_ticks: AtomicUsize::new(0),
+            run_started_ticks: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
@@ -1440,6 +1450,8 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(0),
             sched_vruntime_hint: AtomicU64::new(0),
+            wake_enqueued_ticks: AtomicUsize::new(0),
+            run_started_ticks: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
@@ -1621,6 +1633,7 @@ impl TaskControlBlock {
         }
         let _kmap_ticks = perf::perf_time_now().wrapping_sub(_t_kmap);
         perf::EXECVE_KERNEL_MAP_TICKS.fetch_add(_kmap_ticks, Ordering::Relaxed);
+        perf::record_exec_fallback_kmap_wait(_kmap_ticks);
         // 带有ELF程序头/跳板/陷阱上下文/用户栈的用户地址空间（AddressSpaceInner）
         let _t_map = perf::perf_time_now();
         let load_result = AddressSpaceInner::from_elf(elf_data);
@@ -2012,6 +2025,8 @@ impl TaskControlBlock {
             wait_timer_generation: AtomicUsize::new(0),
             sched_nice_hint: AtomicI32::new(child_sched_nice),
             sched_vruntime_hint: AtomicU64::new(0),
+            wake_enqueued_ticks: AtomicUsize::new(0),
+            run_started_ticks: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             // Linux affinity 是 per-thread 属性；fork 子线程/进程继承父 mask，
