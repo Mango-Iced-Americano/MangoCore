@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: current
 owner: "MangoCore Team"
-last_updated: "2026-08-07"
+last_updated: "2026-08-08"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -40,8 +40,9 @@ PageCache 是 MangoCore VFS 层的页面级数据缓存，位于 IndexNode trait
 PageCache 不感知具体文件系统格式，通过 `PageCacheBackend` trait 桥接到 ext4、tmpfs、ramfs 等不同后端。
 
 当前 SMP 实现以 `op_gate` 建立操作级边界，以每页 `PageEntry.data` 保护物理页
-字节。不同页可以并行推进，但用户页访问必须在 inode 与 PageCache 锁全部释放后
-通过有界 kernel bounce 完成。
+字节，并以 `PG_LOCKED` 写租约阻止同页写者与 writeback 同时修改。不同页可以并行
+推进；直接 UserBuffer 路径只使用已经 fault-in 的 no-fault copy，不在 PageCache
+锁内触发用户缺页。
 
 文件 `MAP_SHARED` 使用独立的 `FileVmaRmap` 身份记录。PageCache 只保存它的
 `Weak`，walker 升级后持有强引用快照，释放 PageCache 注册表锁再进入目标
@@ -86,9 +87,9 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 struct PageEntry {
     page: Arc<FrameTracker>,     // 物理页面
     data: RwLock<()>,            // 只在 with_bytes{,_mut} 闭包内保护页面字节
-    state: AtomicU8,             // PageState 编码
-    valid_mask: AtomicU8,        // 512B segment 有效性位图
-    flags: AtomicU8,             // PG_REFERENCED, PG_REDIRTIED
+    flags: AtomicU32,            // PageState + LOCKED/REFERENCED/REDIRTIED
+    valid_mask: AtomicU32,       // 512B segment 有效性位图
+    map_count: AtomicUsize,      // 已安装的 file-backed PTE 数
 }
 ```
 
@@ -114,10 +115,10 @@ invalidate、clean-page eviction 以及 I/O 后的 entry 发布。元数据固�
 绝不能反向取得 PageCache 元数据锁。
 
 crate 内文件路径使用 `read_kernel`、`write_kernel`、`read_at_user` 和
-`write_at_user`。后两个接口按不超过 `IO_CHUNK_SIZE` 的内核缓冲分块：先在锁外
-完成 user copy，再进入 PageCache，或先复制到内核缓冲、释放 PageCache 锁后再写回
-用户空间。写回持有 data read lock 直到 backend I/O 完成；并发写者取得 data write
-lock 后再发布 Dirty，因此不会写出撕裂页面，也不会把新写入错误清成 UpToDate。
+`write_at_user`。UserBuffer 接口直接在 PageEntry 与预校验用户页之间 no-fault copy，
+不再分配整段 bounce buffer。写入先取得所有目标页的 `PG_LOCKED` 租约，再开始复制；
+写回持有 data read lock 直到 backend I/O 完成。因此不会写出撕裂页面，也不会把新写入
+错误清成 UpToDate。
 
 ## 二阶段读写模式
 
@@ -145,9 +146,10 @@ Phase 2（逐页 data 锁）: 拷贝到 kernel buffer
 Phase 1（持锁）: 收集
   for each page in [start_page, end_page]:
     entry = get_page_for_write_populate(page_index, old_file_size, full_overwrite)
+    lease = try_lock_for_write(entry)       // 单次 CAS，不自旋
     // populate 条件: !full_overwrite && !beyond_eof
     // 页超出 EOF → 跳过后端读取，使用零填充
-    copies.push(CopyItem { entry, offset, len, full_overwrite })
+    copies.push(CopyItem { entry, lease, offset, len, full_overwrite })
 
 Phase 2（逐页 data 写锁）: 拷贝并发布 Dirty
   for each item in copies:
@@ -157,6 +159,12 @@ Phase 2（逐页 data 写锁）: 拷贝并发布 Dirty
 ```
 
 单页场景有 fast path（跳过 `Vec<CopyItem>` 构造和循环分配）。写入完成后调用 `balance_dirty_pages()` 触发节流检测。
+
+租约 CAS 观察到 `Loading`、`Writeback`、另一写者的 `PG_LOCKED` 或 CAS 竞争失败时，
+内部结果为 Busy，而不是后端 `EAGAIN`。调用者释放 `op_gate` 和本轮已经取得的租约，
+再在共享 WaitQueue 上等待目标页可写；成功提交或失败回滚统一发布状态进度。这样普通
+文件写不会因 SMP 短暂竞争向用户态泄漏虚假 `EAGAIN`，同时后端真实返回的 `EAGAIN`
+仍按 I/O 错误原样传播。
 
 ## 脏页追踪与回写
 
@@ -171,7 +179,9 @@ static GLOBAL_DIRTY_PAGES: AtomicUsize;    // 脏页总数
 static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 ```
 
-每个 `PageCache` 实例维护 `inner.dirty_pages: BTreeSet<usize>` 记录其脏页索引。脏页计数在 CAS UpToDate → Dirty 成功时递增，在写回完成后递减。
+每页 Dirty/Writeback 状态直接编码在原子 flags 中；全量或范围写回通过 entries 快照筛选
+脏页，不再维护第二份 `dirty_pages` 集合。脏页计数在 CAS UpToDate → Dirty 成功时递增，
+在 claim writeback 时递减，并在失败恢复或 redirty 时校正。
 
 ### 节流阈值
 
@@ -197,6 +207,11 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 状态转换事件；发布加载、写回成功或写回失败结果时递增 generation 并唤醒等待者。
 “先观察、后入队”由 generation 条件重验封闭，避免丢失唤醒，也避免持有 PageCache
 操作门时睡眠。
+
+没有 `current_task` 的 scheduler/early-boot 上下文不能加入任务 WaitQueue。此时等待入口
+直接返回瞬时 `EAGAIN`：后台 lifecycle drain 会在后续调度轮次重新执行 teardown，
+不会在 idle/scheduler 栈上无限忙等。等待者计数使无竞争的状态发布只递增 generation，
+不获取 WaitQueue 锁。
 
 文件系统后端自己的事务 admission 竞争由后端适配层等待其真实进度事件。syscall 和
 PageCache 不对后端 `EAGAIN` 做固定次数轮询，防止跨层重试放大 CPU 消耗并掩盖错误
@@ -268,7 +283,6 @@ tmpfs/shmem 的 PageCache 设 `unevictable = true`，clock eviction 直接跳过
 ```rust
 struct InnerPageCache {
     pages: BTreeSet<usize>,      // 所有缓存的页索引
-    dirty_pages: BTreeSet<usize>, // 脏页索引
 }
 ```
 
@@ -284,6 +298,9 @@ pub struct PageCache {
     i_mmap: Mutex<BTreeMap<usize, Weak<FileVmaRmap>>>,
     unevictable: AtomicBool,       // true = 不可回收（tmpfs/shmem）
     clock_hand: AtomicUsize,       // clock sweep 光标
+    state_wait_generation: AtomicUsize,
+    state_waiter_count: AtomicUsize,
+    state_waiters: Mutex<WaitQueue>,
 }
 ```
 

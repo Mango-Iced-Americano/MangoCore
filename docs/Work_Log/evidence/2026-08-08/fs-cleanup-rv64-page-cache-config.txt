@@ -1,0 +1,7 @@
+arch=rv64
+profile=normal
+ktest=page_cache
+core_num=1
+qemu_timeout_seconds=60
+external_drive=none
+os_test_conf_sha256=42ea3e4cebd1cbb5ab1c2ba61e69f2232da54910208703e3e68ced85f61e7a70

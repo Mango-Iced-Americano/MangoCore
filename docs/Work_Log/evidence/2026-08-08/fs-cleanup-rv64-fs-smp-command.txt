@@ -1,0 +1,3 @@
+command: docker exec 6b17b5297342 sh -lc 'cd /app && KTEST=fs_smp KTEST_QEMU_TIMEOUT=90 make -C os ktest-run ARCH=rv64 PROFILE=normal CORE_NUM=8 QEMU_MEMORY=8G'
+exit_status: 0
+result: 7 passed, 0 skipped, 0 failed

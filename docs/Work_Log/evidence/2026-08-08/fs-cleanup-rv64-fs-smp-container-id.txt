@@ -1,0 +1,3 @@
+container: 6b17b5297342
+name: mangocore-smp-final-merge-20260806-os-dev-1
+mount: /home/lzm/projects/MangoCore-smp-final-merge-20260806 -> /app

@@ -1,5 +1,4 @@
-use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
+use alloc::sync::Arc;
 use core::any::Any;
 use core::convert::TryFrom;
 use core::fmt;
@@ -18,11 +17,9 @@ use super::lifetime::{CachedTimestamps, InodeKey, InodeLifetime};
 
 static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
 
-/// Live writable another_ext4 instances for global `sync(2)`.
-pub(crate) static EXT4_REGISTRY: Mutex<Vec<Weak<Ext4FileSystem>>> = Mutex::new(Vec::new());
-
 struct MetadataMutationWait {
     generation: AtomicUsize,
+    waiter_count: AtomicUsize,
     waiters: Mutex<WaitQueue>,
 }
 
@@ -30,6 +27,7 @@ impl MetadataMutationWait {
     fn new() -> Self {
         Self {
             generation: AtomicUsize::new(0),
+            waiter_count: AtomicUsize::new(0),
             waiters: Mutex::new(WaitQueue::new()),
         }
     }
@@ -40,25 +38,30 @@ impl MetadataMutationWait {
 
     fn wait_for_progress(&self, observed: usize) -> Result<(), SyscallErr> {
         if crate::task::current_task().is_none() {
-            while self.generation() == observed {
-                core::hint::spin_loop();
-            }
-            return Ok(());
+            // Scheduler/early-boot callers cannot block on a task wait queue.
+            // Lifecycle teardown will retry a transient admission failure on
+            // a later scheduler pass instead of busy-spinning here.
+            return Err(SyscallErr::EAGAIN);
         }
-        match WaitQueue::wait_event_interruptible(&self.waiters, || {
+        self.waiter_count.fetch_add(1, Ordering::AcqRel);
+        let result = match WaitQueue::wait_event_interruptible(&self.waiters, || {
             (self.generation() != observed).then_some(0)
         }) {
             WaitResult::Ready(_) => Ok(()),
             WaitResult::Interrupted => Err(SyscallErr::ERESTART),
             WaitResult::TimedOut => unreachable!("metadata wait has no deadline"),
-        }
+        };
+        self.waiter_count.fetch_sub(1, Ordering::AcqRel);
+        result
     }
 }
 
 impl another_ext4::MetadataMutationNotifier for MetadataMutationWait {
     fn notify(&self) {
         self.generation.fetch_add(1, Ordering::Release);
-        self.waiters.lock().wake_all();
+        if self.waiter_count.load(Ordering::Acquire) != 0 {
+            self.waiters.lock().wake_all();
+        }
     }
 }
 
@@ -120,9 +123,6 @@ impl Ext4FileSystem {
         });
         let root = Ext4Inode::new_root(&fs, another_ext4::EXT4_ROOT_INO)?;
         *fs.root.lock() = Some(root);
-        if !read_only {
-            EXT4_REGISTRY.lock().push(Arc::downgrade(&fs));
-        }
         Ok(fs)
     }
 

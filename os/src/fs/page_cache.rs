@@ -422,27 +422,28 @@ impl PageEntry {
     /// Acquire the per-page write lease.  The lease is separate from the
     /// data RwLock: it prevents writeback from claiming the page while a
     /// writer is copying user/kernel bytes and publishing Dirty.
-    fn try_lock_for_write(&self) -> Result<bool, SyscallErr> {
-        const MAX_RETRIES: usize = 100;
-
-        for _ in 0..MAX_RETRIES {
-            let old = self.flags();
-            match Self::decode_state(old) {
-                PageState::UpToDate | PageState::Dirty if old & PG_LOCKED == 0 => {
-                    let new = old | PG_LOCKED | PG_REFERENCED;
-                    if self.compare_exchange_flags(old, new).is_ok() {
-                        return Ok(old & PG_DIRTY != 0);
-                    }
-                    core::hint::spin_loop();
+    fn try_lock_for_write(&self) -> Result<Option<bool>, SyscallErr> {
+        let old = self.flags();
+        match Self::decode_state(old) {
+            PageState::UpToDate | PageState::Dirty if old & PG_LOCKED == 0 => {
+                let new = old | PG_LOCKED | PG_REFERENCED;
+                match self.compare_exchange_flags(old, new) {
+                    Ok(_) => Ok(Some(old & PG_DIRTY != 0)),
+                    Err(_) => Ok(None),
                 }
-                PageState::Writeback => core::hint::spin_loop(),
-                PageState::Loading => return Err(SyscallErr::EAGAIN),
-                PageState::Error => return Err(SyscallErr::EIO),
-                _ => core::hint::spin_loop(),
             }
+            PageState::Loading | PageState::Writeback => Ok(None),
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::UpToDate | PageState::Dirty => Ok(None),
         }
+    }
 
-        Err(SyscallErr::EAGAIN)
+    fn write_lease_ready(&self) -> bool {
+        let flags = self.flags();
+        matches!(
+            Self::decode_state(flags),
+            PageState::UpToDate | PageState::Dirty | PageState::Error
+        ) && (flags & PG_LOCKED == 0 || flags & PG_ERROR != 0)
     }
 
     /// Publish a completed write and return whether it transitioned a clean
@@ -488,16 +489,20 @@ impl PageEntry {
         } else {
             PG_UPTODATE | PG_REFERENCED
         };
-        let _ = self.flags.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-            Some((old | add) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
-        });
+        let _ = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some((old | add) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
+            });
         redirtied
     }
 
     fn restore_dirty_after_writeback(&self) {
-        let _ = self.flags.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-            Some((old | PG_DIRTY) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
-        });
+        let _ = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some((old | PG_DIRTY) & !(PG_WRITEBACK | PG_LOCKED | PG_REDIRTIED))
+            });
     }
 
     /// 检查所有 segment 是否均已有效
@@ -687,12 +692,26 @@ pub struct PageCache {
     /// Shared notification domain for Loading/Writeback completion. A single
     /// generation avoids adding a wait queue to every cached page.
     state_wait_generation: AtomicUsize,
+    /// Number of tasks registered or entering the shared state wait queue.
+    /// Producers use it to avoid taking the queue lock on uncontended writes.
+    state_waiter_count: AtomicUsize,
     state_waiters: Mutex<WaitQueue>,
 }
 
 struct PageCacheFaultWait {
     cache: Arc<PageCache>,
     page_index: usize,
+}
+
+enum WriteAttemptError {
+    Busy(Arc<PageEntry>),
+    Error(SyscallErr),
+}
+
+impl From<SyscallErr> for WriteAttemptError {
+    fn from(error: SyscallErr) -> Self {
+        Self::Error(error)
+    }
 }
 
 impl RetryWait for PageCacheFaultWait {
@@ -756,6 +775,7 @@ impl PageCache {
             async_writeback_requested: AtomicBool::new(false),
             mutation_generation: AtomicUsize::new(0),
             state_wait_generation: AtomicUsize::new(0),
+            state_waiter_count: AtomicUsize::new(0),
             state_waiters: Mutex::new(WaitQueue::new()),
         });
         register_page_cache(&pc);
@@ -764,23 +784,41 @@ impl PageCache {
 
     fn notify_state_progress(&self) {
         self.state_wait_generation.fetch_add(1, Ordering::Release);
-        self.state_waiters.lock().wake_all();
+        if self.state_waiter_count.load(Ordering::Acquire) != 0 {
+            self.state_waiters.lock().wake_all();
+        }
     }
 
     fn wait_for_state_progress(&self, observed: usize) -> Result<(), SyscallErr> {
         if crate::task::current_task().is_none() {
-            while self.state_wait_generation.load(Ordering::Acquire) == observed {
-                core::hint::spin_loop();
-            }
-            return Ok(());
+            return Err(SyscallErr::EAGAIN);
         }
-        match WaitQueue::wait_event(&self.state_waiters, || {
+        self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        let result = match WaitQueue::wait_event(&self.state_waiters, || {
             (self.state_wait_generation.load(Ordering::Acquire) != observed).then_some(0)
         }) {
             WaitResult::Ready(_) => Ok(()),
             WaitResult::Interrupted => Err(SyscallErr::ERESTART),
             WaitResult::TimedOut => unreachable!("page-state wait has no deadline"),
+        };
+        self.state_waiter_count.fetch_sub(1, Ordering::AcqRel);
+        result
+    }
+
+    fn wait_for_write_lease(&self, entry: &PageEntry) -> Result<(), SyscallErr> {
+        if crate::task::current_task().is_none() {
+            return Err(SyscallErr::EAGAIN);
         }
+        self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        let result = match WaitQueue::wait_event_interruptible(&self.state_waiters, || {
+            entry.write_lease_ready().then_some(0)
+        }) {
+            WaitResult::Ready(_) => Ok(()),
+            WaitResult::Interrupted => Err(SyscallErr::ERESTART),
+            WaitResult::TimedOut => unreachable!("page write-lease wait has no deadline"),
+        };
+        self.state_waiter_count.fetch_sub(1, Ordering::AcqRel);
+        result
     }
 
     /// 绑定用于读写持久化存储的 `PageCacheBackend`。
@@ -888,7 +926,11 @@ impl PageCache {
         self.entries
             .lock()
             .iter()
-            .filter(|entry| entry.as_ref().is_some_and(|entry| entry.test_flag(PG_DIRTY)))
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.test_flag(PG_DIRTY))
+            })
             .count()
     }
 
@@ -1740,12 +1782,31 @@ impl PageCache {
         src: &[u8],
         old_size: usize,
     ) -> Result<usize, SyscallErr> {
-        let _op = self.op_gate.read();
-        let result = self.write_kernel_body(offset, src, Some(old_size));
-        if result.is_ok() {
-            balance_dirty_pages();
+        loop {
+            let op = self.op_gate.read();
+            match self.write_kernel_body(offset, src, Some(old_size)) {
+                Ok(written) => {
+                    drop(op);
+                    if written != 0 {
+                        self.notify_state_progress();
+                    }
+                    balance_dirty_pages();
+                    return Ok(written);
+                }
+                Err(WriteAttemptError::Busy(entry)) => {
+                    drop(op);
+                    // A multi-page attempt may have released earlier leases.
+                    // Publish that progress before sleeping on the contended page.
+                    self.notify_state_progress();
+                    self.wait_for_write_lease(&entry)?;
+                }
+                Err(WriteAttemptError::Error(error)) => {
+                    drop(op);
+                    self.notify_state_progress();
+                    return Err(error);
+                }
+            }
         }
-        result
     }
 
     /// `write_kernel` 的锁内实现；调用者已经持有 `op_gate.read()`。
@@ -1754,7 +1815,7 @@ impl PageCache {
         offset: usize,
         buf: &[u8],
         old_file_size: Option<usize>,
-    ) -> Result<usize, SyscallErr> {
+    ) -> Result<usize, WriteAttemptError> {
         let _t0 = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         if buf.is_empty() {
             perf::record_pc_write(
@@ -1777,18 +1838,18 @@ impl PageCache {
             let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry =
                 self.get_page_for_write_populate(start_page, old_file_size, full_page_overwrite)?;
-            let was_dirty = entry.try_lock_for_write()?;
+            let was_dirty = entry
+                .try_lock_for_write()?
+                .ok_or_else(|| WriteAttemptError::Busy(entry.clone()))?;
             perf::record_pc_write_lookup(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(lookup_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
             );
             let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             entry.with_bytes_mut(|dst| {
                 dst[page_offset..page_offset + sub_len].copy_from_slice(&buf[..sub_len]);
             });
             perf::record_pc_write_copy(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(copy_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
             );
             let became_full = entry.mark_valid_and_check_full(page_offset, sub_len);
             let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
@@ -1796,8 +1857,7 @@ impl PageCache {
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
             }
             perf::record_pc_write_commit(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(commit_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(commit_start),
             );
             if became_full && !full_page_overwrite {
                 perf::record_pc_write_eventually_full();
@@ -1841,15 +1901,32 @@ impl PageCache {
             if full_page_overwrite {
                 any_full_overwrite = true;
             }
-            let entry =
-                self.get_page_for_write_populate(page_index, old_file_size, full_page_overwrite)?;
-            let was_dirty = match entry.try_lock_for_write() {
-                Ok(was_dirty) => was_dirty,
+            let entry = match self.get_page_for_write_populate(
+                page_index,
+                old_file_size,
+                full_page_overwrite,
+            ) {
+                Ok(entry) => entry,
                 Err(error) => {
                     for item in &copies {
                         item.entry.abort_write();
                     }
-                    return Err(error);
+                    return Err(WriteAttemptError::Error(error));
+                }
+            };
+            let was_dirty = match entry.try_lock_for_write() {
+                Ok(Some(was_dirty)) => was_dirty,
+                Ok(None) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(WriteAttemptError::Busy(entry));
+                }
+                Err(error) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(WriteAttemptError::Error(error));
                 }
             };
             copies.push(CopyItem {
@@ -1883,8 +1960,7 @@ impl PageCache {
                 GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
             }
             commit_cycles = commit_cycles.wrapping_add(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(commit_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(commit_start),
             );
             if became_full && !item.full_page_overwrite {
                 perf::record_pc_write_eventually_full();
@@ -1937,28 +2013,25 @@ impl PageCache {
             let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let entry = self.get_page_for_read(start_page)?;
             perf::record_pc_read_lookup_cycles(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(lookup_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
             );
             let valid_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             self.ensure_fully_valid(start_page)?;
             perf::record_pc_read_valid_fill_cycles(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(valid_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(valid_start),
             );
             drop(_op);
             let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            let copied = entry.with_bytes(|src| {
-                user.write_from_at_nofault(0, &src[page_offset..page_offset + sub_len])
-            })
-            .map_err(|_| SyscallErr::EFAULT)?;
+            let copied = entry
+                .with_bytes(|src| {
+                    user.write_from_at_nofault(0, &src[page_offset..page_offset + sub_len])
+                })
+                .map_err(|_| SyscallErr::EFAULT)?;
             perf::record_pread_uaccess(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(uaccess_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(uaccess_start),
             );
             perf::record_pc_read_copy_cycles(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(uaccess_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(uaccess_start),
             );
             return (copied == sub_len)
                 .then_some({
@@ -1974,8 +2047,7 @@ impl PageCache {
             let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
             let plan = self.lookup_read_range_fast(offset, count, start_page, end_page);
             perf::record_pc_read_lookup_cycles(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(lookup_start),
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
             );
             if plan.miss_runs.is_empty() && plan.needs_valid_fill.is_empty() {
                 drop(op);
@@ -1984,12 +2056,14 @@ impl PageCache {
                 let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 for item in &plan.copies {
                     let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-                    let copied = item.entry.with_bytes(|src| {
-                        cursor.try_write_from_nofault(
-                            &src[item.page_offset..item.page_offset + item.len],
-                        )
-                    })
-                    .map_err(|_| SyscallErr::EFAULT)?;
+                    let copied = item
+                        .entry
+                        .with_bytes(|src| {
+                            cursor.try_write_from_nofault(
+                                &src[item.page_offset..item.page_offset + item.len],
+                            )
+                        })
+                        .map_err(|_| SyscallErr::EFAULT)?;
                     if copied != item.len {
                         return Err(SyscallErr::EFAULT);
                     }
@@ -2000,8 +2074,7 @@ impl PageCache {
                     copied_total += copied;
                 }
                 perf::record_pc_read_copy_cycles(
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                        .wrapping_sub(copy_start),
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
                 );
                 perf::record_pc_read_user(end_page - start_page + 1);
                 return Ok(copied_total);
@@ -2030,12 +2103,13 @@ impl PageCache {
                             .wrapping_sub(valid_start),
                     );
                     let uaccess_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-                    let copied = entry.with_bytes(|src| {
-                        cursor.try_write_from_nofault(
-                            &src[read_start - page_start..read_end - page_start],
-                        )
-                    })
-                    .map_err(|_| SyscallErr::EFAULT)?;
+                    let copied = entry
+                        .with_bytes(|src| {
+                            cursor.try_write_from_nofault(
+                                &src[read_start - page_start..read_end - page_start],
+                            )
+                        })
+                        .map_err(|_| SyscallErr::EFAULT)?;
                     let expected = read_end - read_start;
                     if copied != expected {
                         return Err(SyscallErr::EFAULT);
@@ -2047,8 +2121,7 @@ impl PageCache {
                     copied_total += copied;
                 }
                 perf::record_pc_read_copy_cycles(
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                        .wrapping_sub(copy_start),
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
                 );
                 perf::record_pc_read_user(end_page - start_page + 1);
                 return Ok(copied_total);
@@ -2069,8 +2142,7 @@ impl PageCache {
                 let miss_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
                 self.fill_miss_runs(&plan.miss_runs)?;
                 perf::record_pc_read_miss_fill_cycles(
-                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                        .wrapping_sub(miss_start),
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(miss_start),
                 );
             }
             retried = true;
@@ -2097,12 +2169,54 @@ impl PageCache {
         if len == 0 {
             return Ok(0);
         }
-        let count = len;
-        let _op = self.op_gate.read();
+
+        loop {
+            let op = self.op_gate.read();
+            match self.write_at_user_body(offset, len, user, old_size) {
+                Ok(written) => {
+                    drop(op);
+                    if written != 0 {
+                        self.notify_state_progress();
+                    }
+                    balance_dirty_pages();
+                    return Ok(written);
+                }
+                Err(WriteAttemptError::Busy(entry)) => {
+                    drop(op);
+                    self.notify_state_progress();
+                    self.wait_for_write_lease(&entry)?;
+                }
+                Err(WriteAttemptError::Error(error)) => {
+                    drop(op);
+                    self.notify_state_progress();
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// One direct-user write attempt while `op_gate.read()` is held. All page
+    /// leases are acquired before the first user byte is copied, so lease
+    /// contention can sleep and retry without publishing a partial prefix.
+    fn write_at_user_body(
+        &self,
+        offset: usize,
+        count: usize,
+        user: &crate::mm::UserBuffer,
+        old_size: usize,
+    ) -> Result<usize, WriteAttemptError> {
+        struct UserCopyItem {
+            entry: Arc<PageEntry>,
+            page_offset: usize,
+            user_offset: usize,
+            len: usize,
+            was_dirty: bool,
+        }
+
         let end = offset.checked_add(count).ok_or(SyscallErr::EFBIG)?;
         let start_page = offset >> PAGE_SIZE_BITS;
         let end_page = (end - 1) >> PAGE_SIZE_BITS;
-        let mut total_written = 0usize;
+        let mut copies: Vec<UserCopyItem> = Vec::new();
 
         let lookup_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
         for page_index in start_page..=end_page {
@@ -2116,56 +2230,99 @@ impl PageCache {
 
             let page_offset = write_start - page_start;
             let full_page_overwrite = page_offset == 0 && sub_len == PAGE_SIZE;
-            let entry = self.get_page_for_write_populate(
+            let entry = match self.get_page_for_write_populate(
                 page_index,
                 Some(old_size),
                 full_page_overwrite,
-            )?;
-            let was_dirty = entry.try_lock_for_write()?;
-            let user_offset = write_start - offset;
-            let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            let copied = entry.with_bytes_mut(|dst| {
-                user.read_into_at_nofault(
-                    user_offset,
-                    &mut dst[page_offset..page_offset + sub_len],
-                )
-            });
-            let copied = match copied {
-                Ok(copied) => copied,
-                Err(_) => {
-                    entry.abort_write();
-                    return Err(SyscallErr::EFAULT);
+            ) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(WriteAttemptError::Error(error));
                 }
             };
-            perf::record_pc_write_copy(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(copy_start),
-            );
-            if copied != sub_len {
-                entry.abort_write();
-                total_written += copied;
-                return if total_written == 0 {
-                    Err(SyscallErr::EFAULT)
-                } else {
-                    Ok(total_written)
-                };
-            }
-            entry.mark_valid(page_offset, copied);
-            let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
-            if entry.commit_write() && !was_dirty {
-                GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
-            }
-            perf::record_pc_write_commit(
-                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
-                    .wrapping_sub(commit_start),
-            );
-            total_written += copied;
+            let was_dirty = match entry.try_lock_for_write() {
+                Ok(Some(was_dirty)) => was_dirty,
+                Ok(None) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(WriteAttemptError::Busy(entry));
+                }
+                Err(error) => {
+                    for item in &copies {
+                        item.entry.abort_write();
+                    }
+                    return Err(WriteAttemptError::Error(error));
+                }
+            };
+            copies.push(UserCopyItem {
+                entry,
+                page_offset,
+                user_offset: write_start - offset,
+                len: sub_len,
+                was_dirty,
+            });
         }
         perf::record_pc_write_lookup(
             perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(lookup_start),
         );
 
-        balance_dirty_pages();
+        let mut total_written = 0usize;
+        for index in 0..copies.len() {
+            let item = &copies[index];
+            let copy_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+            let copied = item.entry.with_bytes_mut(|dst| {
+                user.read_into_at_nofault(
+                    item.user_offset,
+                    &mut dst[item.page_offset..item.page_offset + item.len],
+                )
+            });
+            let copied = match copied {
+                Ok(copied) => copied,
+                Err(_) => {
+                    for pending in &copies[index..] {
+                        pending.entry.abort_write();
+                    }
+                    return if total_written == 0 {
+                        Err(WriteAttemptError::Error(SyscallErr::EFAULT))
+                    } else {
+                        Ok(total_written)
+                    };
+                }
+            };
+            perf::record_pc_write_copy(
+                perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO).wrapping_sub(copy_start),
+            );
+            if copied != 0 {
+                item.entry.mark_valid(item.page_offset, copied);
+                let commit_start = perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO);
+                if item.entry.commit_write() && !item.was_dirty {
+                    GLOBAL_DIRTY_PAGES.fetch_add(1, Ordering::Relaxed);
+                }
+                perf::record_pc_write_commit(
+                    perf::perf_time_now_for(perf::STATS_PROFILE_MEMORY_IO)
+                        .wrapping_sub(commit_start),
+                );
+                total_written += copied;
+            }
+
+            if copied != item.len {
+                if copied == 0 {
+                    item.entry.abort_write();
+                }
+                for pending in &copies[index + 1..] {
+                    pending.entry.abort_write();
+                }
+                return if total_written == 0 {
+                    Err(WriteAttemptError::Error(SyscallErr::EFAULT))
+                } else {
+                    Ok(total_written)
+                };
+            }
+        }
         Ok(total_written)
     }
 

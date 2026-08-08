@@ -1,0 +1,68 @@
+[HEAD — first 30 lines]
+make: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make ARCH=rv64 PROFILE=normal -f make/rv64.mk ktest-run MODE=release LOG= INITRAMFS_PROFILE=normal PRODUCT_ROOT="/app/build/rv64/release/normal" KERNEL_OUTPUT_ROOT="/app/build/rv64/release/normal/kernel" USER_OUTPUT_ROOT="/app/build/rv64/release/normal/user" KTEST_FIXTURE=""
+make[1]: Entering directory '/app/os'
+Rust toolchain preflight passed: nightly-2026-05-10
+make[2]: Entering directory '/app/user'
+Rust toolchain preflight passed: nightly-2026-05-10
+CARGO_TARGET_DIR="/app/build/rv64/release/normal/user" cargo build --target=riscv64gc-unknown-none-elf --release
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+  |
+  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: the feature `lang_items` is internal to the compiler or standard library
+ --> src/lib.rs:6:12
+  |
+6 | #![feature(lang_items)]
+  |            ^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: the feature `panic_info_message` has been stable since 1.81.0 and no longer requires an attribute to enable
+ --> src/lib.rs:4:12
+  |
+4 | #![feature(panic_info_message)]
+  |            ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: creating a shared reference to mutable static
+  --> src/lib.rs:85:19
+
+[TAIL — last 35 lines]
+mapping .bss section
+mapping physical memory region
+mapping memory-mapped registers
+[kernel] Boot protocol: RiscvFdt, hardware_id=0, firmware_arg=0x82200000
+[kernel] Firmware resources: ram_regions=1, reserved=2, early_mmio=9, usable=1021 MiB
+[kernel] Platform: firmware=Fdt, model=riscv-virtio,qemu, devices=32
+[kernel] Hello, world!
+[mm] RISC-V ASID allocator: 65535 user IDs
+[kernel] PRNG init warning: Entropy(DeviceUnavailable)
+[smp] minimal boot ready: configured=1 boot_hw_id=0 online_mask=0x1
+[memory] reclaimed linker frames: [0x80484000, 0x806f3000) frames=623
+[initramfs] unpacked: files=38 dirs=23 symlinks=1 bytes=2546191
+[initramfs] VFS_ROOT initialized (ramfs + cpio unpack + devfs bootstrap)
+[kernel] VirtIO net device not found, skipping network init
+[kernel] No net device, using null device (loopback only)
+[kernel] net interface initialized (loopback only, no NIC)
+[kernel] Entering kernel test mode (ktest) — tests: ["page_cache"], repeat: 1
+TAP version 13
+# arch: riscv64
+# mode: ktest
+# repeat: 1
+# timeout_ms: 5000
+# failfast: false
+1..5
+ok 1 page_cache::global_flush_releases_registry_before_writeback
+ok 2 page_cache::writeback_preserves_dirty_on_backend_eagain
+ok 3 page_cache::user_io_rejects_short_buffer_before_mutation
+ok 4 page_cache::read_backend_reentry_does_not_deadlock
+ok 5 page_cache::batch_prefetch_preserves_reentrant_dirty_winner
+# results: 5 passed, 0 skipped, 0 failed, 5 total
+# ktest: tests passed; committing filesystems before shutdown.
+[KTEST RESULT: PASS]
+# ktest: all tests and filesystem teardown passed. shutting down.
+make[1]: Leaving directory '/app/os'
+make: Leaving directory '/app/os'
