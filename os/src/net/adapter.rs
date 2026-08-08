@@ -7,6 +7,23 @@ use smoltcp::phy::{Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToke
 use smoltcp::time::Instant;
 use spin::Mutex;
 
+/// Packets produced while the local interrupt bit is off cannot synchronously
+/// wait for a VirtIO used-ring completion. Keep the device Arc with the packet
+/// so the queue is independent of any DeviceStack lock and can be drained by
+/// the scheduler-context network poll.
+static DEFERRED_TX_QUEUE: Mutex<Vec<(Arc<dyn NetDevice>, Vec<u8>)>> = Mutex::new(Vec::new());
+const DEFERRED_TX_MAX_PACKETS: usize = 64;
+
+pub(crate) fn drain_deferred_tx() {
+    if !crate::hal::irq_enabled() {
+        return;
+    }
+    let packets = core::mem::take(&mut *DEFERRED_TX_QUEUE.lock());
+    for (device, packet) in packets {
+        device.transmit(&packet);
+    }
+}
+
 /// 单设备 smoltcp 适配器。每个 DeviceStack 只拥有一个设备实例，loopback、
 /// 物理网卡和 veth 之间不再通过共享路由缓冲区转发。
 pub enum IfaceDevice {
@@ -199,7 +216,16 @@ impl TxToken for NetTxToken {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
         crate::task::perf::record_net_tx_submit(len);
-        self.inner.transmit(&buf);
+        if crate::hal::irq_enabled() {
+            self.inner.transmit(&buf);
+        } else {
+            let mut queue = DEFERRED_TX_QUEUE.lock();
+            if queue.len() >= DEFERRED_TX_MAX_PACKETS {
+                queue.remove(0);
+                crate::task::perf::record_net_tx_drop();
+            }
+            queue.push((self.inner, buf));
+        }
         result
     }
 }

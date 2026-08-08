@@ -206,6 +206,11 @@ pub fn local_irq_save() -> bool {
     was_enabled
 }
 
+/// Return whether interrupts are currently enabled on this hart.
+pub fn irq_enabled() -> bool {
+    sstatus::read().sie()
+}
+
 /// 恢复中断使能状态到调用 local_irq_save 之前的值。
 pub fn local_irq_restore(was_enabled: bool) {
     if was_enabled {

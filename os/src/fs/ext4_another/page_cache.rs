@@ -9,9 +9,23 @@ use crate::fs::page_cache::PageCacheBackend;
 use crate::task::perf;
 use crate::utils::error::SyscallErr;
 
-use super::errno::{from_another, from_another_op};
+use super::errno::from_another_op;
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
+
+/// A journal writer briefly owns the metadata mutation domain while it stages
+/// or commits a transaction.  Page-cache writeback is allowed to observe that
+/// window as `EAGAIN`; it must yield and retry instead of exporting the
+/// transient admission failure to a user write.
+const BACKEND_EAGAIN_RETRY_LIMIT: usize = 128;
+
+fn yield_backend_retry() {
+    if crate::task::current_task().is_some() {
+        crate::task::suspend_current_and_run_next();
+    } else {
+        core::hint::spin_loop();
+    }
+}
 
 /// Mango-owned regular-file data backend for one writable ext4 inode.
 pub(crate) struct AnotherExt4PageCacheBackend {
@@ -38,6 +52,72 @@ impl AnotherExt4PageCacheBackend {
 
     fn page_offset(index: usize) -> Result<usize, SyscallErr> {
         index.checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)
+    }
+
+    fn retry_eagain<T, F>(&self, mut operation: F) -> Result<T, SyscallErr>
+    where
+        F: FnMut() -> Result<T, SyscallErr>,
+    {
+        for attempt in 0..BACKEND_EAGAIN_RETRY_LIMIT {
+            match operation() {
+                Err(SyscallErr::EAGAIN) if attempt + 1 < BACKEND_EAGAIN_RETRY_LIMIT => {
+                    yield_backend_retry();
+                }
+                result => return result,
+            }
+        }
+        Err(SyscallErr::EAGAIN)
+    }
+
+    /// Prepare and commit one contiguous writeback range.  A large dirty-page
+    /// batch may exceed the journal credit/ring reservation even though each
+    /// smaller range is valid.  Split only on the reservation-specific E2BIG
+    /// error; all other errors remain visible to PageCache for retry/accounting.
+    fn write_staged_range(
+        &self,
+        inode_id: u32,
+        start_offset: usize,
+        data: &[u8],
+    ) -> Result<bool, SyscallErr> {
+        let batch_end = start_offset
+            .checked_add(data.len())
+            .ok_or(SyscallErr::EFBIG)?;
+        let prepared = self.retry_eagain(|| {
+            self.fs
+                .inner()
+                .prepare_buffered_write_with_data(
+                    inode_id,
+                    start_offset,
+                    data.len(),
+                    batch_end as u64,
+                    None,
+                    Some(data),
+                )
+                .map_err(|error| from_another_op(&error, "prepare_buffered_write"))
+        });
+
+        match prepared {
+            Ok(data_written) => {
+                if !data_written {
+                    self.retry_eagain(|| {
+                        self.fs
+                            .inner()
+                            .write_data_only(inode_id, start_offset, data)
+                            .map_err(|error| from_another_op(&error, "write_data_only"))
+                    })?;
+                }
+                Ok(data_written)
+            }
+            Err(SyscallErr::E2BIG) if data.len() > PAGE_SIZE => {
+                let page_count = data.len() / PAGE_SIZE;
+                let split_pages = (page_count / 2).max(1);
+                let split = split_pages * PAGE_SIZE;
+                let left = self.write_staged_range(inode_id, start_offset, &data[..split])?;
+                let right = self.write_staged_range(inode_id, start_offset + split, &data[split..])?;
+                Ok(left && right)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -148,36 +228,15 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             staging[copied..copied + n].copy_from_slice(&page[..n]);
             copied += n;
         }
-        // Batch-allocate blocks for the entire write range (like lwext4 delayed alloc)
-        let batch_end = start_offset
-            .checked_add(total_bytes)
-            .ok_or(SyscallErr::EFBIG)?;
         let _t0 = perf::perf_time_now();
         let result = (|| -> Result<usize, SyscallErr> {
-            let data_written = self
-                .fs
-                .inner()
-                .prepare_buffered_write_with_data(
-                    inode_id,
-                    start_offset,
-                    total_bytes,
-                    batch_end as u64,
-                    None,
-                    Some(&staging[..total_bytes]),
-                )
-                .map_err(|error| from_another_op(&error, "prepare_buffered_write"))?;
+            let _data_written = self.write_staged_range(inode_id, start_offset, &staging[..total_bytes])?;
             let _t1 = perf::perf_time_now();
             perf::record_ext4_alloc_ensure(
                 (total_bytes / crate::config::PAGE_SIZE) as usize,
                 0,
                 _t1.wrapping_sub(_t0),
             );
-            if !data_written {
-                self.fs
-                    .inner()
-                    .write_data_only(inode_id, start_offset, &staging[..total_bytes])
-                    .map_err(|error| from_another_op(&error, "write_data_only"))?;
-            }
             let _t2 = perf::perf_time_now();
 #[cfg(feature = "perf_diag")]
             crate::println!(
@@ -187,7 +246,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 total_bytes,
                 _t1.wrapping_sub(_t0),
                 _t2.wrapping_sub(_t1),
-                data_written,
+                _data_written,
             );
             Ok(total_bytes)
         })();

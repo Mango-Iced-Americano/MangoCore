@@ -24,7 +24,6 @@ use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
 const IDLE_NET_POLL_INTERVAL: usize = 64;
-const RV64_CONSOLE_POLL_INTERVAL: usize = 64;
 /// idle 起点的空值；正常的单调微秒时间不可能达到该值。
 const IDLE_TIME_INACTIVE: u64 = u64::MAX;
 
@@ -456,7 +455,7 @@ pub fn run_tasks() -> ! {
         // switch. Blocked readers are covered by the scheduler's periodic
         // console poll and the existing wait-IO fallback timer.
         #[cfg(target_arch = "riscv64")]
-        let should_poll_console = schedule_tick % RV64_CONSOLE_POLL_INTERVAL == 0;
+        let should_poll_console = true;
         #[cfg(not(target_arch = "riscv64"))]
         let should_poll_console = true;
         if should_poll_console {

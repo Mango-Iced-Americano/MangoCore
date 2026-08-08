@@ -9,7 +9,10 @@ use core::ptr::NonNull;
 use lazy_static::*;
 use spin::Mutex;
 use virtio_drivers::device::blk::VirtIOBlk;
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
+use virtio_drivers::transport::{
+    mmio::{MmioTransport, VirtIOHeader},
+    DeviceType, Transport,
+};
 use virtio_drivers::{BufferDirection, Hal};
 const VIRT_IO_BLOCK_SZ: usize = 512;
 use super::virtio_dma_pool;
@@ -141,6 +144,9 @@ impl VirtIOBlock {
         let transport = unsafe {
             MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
         };
+        if transport.device_type() != DeviceType::Block {
+            return None;
+        }
         let blk = VirtIOBlk::<VirtioHal, MmioTransport<'static>>::new(transport).ok()?;
         Some(Self(Mutex::new(blk)))
     }

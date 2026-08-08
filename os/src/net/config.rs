@@ -1,7 +1,7 @@
 use super::Mutex;
 use crate::drivers::net::veth::VethDriver;
 use crate::drivers::NET_DEVICE;
-use crate::net::adapter::{IfaceDevice, NullNetDevice, SmoltcpDeviceAdapter};
+use crate::net::adapter::{drain_deferred_tx, IfaceDevice, NullNetDevice, SmoltcpDeviceAdapter};
 use crate::net::iface::Iface;
 use crate::net::net_core::{self, NetDeviceEntry};
 use crate::net::routing::{InetProtocol, RouteSocketHandle};
@@ -942,6 +942,9 @@ impl<'a> NetInterface<'a> {
     /// 一轮 worker poll：每个 stack 只试拿一次锁；每次通知均由 `try_poll_stack()`
     /// 在释放 DeviceStack 后完成，严格保持 N2 -> N3 不反向嵌套。
     fn poll_each_stack_bounded(&self) {
+        // A syscall/trap poll may have queued TX while local IRQs were off.
+        // Only the scheduler worker (IRQ-enabled) is allowed to drain it.
+        drain_deferred_tx();
         self.drain_pending_socket_removals();
         for stack in self.snapshot_stack_arcs() {
             if stack.state.load(Ordering::Acquire) == STACK_ACTIVE {

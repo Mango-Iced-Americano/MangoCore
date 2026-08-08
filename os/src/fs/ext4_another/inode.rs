@@ -17,6 +17,16 @@ use crate::utils::error::SyscallErr;
 use super::errno::from_another;
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
+
+const METADATA_EAGAIN_RETRY_LIMIT: usize = 128;
+
+fn yield_metadata_retry() {
+    if crate::task::current_task().is_some() {
+        crate::task::suspend_current_and_run_next();
+    } else {
+        core::hint::spin_loop();
+    }
+}
 use super::page_cache::AnotherExt4PageCacheBackend;
 
 /// Writable VFS inode identified by its stable ext4 inode number.
@@ -353,26 +363,37 @@ impl IndexNode for Ext4Inode {
         let permissions = another_ext4::InodeMode::from_bits_retain(
             (metadata.mode & InodeMode::S_IALLUGO).bits() as u16,
         );
-        let attributes = another_ext4::SetAttr {
-            mode: Some(another_ext4::InodeMode::from_type_and_perm(
-                attr.ftype,
-                permissions,
-            )),
-            uid: Some(metadata.uid),
-            gid: Some(metadata.gid),
-            size: None,
-            atime: Some(u32::try_from(metadata.atime.tv_sec).map_err(|_| SyscallErr::EFBIG)?),
-            mtime: Some(u32::try_from(metadata.mtime.tv_sec).map_err(|_| SyscallErr::EFBIG)?),
-            ctime: Some(u32::try_from(metadata.ctime.tv_sec).map_err(|_| SyscallErr::EFBIG)?),
-            crtime: None,
-        };
+        let mode = another_ext4::InodeMode::from_type_and_perm(attr.ftype, permissions);
+        let atime = u32::try_from(metadata.atime.tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        let mtime = u32::try_from(metadata.mtime.tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        let ctime = u32::try_from(metadata.ctime.tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
         self.lifetime.set_inode_flags(metadata.flags);
-        fs.inner()
-            .setattr(
-                u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
-                attributes,
-            )
-            .map_err(|error| from_another(error.code()))
+        for attempt in 0..METADATA_EAGAIN_RETRY_LIMIT {
+            let result = fs.inner().setattr(
+                inode_id,
+                another_ext4::SetAttr {
+                    mode: Some(mode),
+                    uid: Some(metadata.uid),
+                    gid: Some(metadata.gid),
+                    size: None,
+                    atime: Some(atime),
+                    mtime: Some(mtime),
+                    ctime: Some(ctime),
+                    crtime: None,
+                },
+            );
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code() == another_ext4::ErrCode::EAGAIN
+                    && attempt + 1 < METADATA_EAGAIN_RETRY_LIMIT =>
+                {
+                    yield_metadata_retry();
+                }
+                Err(error) => return Err(from_another(error.code())),
+            }
+        }
+        Err(SyscallErr::EAGAIN)
     }
 
     fn touch_modified(&self) {
