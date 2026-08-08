@@ -29,18 +29,17 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     } else if let Some(wq) = file.inode.write_wait_queue() {
         match WaitQueue::wait_until_interruptible(wq, || {
             let ret = write_from_user(&file, token, buf, count);
-            if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }
+            if ret == -(SyscallErr::EAGAIN as isize) {
+                None
+            } else {
+                Some(ret)
+            }
         }) {
             WaitResult::Ready(n) => n,
             WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {
-        // Regular-file writes can transiently observe another_ext4's
-        // metadata transaction gate as EAGAIN.  There is no inode wait queue
-        // for this backend, so keep the blocking write semantics here rather
-        // than leaking the transient contention to userspace (Cargo treats
-        // it as a permanent failed write).
-        wait_io_core(|| write_from_user(&file, token, buf, count), false)
+        write_from_user(&file, token, buf, count)
     }
 }

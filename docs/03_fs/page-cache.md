@@ -50,7 +50,8 @@ unmap。强引用覆盖整个重验窗口，避免 allocator 地址复用造成 
 
 ## PageState 状态机
 
-每个缓存页面由 `PageEntry` 管理，其 `state` 字段为 `AtomicU8`，取值如下：
+每个缓存页面由 `PageEntry` 管理。状态编码在 `flags: AtomicU32` 中，
+`PG_UPTODATE`、`PG_DIRTY`、`PG_WRITEBACK`、`PG_ERROR` 等位由 CAS 更新：
 
 ```text
 Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpToDate
@@ -176,8 +177,8 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 
 | 常量 | 值 | 含义 | 动作 |
 |------|-----|------|------|
-| DIRTY_BACKGROUND | 2048 | 后台启动线（约 8MB） | 触发 `maybe_background_writeback` |
-| DIRTY_THROTTLE | 4096 | 写入者节流线（约 16MB） | 写入者同步帮助写回 |
+| DIRTY_BACKGROUND | 8192 | 后台启动线（约 32MB） | 触发 `maybe_background_writeback` |
+| DIRTY_THROTTLE | 16384 | 写入者节流线（约 64MB） | 写入者同步帮助写回 |
 
 ### 写回层级
 
@@ -188,6 +189,18 @@ static GLOBAL_WRITEBACK_PAGES: AtomicUsize; // 正在写回的页数
 5. **写入者节流** `balance_dirty_pages`: 超过 DIRTY_THROTTLE 时，写入者主动写回一批脏页
 
 写回失败的处理：页面恢复为 Dirty 状态，全局计数回退，等待下次写回重试。
+
+### 瞬时状态等待
+
+同一 `PageCache` 共享一个状态进度 generation 和 `WaitQueue`。遇到
+`Loading` 或 `Writeback` 页面时，调用者先记录 generation，释放 `op_gate`，再等待
+状态转换事件；发布加载、写回成功或写回失败结果时递增 generation 并唤醒等待者。
+“先观察、后入队”由 generation 条件重验封闭，避免丢失唤醒，也避免持有 PageCache
+操作门时睡眠。
+
+文件系统后端自己的事务 admission 竞争由后端适配层等待其真实进度事件。syscall 和
+PageCache 不对后端 `EAGAIN` 做固定次数轮询，防止跨层重试放大 CPU 消耗并掩盖错误
+归属。
 
 ## 回收机制
 

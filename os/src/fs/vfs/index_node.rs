@@ -296,7 +296,27 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         if meta.mode.contains(InodeMode::S_ISGID) && attrs.uid != 0 && attrs.uid != attrs.gid {
             meta.mode.remove(InodeMode::S_ISGID);
         }
-        inode.set_metadata(&meta).ok();
+        inode.set_metadata(&meta)?;
+        Ok(inode)
+    }
+
+    /// Create a special inode with device data and initialize ownership as
+    /// one logical VFS operation. Filesystems with transactional namespace
+    /// creation should override this method to avoid publishing a partially
+    /// initialized inode.
+    fn create_with_data_and_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: CreateAttrs,
+        data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let inode = self.create_with_data(name, file_type, attrs.mode, data)?;
+        let mut meta = inode.metadata()?;
+        meta.uid = attrs.uid;
+        meta.gid = attrs.gid;
+        meta.mode = InodeMode::from(file_type) | (attrs.mode & InodeMode::S_IALLUGO);
+        inode.set_metadata(&meta)?;
         Ok(inode)
     }
 
@@ -311,6 +331,21 @@ pub trait IndexNode: Any + Send + Sync + Debug {
             bytes,
             spin::Mutex::new(FilePrivateData::Unused).lock(),
         )?;
+        Ok(inode)
+    }
+
+    /// Create a symlink with its final owner in the namespace transaction.
+    fn symlink_with_attrs(
+        &self,
+        name: &str,
+        target: &str,
+        attrs: CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let inode = self.symlink(name, target)?;
+        let mut meta = inode.metadata()?;
+        meta.uid = attrs.uid;
+        meta.gid = attrs.gid;
+        inode.set_metadata(&meta)?;
         Ok(inode)
     }
 

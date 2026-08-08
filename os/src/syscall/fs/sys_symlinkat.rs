@@ -76,21 +76,6 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
         return errno;
     }
 
-    let mut created = None;
-    let ret = wait_io_core(
-        || match parent_dir.symlink(&leaf, &target_str) {
-            Ok(child) => {
-                created = Some(child);
-                SUCCESS
-            }
-            Err(e) => -(e as isize),
-        },
-        false,
-    );
-    if ret < 0 {
-        return ret;
-    }
-    let child = created.expect("symlinkat succeeded without returning an inode");
     // Inherit GID if parent has S_ISGID (like mkdirat)
     let child_gid = if let Ok(parent_meta) = parent_dir.metadata() {
         if parent_meta.mode.contains(vfs::InodeMode::S_ISGID) {
@@ -101,10 +86,16 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: usize, linkpath: *const u8) ->
     } else {
         fsgid
     };
-    if let Ok(mut child_meta) = child.metadata() {
-        child_meta.uid = uid;
-        child_meta.gid = child_gid;
-        let _ = child.set_metadata(&child_meta);
+    match parent_dir.symlink_with_attrs(
+        &leaf,
+        &target_str,
+        vfs::CreateAttrs {
+            mode: vfs::InodeMode::S_IRWXUGO,
+            uid,
+            gid: child_gid,
+        },
+    ) {
+        Ok(_) => SUCCESS,
+        Err(error) => -(error as isize),
     }
-    SUCCESS
 }

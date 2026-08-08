@@ -145,13 +145,8 @@ pub fn sys_linkat(
         return EPERM;
     }
 
-    // Hard-link creation is another namespace metadata mutation and can
-    // observe the same transient another_ext4 transaction contention.
-    wait_io_core(
-        || match parent_dir.link(&leaf, &existing) {
-            Ok(_) => SUCCESS,
-            Err(e) => -(e as isize),
-        },
-        false,
-    )
+    match parent_dir.link(&leaf, &existing) {
+        Ok(_) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }

@@ -13,20 +13,6 @@ use super::errno::from_another_op;
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
 
-/// A journal writer briefly owns the metadata mutation domain while it stages
-/// or commits a transaction.  Page-cache writeback is allowed to observe that
-/// window as `EAGAIN`; it must yield and retry instead of exporting the
-/// transient admission failure to a user write.
-const BACKEND_EAGAIN_RETRY_LIMIT: usize = 128;
-
-fn yield_backend_retry() {
-    if crate::task::current_task().is_some() {
-        crate::task::suspend_current_and_run_next();
-    } else {
-        core::hint::spin_loop();
-    }
-}
-
 /// Mango-owned regular-file data backend for one writable ext4 inode.
 pub(crate) struct AnotherExt4PageCacheBackend {
     fs: Arc<Ext4FileSystem>,
@@ -54,21 +40,6 @@ impl AnotherExt4PageCacheBackend {
         index.checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)
     }
 
-    fn retry_eagain<T, F>(&self, mut operation: F) -> Result<T, SyscallErr>
-    where
-        F: FnMut() -> Result<T, SyscallErr>,
-    {
-        for attempt in 0..BACKEND_EAGAIN_RETRY_LIMIT {
-            match operation() {
-                Err(SyscallErr::EAGAIN) if attempt + 1 < BACKEND_EAGAIN_RETRY_LIMIT => {
-                    yield_backend_retry();
-                }
-                result => return result,
-            }
-        }
-        Err(SyscallErr::EAGAIN)
-    }
-
     /// Prepare and commit one contiguous writeback range.  A large dirty-page
     /// batch may exceed the journal credit/ring reservation even though each
     /// smaller range is valid.  Split only on the reservation-specific E2BIG
@@ -82,28 +53,24 @@ impl AnotherExt4PageCacheBackend {
         let batch_end = start_offset
             .checked_add(data.len())
             .ok_or(SyscallErr::EFBIG)?;
-        let prepared = self.retry_eagain(|| {
-            self.fs
-                .inner()
-                .prepare_buffered_write_with_data(
-                    inode_id,
-                    start_offset,
-                    data.len(),
-                    batch_end as u64,
-                    None,
-                    Some(data),
-                )
-                .map_err(|error| from_another_op(&error, "prepare_buffered_write"))
+        let prepared = self.fs.run_metadata_operation(|| {
+            self.fs.inner().prepare_buffered_write_with_data(
+                inode_id,
+                start_offset,
+                data.len(),
+                batch_end as u64,
+                None,
+                Some(data),
+            )
         });
 
         match prepared {
             Ok(data_written) => {
                 if !data_written {
-                    self.retry_eagain(|| {
+                    self.fs.run_metadata_operation(|| {
                         self.fs
                             .inner()
                             .write_data_only(inode_id, start_offset, data)
-                            .map_err(|error| from_another_op(&error, "write_data_only"))
                     })?;
                 }
                 Ok(data_written)
@@ -152,11 +119,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         Ok(PAGE_SIZE)
     }
 
-    fn read_pages(
-        &self,
-        start_index: usize,
-        pages: &mut [&mut [u8]],
-    ) -> Result<usize, SyscallErr> {
+    fn read_pages(&self, start_index: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
         if pages.is_empty() {
             return Ok(0);
         }

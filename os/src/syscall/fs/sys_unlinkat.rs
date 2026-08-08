@@ -65,23 +65,13 @@ pub fn sys_unlinkat(dirfd: usize, path: *const u8, flags: u32) -> isize {
             }
         }
     }
-    // another_ext4 may transiently return EAGAIN while its metadata
-    // transaction gate is held by a concurrent writeback/commit.  unlinkat
-    // is a blocking namespace mutation, so retry the mutation outside the
-    // VFS lookup/access-check locks instead of exposing that transient state
-    // to Cargo/rustc as a permanent remove failure.
-    wait_io_core(
-        || {
-            let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
-                parent.rmdir(&leaf)
-            } else {
-                parent.unlink(&leaf)
-            };
-            match result {
-                Ok(()) => SUCCESS,
-                Err(e) => -(e as isize),
-            }
-        },
-        false,
-    )
+    let result = if flags.contains(UnlinkatFlags::AT_REMOVEDIR) {
+        parent.rmdir(&leaf)
+    } else {
+        parent.unlink(&leaf)
+    };
+    match result {
+        Ok(()) => SUCCESS,
+        Err(e) => -(e as isize),
+    }
 }

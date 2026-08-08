@@ -124,12 +124,7 @@ impl InodeLifetime {
     pub(crate) fn finish_timestamp_commit(&self, snapshot: CachedTimestamps) {
         if self
             .timestamp_generation
-            .compare_exchange(
-                snapshot.generation,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-        )
+            .compare_exchange(snapshot.generation, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             // Recheck after the CAS. A writer may have raced with the commit;
@@ -293,11 +288,7 @@ impl Ext4FileSystem {
             .lifetimes
             .lock()
             .entry(key)
-            .or_insert_with(|| Arc::new(InodeLifetime::new(
-                0,
-                TimeSpec::new(),
-                TimeSpec::new(),
-            )))
+            .or_insert_with(|| Arc::new(InodeLifetime::new(0, TimeSpec::new(), TimeSpec::new())))
             .clone();
         *lifetime.reclaim.lock() = Some(handle);
         Ok(())
@@ -326,12 +317,14 @@ impl Ext4FileSystem {
                         let id = u32::try_from(key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
                         if generation != 0 {
                             let size = lifetime.logical_size.load(Ordering::Acquire);
-                            self.inner()
-                                .commit_inode_size(id, size as u64, None)
-                                .map_err(|error| from_another(error.code()))?;
+                            self.run_metadata_operation(|| {
+                                self.inner().commit_inode_size(id, size as u64, None)
+                            })?;
                         }
                         if timestamps.is_some() {
-                            if let Some(committed) = self.commit_lifetime_timestamps(id, lifetime)? {
+                            if let Some(committed) =
+                                self.commit_lifetime_timestamps(id, lifetime)?
+                            {
                                 committed_timestamps.push((lifetime.clone(), committed));
                             }
                         }
@@ -342,9 +335,7 @@ impl Ext4FileSystem {
                     };
                     if let Some(cache) = cache {
                         cache.writeback_all_before_io_gate()?;
-                        cache.with_io_gate(|| {
-                            commit_size()
-                        })?;
+                        cache.with_io_gate(|| commit_size())?;
                     } else {
                         commit_size()?;
                     }
@@ -360,12 +351,11 @@ impl Ext4FileSystem {
         );
         if flush_succeeded {
             for (lifetime, generation) in committed_generations {
-                if lifetime.size_generation.compare_exchange(
-                    generation,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ).is_ok() {
+                if lifetime
+                    .size_generation
+                    .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     lifetime.release_dirty_page_cache();
                 }
             }
@@ -425,11 +415,9 @@ impl Ext4FileSystem {
                 }
                 continue;
             }
-            match self.inner().reclaim_inode(handle) {
+            match self.reclaim_inode(handle) {
                 Ok(()) => reclaimed.push(key),
-                Err(reclaim_failure) => {
-                    let (error, handle) = reclaim_failure.into_parts();
-                    let error = from_another(error.code());
+                Err((error, handle)) => {
                     lifetime.restore_reclaim(handle, error);
                     failure = Some(error);
                 }

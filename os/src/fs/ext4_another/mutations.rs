@@ -28,11 +28,7 @@ macro_rules! writable_data_inode_mutations {
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
             let cache = self.regular_page_cache(&fs)?;
-            let written = cache.write_kernel(
-                offset,
-                &buffer[..actual],
-                old_size,
-            )?;
+            let written = cache.write_kernel(offset, &buffer[..actual], old_size)?;
             self.lifetime
                 .logical_size
                 .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
@@ -121,25 +117,19 @@ macro_rules! writable_data_inode_mutations {
                 cache.with_io_gate(|| {
                     if len < old_size {
                         cache.truncate_with_io_gate_held_and_backend(len, || {
-                            fs.inner()
-                                .truncate_inode(inode_id, len as u64)
-                                .map_err(|error| {
-                                    super::errno::from_another_op(&error, "truncate_inode(shrink)")
-                                })
+                            fs.run_metadata_operation(|| {
+                                fs.inner().truncate_inode(inode_id, len as u64)
+                            })
                         })?;
                     } else {
-                        fs.inner()
-                            .truncate_inode(inode_id, len as u64)
-                            .map_err(|error| {
-                                super::errno::from_another_op(&error, "truncate_inode(extend)")
-                            })?;
+                        fs.run_metadata_operation(|| {
+                            fs.inner().truncate_inode(inode_id, len as u64)
+                        })?;
                     }
                     Ok::<(), crate::utils::error::SyscallErr>(())
                 })?;
             } else {
-                fs.inner()
-                    .truncate_inode(inode_id, len as u64)
-                    .map_err(|error| super::errno::from_another(error.code()))?;
+                fs.run_metadata_operation(|| fs.inner().truncate_inode(inode_id, len as u64))?;
             }
             self.lifetime
                 .logical_size
@@ -165,9 +155,9 @@ macro_rules! writable_data_inode_mutations {
                         .lifetime
                         .logical_size
                         .load(core::sync::atomic::Ordering::Acquire);
-                    fs.inner()
-                        .commit_inode_size(id, size as u64, None)
-                        .map_err(|error| super::errno::from_another(error.code()))?;
+                    fs.run_metadata_operation(|| {
+                        fs.inner().commit_inode_size(id, size as u64, None)
+                    })?;
                     let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
                     fs.flush_device()?;
                     if self
@@ -199,16 +189,18 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            fs.inner()
-                .commit_inode_size(id, size as u64, None)
-                .map_err(|error| super::errno::from_another(error.code()))?;
+            fs.run_metadata_operation(|| fs.inner().commit_inode_size(id, size as u64, None))?;
             let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
-            let generation_committed = self.lifetime.size_generation.compare_exchange(
-                generation,
-                0,
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-            ).is_ok();
+            let generation_committed = self
+                .lifetime
+                .size_generation
+                .compare_exchange(
+                    generation,
+                    0,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok();
             fs.flush_device()?;
             if generation_committed {
                 self.lifetime.release_dirty_page_cache();

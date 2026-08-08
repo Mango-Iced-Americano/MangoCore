@@ -64,32 +64,16 @@ pub fn sys_mkdirat(dirfd: usize, path: *const u8, mode: u32) -> isize {
         dir_mode.insert(vfs::InodeMode::S_ISGID);
     }
 
-    // Create with attrs.  another_ext4 can report metadata transaction
-    // contention as EAGAIN; mkdir is a blocking namespace mutation, so wait
-    // and retry without holding any VFS lookup lock.
-    let mut created = None;
-    let ret = wait_io_core(
-        || match parent.mkdir(&leaf, dir_mode) {
-            Ok(inode) => {
-                created = Some(inode);
-                SUCCESS
-            }
-            Err(e) => -(e as isize),
+    match parent.create_with_attrs(
+        &leaf,
+        FileType::Dir,
+        vfs::CreateAttrs {
+            mode: dir_mode,
+            uid,
+            gid: child_gid,
         },
-        false,
-    );
-    if ret < 0 {
-        return ret;
+    ) {
+        Ok(_) => SUCCESS,
+        Err(e) => return -(e as isize),
     }
-    let inode = created.expect("mkdir succeeded without returning an inode");
-    // Set uid/gid after creation
-    if let Ok(mut child_meta) = inode.metadata() {
-        child_meta.uid = uid;
-        child_meta.gid = child_gid;
-        if let Err(e) = inode.set_metadata(&child_meta) {
-            log::error!("[sys_mkdirat] set_metadata failed for '{}': {:?}", path, e);
-            // Don't fail the mkdir — the dir was created, just uid/gid might be wrong
-        }
-    }
-    SUCCESS
 }

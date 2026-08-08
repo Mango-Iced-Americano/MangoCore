@@ -42,7 +42,7 @@ tags: [syscall, table, reference]
 | 221, 281 | `execve`, `execveat` | `syscall/process/exec.rs` |
 | 260 | `wait4` | `syscall/process/lifecycle.rs` |
 | 268 | `setns` | `syscall/process/clone.rs` |
-| 293 | `rseq` | `syscall/process/rseq.rs` |
+| 293 | `rseq` | `syscall/process/rseq.rs`（SMP 调度迁移、信号中止和用户区更新尚未形成完整协议，当前 fail-closed 返回 `ENOSYS`，使 libc 回退到兼容路径） |
 | 99-100 | `set_robust_list`, `get_robust_list` | `syscall/process/lifecycle.rs` |
 
 ## Futex、信号、pidfd 与 ptrace

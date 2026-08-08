@@ -1517,6 +1517,17 @@ impl WaitQueue {
         Self::wait_event_impl(wq, &mut cond, true, None, None)
     }
 
+    /// 不可中断等待，不启用 fallback timer。
+    ///
+    /// 用于内核内部具有精确生产者通知的状态转换；调用方必须保证每次
+    /// 可能满足 `cond` 的转换都会唤醒该队列。
+    pub fn wait_event<F>(wq: &Mutex<Self>, mut cond: F) -> WaitResult
+    where
+        F: FnMut() -> Option<isize>,
+    {
+        Self::wait_event_impl(wq, &mut cond, false, None, None)
+    }
+
     /// 不可中断等待直到条件满足或绝对 deadline 到达。
     pub fn wait_event_timeout<F>(wq: &Mutex<Self>, mut cond: F, deadline: TimeSpec) -> WaitResult
     where

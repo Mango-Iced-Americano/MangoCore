@@ -1276,6 +1276,49 @@ impl IndexNode for MountFSInode {
         Ok(wrapper)
     }
 
+    fn create_with_data_and_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: super::index_node::CreateAttrs,
+        data: usize,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let self_arc = self.self_arc();
+        let top = MountFSInode::overlaid_inode(self_arc.clone());
+        if !Arc::ptr_eq(&top, &self_arc) {
+            return top.create_with_data_and_attrs(name, file_type, attrs, data);
+        }
+
+        self.ensure_mount_writable()?;
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
+        let inner_inode = self
+            .inner_inode
+            .create_with_data_and_attrs(name, file_type, attrs, data)?;
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
+        counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self
+                    .mount_fs
+                    .dentry_cache
+                    .lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
+    }
+
     fn create_with_attrs(
         &self,
         name: &str,
@@ -1317,6 +1360,46 @@ impl IndexNode for MountFSInode {
             .fetch_add(1, core::sync::atomic::Ordering::Release);
         let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
         let inner_inode = self.inner_inode.symlink(name, target)?;
+        let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
+        if let Some(parent_ino) = parent_ino {
+            wrapper.remember_path_hint(parent_ino, name);
+        }
+        counters::MFSI_FROM_CREATE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if !self.mount_fs.no_dentry_cache.load(Ordering::Relaxed) {
+            if let Ok(parent_md) = self.inner_inode.metadata() {
+                let key = super::dentry_cache::DentryKey {
+                    parent_ino: parent_md.inode_id,
+                    name: String::from(name),
+                };
+                let (_, evicted) = self
+                    .mount_fs
+                    .dentry_cache
+                    .lock()
+                    .insert_or_get(key, wrapper.clone());
+                drop(evicted);
+            }
+        }
+        Ok(wrapper)
+    }
+
+    fn symlink_with_attrs(
+        &self,
+        name: &str,
+        target: &str,
+        attrs: super::index_node::CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        let self_arc = self.self_arc();
+        let top = MountFSInode::overlaid_inode(self_arc.clone());
+        if !Arc::ptr_eq(&top, &self_arc) {
+            return top.symlink_with_attrs(name, target, attrs);
+        }
+
+        self.ensure_mount_writable()?;
+        self.mount_fs
+            .dentry_gen
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
+        let parent_ino = self.inner_inode.metadata().ok().map(|m| m.inode_id);
+        let inner_inode = self.inner_inode.symlink_with_attrs(name, target, attrs)?;
         let wrapper = MountFSInode::new(inner_inode, self.mount_fs.clone());
         if let Some(parent_ino) = parent_ino {
             wrapper.remember_path_hint(parent_ino, name);

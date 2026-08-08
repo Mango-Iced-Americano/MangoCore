@@ -8,6 +8,7 @@ use spin::Mutex;
 
 use crate::drivers::block::BlockDevice;
 use crate::fs::vfs::{FileSystem, FsInfo, IndexNode, SuperBlock};
+use crate::task::{WaitQueue, WaitResult};
 use crate::utils::error::SyscallErr;
 
 use super::blockdev::MangoBlockDevice;
@@ -20,11 +21,53 @@ static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
 /// Live writable another_ext4 instances for global `sync(2)`.
 pub(crate) static EXT4_REGISTRY: Mutex<Vec<Weak<Ext4FileSystem>>> = Mutex::new(Vec::new());
 
+struct MetadataMutationWait {
+    generation: AtomicUsize,
+    waiters: Mutex<WaitQueue>,
+}
+
+impl MetadataMutationWait {
+    fn new() -> Self {
+        Self {
+            generation: AtomicUsize::new(0),
+            waiters: Mutex::new(WaitQueue::new()),
+        }
+    }
+
+    fn generation(&self) -> usize {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn wait_for_progress(&self, observed: usize) -> Result<(), SyscallErr> {
+        if crate::task::current_task().is_none() {
+            while self.generation() == observed {
+                core::hint::spin_loop();
+            }
+            return Ok(());
+        }
+        match WaitQueue::wait_event_interruptible(&self.waiters, || {
+            (self.generation() != observed).then_some(0)
+        }) {
+            WaitResult::Ready(_) => Ok(()),
+            WaitResult::Interrupted => Err(SyscallErr::ERESTART),
+            WaitResult::TimedOut => unreachable!("metadata wait has no deadline"),
+        }
+    }
+}
+
+impl another_ext4::MetadataMutationNotifier for MetadataMutationWait {
+    fn notify(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        self.waiters.lock().wake_all();
+    }
+}
+
 /// One writable another_ext4 filesystem instance.
 pub struct Ext4FileSystem {
     ext4: Arc<another_ext4::Ext4>,
     fs_id: usize,
     read_only: bool,
+    mutation_wait: Arc<MetadataMutationWait>,
     root: Mutex<Option<Arc<Ext4Inode>>>,
     /// Per-filesystem records keyed by `(filesystem, inode, generation)`.
     pub(crate) lifetimes: Mutex<alloc::collections::BTreeMap<InodeKey, Arc<InodeLifetime>>>,
@@ -64,10 +107,14 @@ impl Ext4FileSystem {
             another_ext4::Ext4::load_writable(device)
         }
         .map_err(|error| from_another(error.code()))?;
+        let ext4 = Arc::new(ext4);
+        let mutation_wait = Arc::new(MetadataMutationWait::new());
+        ext4.set_metadata_mutation_notifier(mutation_wait.clone());
         let fs = Arc::new(Self {
-            ext4: Arc::new(ext4),
+            ext4,
             fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
             read_only,
+            mutation_wait,
             root: Mutex::new(None),
             lifetimes: Mutex::new(alloc::collections::BTreeMap::new()),
         });
@@ -85,6 +132,52 @@ impl Ext4FileSystem {
 
     pub(crate) const fn fs_id(&self) -> usize {
         self.fs_id
+    }
+
+    /// Run an operation whose `EAGAIN` means transient metadata-gate
+    /// contention. The gate itself publishes progress after releasing its
+    /// I/O-spanning guard, so retries sleep instead of polling or nesting
+    /// scheduler-yield loops across the syscall/PageCache/backend layers.
+    pub(crate) fn run_metadata_operation<T>(
+        &self,
+        mut operation: impl FnMut() -> Result<T, another_ext4::Ext4Error>,
+    ) -> Result<T, SyscallErr> {
+        loop {
+            let generation = self.mutation_wait.generation();
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if error.code() == another_ext4::ErrCode::EAGAIN => {
+                    self.mutation_wait.wait_for_progress(generation)?;
+                }
+                Err(error) => return Err(from_another(error.code())),
+            }
+        }
+    }
+
+    /// Reclaim is also serialized by the metadata gate, but its one-shot
+    /// capability is returned on failure. Preserve that capability across a
+    /// transient admission wait so the caller cannot accidentally lose or
+    /// manufacture an inode lifetime.
+    pub(crate) fn reclaim_inode(
+        &self,
+        mut handle: another_ext4::InodeReclaimHandle,
+    ) -> Result<(), (SyscallErr, another_ext4::InodeReclaimHandle)> {
+        loop {
+            let generation = self.mutation_wait.generation();
+            match self.inner().reclaim_inode(handle) {
+                Ok(()) => return Ok(()),
+                Err(failure) => {
+                    let (error, returned_handle) = failure.into_parts();
+                    handle = returned_handle;
+                    if error.code() != another_ext4::ErrCode::EAGAIN {
+                        return Err((from_another(error.code()), handle));
+                    }
+                    if let Err(wait_error) = self.mutation_wait.wait_for_progress(generation) {
+                        return Err((wait_error, handle));
+                    }
+                }
+            }
+        }
     }
 
     /// Flush all Mango-owned regular-file data before the final device barrier.
@@ -112,22 +205,18 @@ impl Ext4FileSystem {
         let Some(timestamps) = lifetime.dirty_timestamps() else {
             return Ok(None);
         };
-        self.inner()
-            .setattr(
+        let mtime = u32::try_from(timestamps.mtime().tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        let ctime = u32::try_from(timestamps.ctime().tv_sec).map_err(|_| SyscallErr::EFBIG)?;
+        self.run_metadata_operation(|| {
+            self.inner().setattr(
                 inode_id,
                 another_ext4::SetAttr {
-                    mtime: Some(
-                        u32::try_from(timestamps.mtime().tv_sec)
-                            .map_err(|_| SyscallErr::EFBIG)?,
-                    ),
-                    ctime: Some(
-                        u32::try_from(timestamps.ctime().tv_sec)
-                            .map_err(|_| SyscallErr::EFBIG)?,
-                    ),
+                    mtime: Some(mtime),
+                    ctime: Some(ctime),
                     ..Default::default()
                 },
             )
-            .map_err(|error| from_another(error.code()))?;
+        })?;
         Ok(Some(timestamps))
     }
 }
@@ -177,7 +266,7 @@ pub(crate) fn shutdown_all_instances() {
             // Do NOT clear RECOVER if sync failed — data may be incomplete
             continue;
         }
-        if let Err(error) = fs.inner().shutdown_writable() {
+        if let Err(error) = fs.run_metadata_operation(|| fs.inner().shutdown_writable()) {
             log::error!(
                 "another_ext4: shutdown_writable failed for filesystem {}: {:?}",
                 fs.fs_id(),
@@ -237,9 +326,7 @@ impl FileSystem for Ext4FileSystem {
             return Ok(());
         }
         self.sync_all()?;
-        self.inner()
-            .shutdown_writable()
-            .map_err(|failure| from_another(failure.code()))
+        self.run_metadata_operation(|| self.inner().shutdown_writable())
     }
 
     fn as_any_ref(&self) -> &dyn Any {

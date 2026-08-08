@@ -76,25 +76,17 @@ pub fn sys_mknodat(dirfd: usize, path: *const u8, mode: u32, dev: usize) -> isiz
     } else {
         fsgid
     };
-    let mut created = None;
-    let ret = wait_io_core(
-        || match parent.create_with_data(&leaf, file_type, perm, rdev) {
-            Ok(inode) => {
-                created = Some(inode);
-                SUCCESS
-            }
-            Err(e) => -(e as isize),
+    match parent.create_with_data_and_attrs(
+        &leaf,
+        file_type,
+        vfs::CreateAttrs {
+            mode: perm,
+            uid,
+            gid: child_gid,
         },
-        false,
-    );
-    if ret < 0 {
-        return ret;
+        rdev,
+    ) {
+        Ok(_) => SUCCESS,
+        Err(e) => return -(e as isize),
     }
-    let inode = created.expect("mknodat succeeded without returning an inode");
-    if let Ok(mut child_meta) = inode.metadata() {
-        child_meta.uid = uid;
-        child_meta.gid = child_gid;
-        let _ = inode.set_metadata(&child_meta);
-    }
-    SUCCESS
 }

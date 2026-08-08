@@ -18,15 +18,6 @@ use super::errno::from_another;
 use super::fs::Ext4FileSystem;
 use super::lifetime::{InodeKey, InodeLifetime};
 
-const METADATA_EAGAIN_RETRY_LIMIT: usize = 128;
-
-fn yield_metadata_retry() {
-    if crate::task::current_task().is_some() {
-        crate::task::suspend_current_and_run_next();
-    } else {
-        core::hint::spin_loop();
-    }
-}
 use super::page_cache::AnotherExt4PageCacheBackend;
 
 /// Writable VFS inode identified by its stable ext4 inode number.
@@ -204,9 +195,8 @@ impl IndexNode for Ext4Inode {
         if self.file_type != FileType::File {
             return Err(SyscallErr::EINVAL);
         }
-        let logical_size_start = crate::task::perf::perf_time_now_for(
-            crate::task::perf::STATS_PROFILE_MEMORY_IO,
-        );
+        let logical_size_start =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         let size = self.lifetime.logical_size.load(Ordering::Acquire);
         let actual = len.min(dst.len()).min(size.saturating_sub(offset));
         crate::task::perf::record_pread_ext4_logical_size(
@@ -217,9 +207,8 @@ impl IndexNode for Ext4Inode {
             return Ok(0);
         }
         let fs = self.fs_arc()?;
-        let page_cache_start = crate::task::perf::perf_time_now_for(
-            crate::task::perf::STATS_PROFILE_MEMORY_IO,
-        );
+        let page_cache_start =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         let result = self
             .regular_page_cache(&fs)?
             .read_at_user(offset, actual, dst);
@@ -327,12 +316,12 @@ impl IndexNode for Ext4Inode {
         let attr = self.attr(&fs)?;
         let file_type = map_file_type(attr.ftype);
         let permissions = InodeMode::from_bits_truncate(u32::from(attr.perm.bits()));
-        let mtime = self.lifetime.cached_mtime().unwrap_or(
-            TimeSpec::from_s(usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?)
-        );
-        let ctime = self.lifetime.cached_ctime().unwrap_or(
-            TimeSpec::from_s(usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?)
-        );
+        let mtime = self.lifetime.cached_mtime().unwrap_or(TimeSpec::from_s(
+            usize::try_from(attr.mtime).map_err(|_| SyscallErr::EFBIG)?,
+        ));
+        let ctime = self.lifetime.cached_ctime().unwrap_or(TimeSpec::from_s(
+            usize::try_from(attr.ctime).map_err(|_| SyscallErr::EFBIG)?,
+        ));
         Ok(Metadata {
             dev_id: fs.fs_id(),
             inode_id: self.key.inode_id(),
@@ -369,8 +358,8 @@ impl IndexNode for Ext4Inode {
         let ctime = u32::try_from(metadata.ctime.tv_sec).map_err(|_| SyscallErr::EFBIG)?;
         let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
         self.lifetime.set_inode_flags(metadata.flags);
-        for attempt in 0..METADATA_EAGAIN_RETRY_LIMIT {
-            let result = fs.inner().setattr(
+        fs.run_metadata_operation(|| {
+            fs.inner().setattr(
                 inode_id,
                 another_ext4::SetAttr {
                     mode: Some(mode),
@@ -382,22 +371,13 @@ impl IndexNode for Ext4Inode {
                     ctime: Some(ctime),
                     crtime: None,
                 },
-            );
-            match result {
-                Ok(()) => return Ok(()),
-                Err(error) if error.code() == another_ext4::ErrCode::EAGAIN
-                    && attempt + 1 < METADATA_EAGAIN_RETRY_LIMIT =>
-                {
-                    yield_metadata_retry();
-                }
-                Err(error) => return Err(from_another(error.code())),
-            }
-        }
-        Err(SyscallErr::EAGAIN)
+            )
+        })
     }
 
     fn touch_modified(&self) {
-        self.lifetime.cache_modified_time(crate::timer::TimeSpec::now());
+        self.lifetime
+            .cache_modified_time(crate::timer::TimeSpec::now());
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {

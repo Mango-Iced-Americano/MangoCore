@@ -11,7 +11,6 @@ pub(crate) use crate::mm::{
     check_user_range, MapPermission, UserBufferReader, UserBufferWriter, UserCString,
     UserIoVec, UserPtr, UserPtrMut, UserSlice, VirtAddr,
 };
-pub(crate) use crate::syscall::utils::wait_io_core;
 pub(crate) use crate::task::{
     current_task, current_user_token, find_process_by_pid, find_task_by_tid,
     is_executable_inode_busy, is_writable_inode_busy, signal::Signals, WaitQueue,
@@ -453,26 +452,9 @@ pub(crate) fn open_file_at(
             }
             let mut vfs_flags = _open_flags_to_vfs_flags(flags);
             if flags.contains(OpenFlags::O_TRUNC) {
-                // another_ext4 deliberately reports metadata-gate contention as
-                // EAGAIN because its transaction guard spans block-device I/O.
-                // O_TRUNC on a regular file is a blocking open operation, so
-                // retry outside the inode/VFS locks instead of exposing that
-                // transient contention to userspace (Cargo treats it as a
-                // permanent "failed to write" error).
-                let ret = wait_io_core(
-                    || match target.resize(0) {
-                        Ok(()) => 0,
-                        Err(error) => -(error as isize),
-                    },
-                    false,
-                );
-                if ret < 0 {
-                    return Err(ret);
-                }
+                target.resize(0).map_err(|error| -(error as isize))?;
                 // The truncate has already been completed above.  Passing
-                // O_TRUNC into File::open() would perform it a second time,
-                // re-entering another_ext4's metadata gate and leaking a
-                // transient EAGAIN from the otherwise successful open.
+                // O_TRUNC into File::open() would perform it a second time.
                 vfs_flags.remove(vfs::FileFlags::O_TRUNC);
             }
             vfs::File::new_with_metadata(target, vfs_flags, md)
@@ -495,35 +477,12 @@ pub(crate) fn open_file_at(
                 effective_mode.remove(vfs::InodeMode::S_ISGID);
             }
 
-            // another_ext4 reports metadata-transaction contention as EAGAIN
-            // while creating a directory entry.  O_CREAT is a blocking open
-            // operation, so retry the create outside VFS locks instead of
-            // exposing that transient contention to userspace build tools.
-            let mut created = None;
-            let ret = wait_io_core(
-                || match parent.create_with_attrs(
+            let inode = parent
+                .create_with_attrs(
                     &leaf,
                     FileType::File,
                     vfs::CreateAttrs { mode: effective_mode, uid, gid: child_gid },
-                ) {
-                    Ok(inode) => {
-                        created = Some(Ok(inode));
-                        0
-                    }
-                    Err(error) => {
-                        if error != SyscallErr::EAGAIN {
-                            created = Some(Err(error));
-                        }
-                        -(error as isize)
-                    }
-                },
-                false,
-            );
-            if ret < 0 {
-                return Err(ret);
-            }
-            let inode = created
-                .expect("create_with_attrs succeeded without returning an inode")
+                )
                 .map_err(|e| -(e as isize))?;
             // A newly created inode starts at size zero, so O_TRUNC has no
             // work left for File::open().  Avoid the second metadata
@@ -595,15 +554,8 @@ pub(crate) fn open_proc_self_fd(path: &str, flags: OpenFlags) -> Option<Result<A
         if let Err(errno) = check_memfd_truncate_seals(&reopened, 0) {
             return Some(Err(errno));
         }
-        let ret = wait_io_core(
-            || match inode.resize(0) {
-                Ok(()) => 0,
-                Err(error) => -(error as isize),
-            },
-            false,
-        );
-        if ret < 0 {
-            return Some(Err(ret));
+        if let Err(error) = inode.resize(0) {
+            return Some(Err(-(error as isize)));
         }
     }
 

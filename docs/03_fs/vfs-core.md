@@ -153,8 +153,13 @@ pub trait IndexNode: Any + Send + Sync + Debug {
         -> Result<Arc<dyn IndexNode>, SyscallErr>;
     fn create_with_attrs(&self, name: &str, file_type: FileType,
                          attrs: CreateAttrs) -> Result<Arc<dyn IndexNode>, SyscallErr>;
+    fn create_with_data_and_attrs(&self, name: &str, file_type: FileType,
+                                  attrs: CreateAttrs, data: usize)
+        -> Result<Arc<dyn IndexNode>, SyscallErr>;
     fn symlink(&self, name: &str, target: &str)
         -> Result<Arc<dyn IndexNode>, SyscallErr>;
+    fn symlink_with_attrs(&self, name: &str, target: &str,
+                          attrs: CreateAttrs) -> Result<Arc<dyn IndexNode>, SyscallErr>;
     fn link(&self, name: &str, other: &Arc<dyn IndexNode>) -> Result<(), SyscallErr>;
     fn rename(&self, old_name: &str, new_parent: &Arc<dyn IndexNode>,
               new_name: &str, flags: u32) -> Result<(), SyscallErr>;
@@ -204,7 +209,7 @@ pub trait IndexNode: Any + Send + Sync + Debug {
 方法分类：
 - **基本 I/O（8 个）**：read_at / write_at 是主路径，带文件私有数据参数。read_at_user / write_at_user 提供 UserBuffer 直连零拷贝路径，默认返回 ENOSYS 由 File 层 fallback。read_direct / write_direct 绕开 PageCache 用于 O_DIRECT。read_sync / write_sync 供 PageCache 内部使用。
 - **生命周期（2 个）**：open / close 在 File 创建和销毁时调用。
-- **目录操作（10 个）**：find / list / list_dirents / create / create_with_data / create_with_attrs / symlink / link / rename / unlink / rmdir / mkdir。mkdir 默认实现先检查 EEXIST 再委托 create。
+- **目录操作**：find / list / list_dirents / create / create_with_data / create_with_attrs / create_with_data_and_attrs / symlink / symlink_with_attrs / link / rename / unlink / rmdir / mkdir。带 attrs 的创建接口允许后端在发布目录项的同一事务中写入最终 uid/gid/mode；默认实现仍可回退为创建后 `set_metadata`，并传播后者的错误。mkdir 默认实现先检查 EEXIST 再委托 create。
 - **元数据（4 个）**：metadata、fs、as_any_ref 必须由实现者提供，其余方法有默认 ENOSYS 实现。
 - **大小管理（2 个）**：resize / truncate，truncate 默认委托给 resize。
 - **FS 引用（3 个）**：fs 返回所属 FileSystem。page_cache / ensure_page_cache 提供 PageCache 访问。
