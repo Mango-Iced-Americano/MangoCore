@@ -124,8 +124,9 @@ impl TlbContext {
     ///
     /// 两项工作必须和 AddressSpace 的目标快照共用同一 VM 锁；拆开会重新引入
     /// “快照遗漏新 CPU，而新 CPU 又未执行完整屏障”的窗口。
-    pub(crate) fn activate_cpu(&self, cpu_id: usize) {
+    pub(crate) fn activate_cpu(&self, cpu_id: usize) -> bool {
         assert!(cpu_id < crate::smp::configured_cpu_count());
+        let mut caught_up = false;
         let cpu_bit = 1usize << cpu_id;
         let active = self.active_cpus.load(Ordering::Acquire);
         if active & cpu_bit == 0 {
@@ -143,12 +144,13 @@ impl TlbContext {
             let generation = self.generation.load(Ordering::Acquire);
             let observed = self.observed[cpu_id].load(Ordering::Acquire);
             if observed < generation {
+                caught_up = true;
                 crate::hal::user_tlb_invalidate();
                 self.observed[cpu_id].fetch_max(generation, Ordering::Release);
             }
             // 若修改方在本次 flush 后推进了代际，必须重新失效后才能使用页表根。
             if self.generation.load(Ordering::Acquire) == generation {
-                return;
+                return caught_up;
             }
         }
     }

@@ -352,9 +352,14 @@ fn exec_opened_file(
         "load_elf";
         // Try zero-copy direct loader first; fall back to old kmap-based loader
         // if the file's filesystem doesn't provide a PageCache.
+        crate::task::perf::record_exec_direct();
         let result = task.load_elf_direct(elf.clone(), &argv_vec, &envp_vec);
         let result = match result {
-            Err(ENOSYS) => task.load_elf(elf, &argv_vec, &envp_vec),
+            Err(ENOSYS) => {
+                crate::task::perf::record_exec_direct_enosys();
+                crate::task::perf::record_exec_fallback();
+                task.load_elf(elf, &argv_vec, &envp_vec)
+            }
             other => other,
         };
         if let Err(_errno) = result {

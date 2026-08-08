@@ -181,8 +181,22 @@ impl<T: PageTable> AddressSpace<T> {
 
     /// 在 VM 锁内读取地址空间；闭包不能修改 VMA 或 PTE。
     pub fn read<R>(&self, operation: impl FnOnce(&AddressSpaceInner<T>) -> R) -> R {
+        let wait_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         let inner = self.inner.lock();
-        operation(&inner)
+        let acquired = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        let result = operation(&inner);
+        let released = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        crate::task::perf::record_vm_read_lock(
+            acquired.wrapping_sub(wait_start),
+            released.wrapping_sub(acquired),
+        );
+        result
     }
 
     /// 尝试在 VM 锁内读取地址空间；锁忙时立即返回。
@@ -191,21 +205,52 @@ impl<T: PageTable> AddressSpace<T> {
     /// `None` 时先释放外层锁，再决定重试，禁止在外层锁内自旋等待 VM。
     pub fn try_read<R>(&self, operation: impl FnOnce(&AddressSpaceInner<T>) -> R) -> Option<R> {
         let inner = self.inner.try_lock()?;
-        Some(operation(&inner))
+        let start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        let result = operation(&inner);
+        let hold = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        )
+        .wrapping_sub(start);
+        crate::task::perf::record_vm_read_lock(0, hold);
+        Some(result)
     }
 
     /// 在 VM 锁内修改地址空间，并在解锁后完成本轮 TLB 同步。
     pub fn write<R>(&self, operation: impl FnOnce(&mut AddressSpaceInner<T>) -> R) -> R {
-        let (result, flush) = {
+        let wait_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        let (result, flush, acquired, released) = {
             let mut inner = self.inner.lock();
+            let acquired = crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            );
             inner.mmu_gather.begin(self.tlb.active_cpu_mask());
             let result = operation(&mut inner);
             let flush = inner.mmu_gather.seal(&self.tlb);
-            (result, flush)
+            let released = crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            );
+            (result, flush, acquired, released)
         };
+        crate::task::perf::record_vm_write_lock(
+            acquired.wrapping_sub(wait_start),
+            released.wrapping_sub(acquired),
+        );
+        let flush_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         if let Some(flush) = flush {
             flush.execute();
         }
+        crate::task::perf::record_vm_flush_outside_lock(
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(flush_start),
+        );
         result
     }
 
@@ -216,14 +261,33 @@ impl<T: PageTable> AddressSpace<T> {
     ) -> Option<R> {
         let (result, flush) = {
             let mut inner = self.inner.try_lock()?;
+            let start = crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            );
             inner.mmu_gather.begin(self.tlb.active_cpu_mask());
             let result = operation(&mut inner);
             let flush = inner.mmu_gather.seal(&self.tlb);
+            crate::task::perf::record_vm_write_lock(
+                0,
+                crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                )
+                .wrapping_sub(start),
+            );
             (result, flush)
         };
+        let flush_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         if let Some(flush) = flush {
             flush.execute();
         }
+        crate::task::perf::record_vm_flush_outside_lock(
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(flush_start),
+        );
         Some(result)
     }
 
@@ -234,11 +298,21 @@ impl<T: PageTable> AddressSpace<T> {
             crate::smp::cpu_id(),
             "user MM must be activated by its local CPU"
         );
+        let started = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         loop {
             let context = {
                 let inner = self.inner.lock();
                 self.tlb.assign_asid().map(|asid| {
-                    self.tlb.activate_cpu(cpu_id);
+                    let caught_up = self.tlb.activate_cpu(cpu_id);
+                    crate::task::perf::record_mm_activate(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(started),
+                        caught_up,
+                    );
                     UserVmContext {
                         token: inner.page_table.token(),
                         asid,
@@ -250,6 +324,7 @@ impl<T: PageTable> AddressSpace<T> {
             }
 
             // ASID rollover 会等待全 CPU TLB ack，绝不能把 VM 锁带入该等待点。
+            crate::task::perf::record_mm_asid_rollover();
             #[cfg(target_arch = "loongarch64")]
             crate::hal::arch::loongarch64::tlb::rollover_asids();
             #[cfg(target_arch = "riscv64")]
@@ -267,8 +342,17 @@ impl<T: PageTable> AddressSpace<T> {
             crate::smp::cpu_id(),
             "user MM must be deactivated by its local CPU"
         );
+        let started = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         let _inner = self.inner.lock();
         self.tlb.deactivate_cpu(cpu_id);
+        crate::task::perf::record_mm_deactivate(
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(started),
+        );
     }
 
     /// 返回当前活跃 CPU 快照，供调度诊断与 SMP 一致性检查使用。
@@ -2061,7 +2145,33 @@ impl<T: PageTable> AddressSpaceInner<T> {
         let pc = file.inode.ensure_page_cache().ok_or(ENOSYS)?;
         let load_segments = collect_raw_load_segments(&phdrs, bias)?;
         validate_load_segment_file_bounds(&load_segments, file.get_size())?;
+        let mut load_pages = 0usize;
+        let mut load_file_bytes = 0usize;
+        for segment in &load_segments {
+            let (start, end) = elf_load_page_range(segment)?;
+            load_pages = load_pages
+                .checked_add(end.0.checked_sub(start.0).ok_or(ENOEXEC)?)
+                .ok_or(ENOEXEC)?;
+            load_file_bytes = load_file_bytes
+                .checked_add(segment.filesz)
+                .ok_or(ENOEXEC)?;
+        }
+        crate::task::perf::record_exec_ptload(
+            load_segments.len(),
+            load_pages,
+            load_file_bytes,
+        );
+        let prefetch_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         prefetch_load_pages(&pc, &load_segments)?;
+        crate::task::perf::record_exec_phase(
+            &crate::task::perf::EXEC_PREFETCH_TICKS,
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(prefetch_start),
+        );
         let (program_break, load_addr) = elf_load_summary(&load_segments)?;
         self.map_elf_load_segments(&load_segments)?;
         for segment in &load_segments {
@@ -2148,8 +2258,28 @@ impl<T: PageTable> AddressSpaceInner<T> {
     /// Map each rounded PT_LOAD page exactly once using its final permission union.
     fn map_elf_load_segments(&mut self, segments: &[ElfLoadSegment]) -> Result<(), isize> {
         let pages = collect_load_pages(segments)?;
+        let alloc_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         self.map_elf_page_runs(&pages)?;
+        crate::task::perf::record_exec_phase(
+            &crate::task::perf::EXEC_TARGET_ALLOC_TICKS,
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(alloc_start),
+        );
+        let zero_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
         self.zero_elf_load_pages(&pages)?;
+        crate::task::perf::record_exec_phase(
+            &crate::task::perf::EXEC_TARGET_ZERO_TICKS,
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(zero_start),
+        );
         Ok(())
     }
 
@@ -2236,9 +2366,20 @@ impl<T: PageTable> AddressSpaceInner<T> {
 
     /// Overlay one PT_LOAD file range from PageCache onto mapped load pages.
     fn map_load_segment(&mut self, pc: &PageCache, segment: &ElfLoadSegment) -> Result<(), isize> {
-        self.copy_load_segment(segment, |file_offset, dst| {
+        let copy_start = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        let result = self.copy_load_segment(segment, |file_offset, dst| {
             copy_from_page_cache(pc, file_offset, dst)
-        })
+        });
+        crate::task::perf::record_exec_phase(
+            &crate::task::perf::EXEC_PAGECACHE_COPY_TICKS,
+            crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            )
+            .wrapping_sub(copy_start),
+        );
+        result
     }
 }
 

@@ -455,7 +455,17 @@ impl StackFrameAllocator {
                     crate::task::perf::STATS_PROFILE_MEMORY_IO,
                 );
                 crate::task::perf::record_frame_alloc();
+                let zero_start = crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                );
                 frames.push(Arc::new(FrameTracker::new(ppn.into())));
+                crate::task::perf::record_frame_alloc_source(true);
+                crate::task::perf::record_frame_contig_page(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .wrapping_sub(zero_start),
+                );
                 crate::task::perf::record_frame_alloc_time_us(
                     crate::task::perf::perf_time_now_for(
                         crate::task::perf::STATS_PROFILE_MEMORY_IO,
@@ -487,6 +497,13 @@ impl StackFrameAllocator {
             // fresh range; zero_init pre-cleared it during boot.
             let frame = unsafe { FrameTracker::new_uninit(ppn.into()) };
             frames.push(Arc::new(frame));
+            crate::task::perf::record_frame_alloc_source(false);
+            crate::task::perf::record_frame_contig_page(
+                crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                )
+                .wrapping_sub(started),
+            );
             crate::task::perf::record_frame_alloc_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(started),
@@ -530,6 +547,13 @@ impl StackFrameAllocator {
             // zero_init cleared every allocator-owned region during boot.
             let frame = unsafe { FrameTracker::new_uninit(ppn.into()) };
             frames.push(Arc::new(frame));
+            crate::task::perf::record_frame_alloc_source(false);
+            crate::task::perf::record_frame_contig_page(
+                crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                )
+                .wrapping_sub(started),
+            );
             crate::task::perf::record_frame_alloc_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
                     .saturating_sub(started),
@@ -681,9 +705,11 @@ impl FrameAllocator for StackFrameAllocator {
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         crate::task::perf::record_frame_alloc();
         let result = if let Some(ppn) = self.take_recycled_ppn() {
+            crate::task::perf::record_frame_alloc_source(true);
             // recycled 也包含显式释放的 linker payload 页，必须重新清零。
             Some((PhysPageNum::from(ppn), true))
         } else if let Some(ppn) = self.take_fresh_ppn() {
+            crate::task::perf::record_frame_alloc_source(false);
             Some((PhysPageNum::from(ppn), !cfg!(feature = "zero_init")))
         } else {
             None
@@ -714,11 +740,13 @@ impl FrameAllocator for StackFrameAllocator {
     /// 调用者必须保证返回页在读取或暴露给用户前会被完整覆盖。
     unsafe fn alloc_uninit(&mut self) -> Option<FrameTracker> {
         if let Some(ppn) = self.take_recycled_ppn() {
+            crate::task::perf::record_frame_alloc_source(true);
             // Safety: `ppn` 从回收栈弹出后重新归当前分配所有；调用者负责完整初始化。
             let frame_tracker = FrameTracker::new_uninit(ppn.into());
             //log::trace!("[frame_alloc_uninit] {:?}", frame_tracker);
             Some(frame_tracker)
         } else if let Some(ppn) = self.take_fresh_ppn() {
+            crate::task::perf::record_frame_alloc_source(false);
             // Safety: `ppn` 是 fresh 帧，尚未交给其他所有者；调用者负责初始化。
             let frame_tracker = FrameTracker::new_uninit(ppn.into());
             Some(frame_tracker)
@@ -791,6 +819,66 @@ lazy_static! {
         RwLock::new(FrameAllocatorImpl::new());
 }
 
+#[inline]
+fn with_frame_alloc_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
+    let start = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let mut guard = FRAME_ALLOCATOR.write();
+    let acquired = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let result = op(&mut *guard);
+    let released = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    crate::task::perf::record_frame_global_alloc_lock(
+        acquired.wrapping_sub(start),
+        released.wrapping_sub(acquired),
+    );
+    result
+}
+
+#[inline]
+fn with_frame_free_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
+    let start = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let mut guard = FRAME_ALLOCATOR.write();
+    let acquired = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let result = op(&mut *guard);
+    let released = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    crate::task::perf::record_frame_global_free_lock(
+        acquired.wrapping_sub(start),
+        released.wrapping_sub(acquired),
+    );
+    result
+}
+
+#[inline]
+fn with_frame_contig_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
+    let start = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let mut guard = FRAME_ALLOCATOR.write();
+    let acquired = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let result = op(&mut *guard);
+    let released = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    crate::task::perf::record_frame_contig_lock(
+        acquired.wrapping_sub(start),
+        released.wrapping_sub(acquired),
+    );
+    result
+}
+
 #[cfg(all(
     feature = "loongarch64",
     feature = "board_2k1000",
@@ -853,7 +941,7 @@ pub fn init_frame_allocator() {
         feature = "board_bringup_trace"
     ))]
     probe_board_memory_regions();
-    FRAME_ALLOCATOR.write().init();
+    with_frame_alloc_lock(|allocator| allocator.init());
 }
 
 /// 尝试回收至少 `req` 个物理页。
@@ -892,6 +980,9 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
 #[cfg(feature = "oom_handler")]
 /// 尽力保证至少还有 `num` 个可分配帧。
 pub fn frame_reserve(num: usize) {
+    let started = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
     // 获取还可分配的帧数量
     let remain = FRAME_ALLOCATOR.read().unallocated_frames();
     if remain < num {
@@ -903,6 +994,11 @@ pub fn frame_reserve(num: usize) {
             );
         }
     }
+    crate::task::perf::record_frame_reserve_check(
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+            .wrapping_sub(started),
+        remain < num,
+    );
 }
 
 #[cfg(not(feature = "oom_handler"))]
@@ -912,7 +1008,7 @@ pub fn frame_reserve(_num: usize) {}
 #[cfg(feature = "oom_handler")]
 /// 分配一页物理页，失败时先尝试 OOM 回收。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
     match reservation {
         Some(reservation) => Some(Arc::new(reservation.into_tracker())),
         None => {
@@ -922,7 +1018,7 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
                 return None;
             }
             crate::show_frame_consumption!("GC", before);
-            let reservation = FRAME_ALLOCATOR.write().reserve_one();
+            let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
             reservation.map(|reservation| Arc::new(reservation.into_tracker()))
         }
     }
@@ -941,7 +1037,7 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 /// spans a DRAM hole.
 pub fn frames_alloc(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let was_enabled = local_irq_save();
-    let result = FRAME_ALLOCATOR.write().alloc_contiguous(num);
+    let result = with_frame_contig_lock(|allocator| allocator.alloc_contiguous(num));
     local_irq_restore(was_enabled);
     result
 }
@@ -980,7 +1076,7 @@ pub fn frames_alloc_any(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
 /// fresh 页不足或 `Vec` 预留失败时返回 `None`；已分配帧会随局部变量释放回收。
 pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let was_enabled = local_irq_save();
-    let result = FRAME_ALLOCATOR.write().alloc_fresh_contiguous(num);
+    let result = with_frame_contig_lock(|allocator| allocator.alloc_fresh_contiguous(num));
     local_irq_restore(was_enabled);
     result
 }
@@ -988,7 +1084,7 @@ pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>
 #[cfg(not(feature = "oom_handler"))]
 /// 分配一页物理页。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let reservation = FRAME_ALLOCATOR.write().reserve_one();
+    let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
     reservation.map(|reservation| Arc::new(reservation.into_tracker()))
 }
 
@@ -999,7 +1095,7 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
 ///
 /// 调用者必须保证返回页在读取或映射给用户前被完整覆盖。
 pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
-    let result = FRAME_ALLOCATOR.write().alloc_uninit();
+    let result = with_frame_alloc_lock(|allocator| allocator.alloc_uninit());
     match result {
         Some(frame_tracker) => Some(Arc::new(frame_tracker)),
         None => {
@@ -1009,11 +1105,12 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
                 return None;
             }
             crate::show_frame_consumption!("GC", before);
-            FRAME_ALLOCATOR
-                .write()
+            with_frame_alloc_lock(|allocator| {
                 // Safety: 本函数的调用方承担未初始化页契约。
-                .alloc_uninit()
-                .map(|frame_tracker| Arc::new(frame_tracker))
+                allocator
+                    .alloc_uninit()
+                    .map(|frame_tracker| Arc::new(frame_tracker))
+            })
         }
     }
 }
@@ -1025,17 +1122,18 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
 ///
 /// 调用者必须保证返回页在读取或映射给用户前被完整覆盖。
 pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>> {
-    FRAME_ALLOCATOR
-        .write()
+    with_frame_alloc_lock(|allocator| {
         // Safety: 本函数的调用方承担未初始化页契约。
-        .alloc_uninit()
-        .map(|frame_tracker| Arc::new(frame_tracker))
+        allocator
+            .alloc_uninit()
+            .map(|frame_tracker| Arc::new(frame_tracker))
+    })
 }
 
 /// 释放一页物理帧。
 pub fn frame_dealloc(ppn: PhysPageNum) {
     crate::task::perf::record_frame_free();
-    FRAME_ALLOCATOR.write().dealloc(ppn);
+    with_frame_free_lock(|allocator| allocator.dealloc(ppn));
 }
 
 /// Release a linker-owned physical page range after its embedded bytes are no longer used.
@@ -1052,7 +1150,7 @@ pub unsafe fn frame_reclaim_linker_range(
     start: PhysPageNum,
     end: PhysPageNum,
 ) -> Result<usize, &'static str> {
-    FRAME_ALLOCATOR.write().reclaim_linker_frames(start, end)
+    with_frame_free_lock(|allocator| allocator.reclaim_linker_frames(start, end))
 }
 
 /// 返回当前可用帧数量。

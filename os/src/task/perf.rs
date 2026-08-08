@@ -112,6 +112,24 @@ mod enabled {
     pub static FILEMAP_FAULT_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_PRIVATE_COPY_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_MAP_USER_TICKS: AtomicUsize = AtomicUsize::new(0);
+    // ── Stage 0: filemap fault attribution ──
+    pub static FILEMAP_READ_FAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PRIVATE_FAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_READY_HIT: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_NOT_READY_RETRY: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_RETRY_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_RETRY_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_RETRY_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_REVALIDATE_RETRY: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_REVALIDATE_VMA_CHANGED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_REVALIDATE_EOF_CHANGED: AtomicUsize = AtomicUsize::new(0);
 
     // ── TLB flush cycle counters ──
     pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
@@ -124,6 +142,100 @@ mod enabled {
     pub static EXECVE_INTERP_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static EXECVE_STACK_TABLES_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static EXECVE_TEARDOWN_TICKS: AtomicUsize = AtomicUsize::new(0);
+    // ── Stage 0: exec path selection ──
+    pub static EXEC_DIRECT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_FALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_DIRECT_ENOSYS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Stage 0: AddressSpace lock and MM switch attribution ──
+    pub static VM_READ_LOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_READ_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_READ_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_WRITE_LOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_WRITE_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_WRITE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static TASK_SWITCH_SAME_MM: AtomicUsize = AtomicUsize::new(0);
+    pub static TASK_SWITCH_DIFFERENT_MM: AtomicUsize = AtomicUsize::new(0);
+    pub static TASK_SWITCH_TO_KERNEL_ONLY: AtomicUsize = AtomicUsize::new(0);
+    pub static TASK_SWITCH_IDLE_NO_NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Stage 0: frame allocator attribution ──
+    pub static FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_RESERVE_CHECK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_RESERVE_CHECK_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_RESERVE_OOM_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_ALLOC_SOURCE_FRESH: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_ALLOC_SOURCE_RECYCLED: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_ZERO_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_CONTIG_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Stage 0: heap attribution ──
+    pub static HEAP_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DIRECT_BUDDY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_8_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_16_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_32_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_64_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_128_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_256_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_512_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_1024_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_CLASS_2048_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LARGE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Stage 0: MM activation and scheduler placement ──
+    pub static MM_ACTIVATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_ACTIVATE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_DEACTIVATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_DEACTIVATE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_SAME_ALREADY_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_GENERATION_CATCHUP: AtomicUsize = AtomicUsize::new(0);
+    pub static MM_ASID_ROLLOVER: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_LOCAL: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_REMOTE: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_KEEP_LAST_CPU: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_SELECT_IDLE_CPU: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_SELECT_LEAST_LOADED: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_TO_RUN_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_TO_RUN_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static TASK_RUN_SLICE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_CANDIDATE_FOUND: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_SUCCESS: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_RECHECK_FAILED: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_KTLB_SYNC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_KTLB_SYNC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+    // ── Stage 0: exec detail attribution ──
+    pub static EXEC_PTLOAD_SEGMENTS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_PTLOAD_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_PTLOAD_FILE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_PREFETCH_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_TARGET_ALLOC_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_TARGET_ZERO_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_PAGECACHE_COPY_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXEC_FALLBACK_KMAP_WAIT_TICKS: AtomicUsize = AtomicUsize::new(0);
 
     // DAC (Discretionary Access Control) — filesystem permission checks
     pub static DAC_SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -179,6 +291,401 @@ mod enabled {
     #[inline(always)]
     fn network_runtime_stats_enabled() -> bool {
         stats_enabled_for(super::STATS_PROFILE_NETWORK_RUNTIME)
+    }
+
+    // ── Stage 0 recorders ──
+
+    #[inline(always)]
+    pub fn record_vm_read_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VM_READ_LOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+        VM_READ_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&VM_READ_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        VM_READ_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&VM_READ_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_vm_write_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VM_WRITE_LOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+        VM_WRITE_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&VM_WRITE_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        VM_WRITE_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&VM_WRITE_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_vm_flush_outside_lock(ticks: usize) {
+        if memory_io_stats_enabled() {
+            VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+            update_max(&VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX, ticks);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_task_switch_mm(same_mm: bool) {
+        if !stats_enabled() {
+            return;
+        }
+        if same_mm {
+            TASK_SWITCH_SAME_MM.fetch_add(1, Ordering::Relaxed);
+        } else {
+            TASK_SWITCH_DIFFERENT_MM.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_task_switch_to_kernel_only() {
+        if stats_enabled() {
+            TASK_SWITCH_TO_KERNEL_ONLY.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_task_switch_idle_no_next() {
+        if stats_enabled() {
+            TASK_SWITCH_IDLE_NO_NEXT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_mm_activate(ticks: usize, generation_catchup: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        MM_ACTIVATE_CALLS.fetch_add(1, Ordering::Relaxed);
+        MM_ACTIVATE_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        if generation_catchup {
+            MM_GENERATION_CATCHUP.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_mm_deactivate(ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        MM_DEACTIVATE_CALLS.fetch_add(1, Ordering::Relaxed);
+        MM_DEACTIVATE_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_mm_same_already_active() {
+        if memory_io_stats_enabled() {
+            MM_SAME_ALREADY_ACTIVE.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_mm_asid_rollover() {
+        if memory_io_stats_enabled() {
+            MM_ASID_ROLLOVER.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_exec_direct() {
+        if stats_enabled() {
+            EXEC_DIRECT_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_exec_fallback() {
+        if stats_enabled() {
+            EXEC_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_exec_direct_enosys() {
+        if stats_enabled() {
+            EXEC_DIRECT_ENOSYS_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_read_fault() {
+        if memory_io_stats_enabled() {
+            FILEMAP_READ_FAULT_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_private_fault() {
+        if memory_io_stats_enabled() {
+            FILEMAP_PRIVATE_FAULT_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_shared_write_fault() {
+        if memory_io_stats_enabled() {
+            FILEMAP_SHARED_WRITE_FAULT_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_ready_hit() {
+        if memory_io_stats_enabled() {
+            FILEMAP_READY_HIT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_not_ready_retry() {
+        if memory_io_stats_enabled() {
+            FILEMAP_NOT_READY_RETRY.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_backend_read(ticks: usize, under_vm: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_BACKEND_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&FILEMAP_BACKEND_READ_TICKS_MAX, ticks);
+        if under_vm {
+            FILEMAP_BACKEND_READ_UNDER_VM_CALLS.fetch_add(1, Ordering::Relaxed);
+            FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+            update_max(&FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX, ticks);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_retry_wait(ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_RETRY_WAIT_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_RETRY_WAIT_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&FILEMAP_RETRY_WAIT_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_revalidate_retry(vma_changed: bool, eof_changed: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_REVALIDATE_RETRY.fetch_add(1, Ordering::Relaxed);
+        if vma_changed {
+            FILEMAP_REVALIDATE_VMA_CHANGED.fetch_add(1, Ordering::Relaxed);
+        }
+        if eof_changed {
+            FILEMAP_REVALIDATE_EOF_CHANGED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_global_alloc_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_global_free_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_reserve_check(ticks: usize, oom: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FRAME_RESERVE_CHECK_CALLS.fetch_add(1, Ordering::Relaxed);
+        FRAME_RESERVE_CHECK_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        if oom {
+            FRAME_RESERVE_OOM_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_alloc_source(recycled: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        if recycled {
+            FRAME_ALLOC_SOURCE_RECYCLED.fetch_add(1, Ordering::Relaxed);
+        } else {
+            FRAME_ALLOC_SOURCE_FRESH.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_contig_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&FRAME_CONTIG_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&FRAME_CONTIG_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_frame_contig_page(zero_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FRAME_CONTIG_PAGES.fetch_add(1, Ordering::Relaxed);
+        FRAME_CONTIG_ZERO_TICKS_TOTAL.fetch_add(zero_ticks, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        HEAP_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        update_max(&HEAP_LOCK_WAIT_TICKS_MAX, wait_ticks);
+        HEAP_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&HEAP_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc_path(class_bytes: Option<usize>) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        match class_bytes {
+            None => HEAP_DIRECT_BUDDY_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(8) => HEAP_CLASS_8_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(16) => HEAP_CLASS_16_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(32) => HEAP_CLASS_32_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(64) => HEAP_CLASS_64_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(128) => HEAP_CLASS_128_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(256) => HEAP_CLASS_256_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(512) => HEAP_CLASS_512_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(1024) => HEAP_CLASS_1024_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(2048) => HEAP_CLASS_2048_CALLS.fetch_add(1, Ordering::Relaxed),
+            Some(_) => HEAP_LARGE_CALLS.fetch_add(1, Ordering::Relaxed),
+        };
+        if class_bytes.is_some() {
+            HEAP_SLAB_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_wake_local() {
+        if stats_enabled() {
+            WAKE_LOCAL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_wake_remote() {
+        if stats_enabled() {
+            WAKE_REMOTE.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_wake_selection(keep_last: bool, idle: bool) {
+        if !stats_enabled() {
+            return;
+        }
+        if keep_last {
+            WAKE_KEEP_LAST_CPU.fetch_add(1, Ordering::Relaxed);
+        } else if idle {
+            WAKE_SELECT_IDLE_CPU.fetch_add(1, Ordering::Relaxed);
+        } else {
+            WAKE_SELECT_LEAST_LOADED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_wake_to_run(ticks: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        WAKE_TO_RUN_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&WAKE_TO_RUN_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_task_run_slice(ticks: usize) {
+        if stats_enabled() {
+            TASK_RUN_SLICE_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_attempt() {
+        if stats_enabled() {
+            STEAL_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_candidate() {
+        if stats_enabled() {
+            STEAL_CANDIDATE_FOUND.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_success() {
+        if stats_enabled() {
+            STEAL_SUCCESS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_recheck_failed() {
+        if stats_enabled() {
+            STEAL_RECHECK_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_ktlb_sync(ticks: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        STEAL_KTLB_SYNC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        update_max(&STEAL_KTLB_SYNC_TICKS_MAX, ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_exec_ptload(segments: usize, pages: usize, file_bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        EXEC_PTLOAD_SEGMENTS.fetch_add(segments, Ordering::Relaxed);
+        EXEC_PTLOAD_PAGES.fetch_add(pages, Ordering::Relaxed);
+        EXEC_PTLOAD_FILE_BYTES.fetch_add(file_bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_exec_phase(counter: &AtomicUsize, ticks: usize) {
+        if memory_io_stats_enabled() {
+            counter.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_exec_fallback_kmap_wait(ticks: usize) {
+        if memory_io_stats_enabled() {
+            EXEC_FALLBACK_KMAP_WAIT_TICKS.fetch_add(ticks, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -1645,6 +2152,23 @@ mod enabled {
         FILEMAP_FAULT_TICKS.store(0, Ordering::Relaxed);
         FILEMAP_PRIVATE_COPY_TICKS.store(0, Ordering::Relaxed);
         FILEMAP_MAP_USER_TICKS.store(0, Ordering::Relaxed);
+        FILEMAP_READ_FAULT_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_PRIVATE_FAULT_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_SHARED_WRITE_FAULT_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_READY_HIT.store(0, Ordering::Relaxed);
+        FILEMAP_NOT_READY_RETRY.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_TICKS_MAX.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_UNDER_VM_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX.store(0, Ordering::Relaxed);
+        FILEMAP_RETRY_WAIT_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_RETRY_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FILEMAP_RETRY_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        FILEMAP_REVALIDATE_RETRY.store(0, Ordering::Relaxed);
+        FILEMAP_REVALIDATE_VMA_CHANGED.store(0, Ordering::Relaxed);
+        FILEMAP_REVALIDATE_EOF_CHANGED.store(0, Ordering::Relaxed);
 
         // ── TLB flush cycles ──
         TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
@@ -1657,6 +2181,89 @@ mod enabled {
         EXECVE_INTERP_TICKS.store(0, Ordering::Relaxed);
         EXECVE_STACK_TABLES_TICKS.store(0, Ordering::Relaxed);
         EXECVE_TEARDOWN_TICKS.store(0, Ordering::Relaxed);
+        EXEC_DIRECT_COUNT.store(0, Ordering::Relaxed);
+        EXEC_FALLBACK_COUNT.store(0, Ordering::Relaxed);
+        EXEC_DIRECT_ENOSYS_COUNT.store(0, Ordering::Relaxed);
+        VM_READ_LOCK_CALLS.store(0, Ordering::Relaxed);
+        VM_READ_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VM_READ_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        VM_READ_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VM_READ_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        VM_WRITE_LOCK_CALLS.store(0, Ordering::Relaxed);
+        VM_WRITE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VM_WRITE_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        VM_WRITE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VM_WRITE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX.store(0, Ordering::Relaxed);
+        TASK_SWITCH_SAME_MM.store(0, Ordering::Relaxed);
+        TASK_SWITCH_DIFFERENT_MM.store(0, Ordering::Relaxed);
+        TASK_SWITCH_TO_KERNEL_ONLY.store(0, Ordering::Relaxed);
+        TASK_SWITCH_IDLE_NO_NEXT.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_RESERVE_CHECK_CALLS.store(0, Ordering::Relaxed);
+        FRAME_RESERVE_CHECK_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_RESERVE_OOM_CALLS.store(0, Ordering::Relaxed);
+        FRAME_ALLOC_SOURCE_FRESH.store(0, Ordering::Relaxed);
+        FRAME_ALLOC_SOURCE_RECYCLED.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_ZERO_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_CONTIG_PAGES.store(0, Ordering::Relaxed);
+        HEAP_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_SLAB_ALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_DIRECT_BUDDY_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_8_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_16_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_32_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_64_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_128_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_256_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_512_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_1024_CALLS.store(0, Ordering::Relaxed);
+        HEAP_CLASS_2048_CALLS.store(0, Ordering::Relaxed);
+        HEAP_LARGE_CALLS.store(0, Ordering::Relaxed);
+        MM_ACTIVATE_CALLS.store(0, Ordering::Relaxed);
+        MM_ACTIVATE_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        MM_DEACTIVATE_CALLS.store(0, Ordering::Relaxed);
+        MM_DEACTIVATE_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        MM_SAME_ALREADY_ACTIVE.store(0, Ordering::Relaxed);
+        MM_GENERATION_CATCHUP.store(0, Ordering::Relaxed);
+        MM_ASID_ROLLOVER.store(0, Ordering::Relaxed);
+        WAKE_LOCAL.store(0, Ordering::Relaxed);
+        WAKE_REMOTE.store(0, Ordering::Relaxed);
+        WAKE_KEEP_LAST_CPU.store(0, Ordering::Relaxed);
+        WAKE_SELECT_IDLE_CPU.store(0, Ordering::Relaxed);
+        WAKE_SELECT_LEAST_LOADED.store(0, Ordering::Relaxed);
+        WAKE_TO_RUN_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        WAKE_TO_RUN_TICKS_MAX.store(0, Ordering::Relaxed);
+        TASK_RUN_SLICE_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        STEAL_ATTEMPTS.store(0, Ordering::Relaxed);
+        STEAL_CANDIDATE_FOUND.store(0, Ordering::Relaxed);
+        STEAL_SUCCESS.store(0, Ordering::Relaxed);
+        STEAL_RECHECK_FAILED.store(0, Ordering::Relaxed);
+        STEAL_KTLB_SYNC_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        STEAL_KTLB_SYNC_TICKS_MAX.store(0, Ordering::Relaxed);
+        EXEC_PTLOAD_SEGMENTS.store(0, Ordering::Relaxed);
+        EXEC_PTLOAD_PAGES.store(0, Ordering::Relaxed);
+        EXEC_PTLOAD_FILE_BYTES.store(0, Ordering::Relaxed);
+        EXEC_PREFETCH_TICKS.store(0, Ordering::Relaxed);
+        EXEC_TARGET_ALLOC_TICKS.store(0, Ordering::Relaxed);
+        EXEC_TARGET_ZERO_TICKS.store(0, Ordering::Relaxed);
+        EXEC_PAGECACHE_COPY_TICKS.store(0, Ordering::Relaxed);
+        EXEC_FALLBACK_KMAP_WAIT_TICKS.store(0, Ordering::Relaxed);
     }
 
     /// Print accumulated timing stats, then reset.
@@ -2336,6 +2943,271 @@ pub fn record_tlb_activate_cycles(_cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn perf_snapshot(_reason: &str) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_vm_read_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_vm_write_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_vm_flush_outside_lock(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_task_switch_to_kernel_only() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_task_switch_idle_no_next() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_mm_activate(_ticks: usize, _generation_catchup: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_mm_deactivate(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_mm_same_already_active() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_mm_asid_rollover() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_task_switch_mm(_same_mm: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_direct() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_fallback() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_direct_enosys() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_read_fault() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_private_fault() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_shared_write_fault() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_ready_hit() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_not_ready_retry() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_backend_read(_ticks: usize, _under_vm: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_retry_wait(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_revalidate_retry(_vma_changed: bool, _eof_changed: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_global_alloc_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_global_free_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_reserve_check(_ticks: usize, _oom: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_alloc_source(_recycled: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_contig_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_contig_page(_zero_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc_path(_class_bytes: Option<usize>) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wake_local() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wake_remote() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wake_selection(_keep_last: bool, _idle: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_wake_to_run(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_task_run_slice(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_attempt() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_candidate() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_success() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_recheck_failed() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_ktlb_sync(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_ptload(_segments: usize, _pages: usize, _file_bytes: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_phase(_counter: &core::sync::atomic::AtomicUsize, _ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_exec_fallback_kmap_wait(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_PREFETCH_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_TARGET_ALLOC_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_TARGET_ZERO_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_PAGECACHE_COPY_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+macro_rules! perf_stub_counter {
+    ($name:ident) => {
+        #[cfg(not(feature = "perf_stats"))]
+        pub static $name: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+    };
+}
+perf_stub_counter!(VM_READ_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(VM_READ_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(VM_WRITE_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(VM_WRITE_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX);
+perf_stub_counter!(TASK_SWITCH_TO_KERNEL_ONLY);
+perf_stub_counter!(TASK_SWITCH_IDLE_NO_NEXT);
+perf_stub_counter!(FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(FRAME_RESERVE_CHECK_CALLS);
+perf_stub_counter!(FRAME_RESERVE_CHECK_TICKS_TOTAL);
+perf_stub_counter!(FRAME_RESERVE_OOM_CALLS);
+perf_stub_counter!(FRAME_ALLOC_SOURCE_FRESH);
+perf_stub_counter!(FRAME_ALLOC_SOURCE_RECYCLED);
+perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(FRAME_CONTIG_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(FRAME_CONTIG_ZERO_TICKS_TOTAL);
+perf_stub_counter!(FRAME_CONTIG_PAGES);
+perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_MAX);
+perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(HEAP_SLAB_ALLOC_CALLS);
+perf_stub_counter!(HEAP_DIRECT_BUDDY_CALLS);
+perf_stub_counter!(HEAP_CLASS_8_CALLS);
+perf_stub_counter!(HEAP_CLASS_16_CALLS);
+perf_stub_counter!(HEAP_CLASS_32_CALLS);
+perf_stub_counter!(HEAP_CLASS_64_CALLS);
+perf_stub_counter!(HEAP_CLASS_128_CALLS);
+perf_stub_counter!(HEAP_CLASS_256_CALLS);
+perf_stub_counter!(HEAP_CLASS_512_CALLS);
+perf_stub_counter!(HEAP_CLASS_1024_CALLS);
+perf_stub_counter!(HEAP_CLASS_2048_CALLS);
+perf_stub_counter!(HEAP_LARGE_CALLS);
+perf_stub_counter!(MM_ACTIVATE_CALLS);
+perf_stub_counter!(MM_ACTIVATE_TICKS_TOTAL);
+perf_stub_counter!(MM_DEACTIVATE_CALLS);
+perf_stub_counter!(MM_DEACTIVATE_TICKS_TOTAL);
+perf_stub_counter!(MM_SAME_ALREADY_ACTIVE);
+perf_stub_counter!(MM_GENERATION_CATCHUP);
+perf_stub_counter!(MM_ASID_ROLLOVER);
+perf_stub_counter!(WAKE_LOCAL);
+perf_stub_counter!(WAKE_REMOTE);
+perf_stub_counter!(WAKE_KEEP_LAST_CPU);
+perf_stub_counter!(WAKE_SELECT_IDLE_CPU);
+perf_stub_counter!(WAKE_SELECT_LEAST_LOADED);
+perf_stub_counter!(WAKE_TO_RUN_TICKS_TOTAL);
+perf_stub_counter!(WAKE_TO_RUN_TICKS_MAX);
+perf_stub_counter!(TASK_RUN_SLICE_TICKS_TOTAL);
+perf_stub_counter!(STEAL_ATTEMPTS);
+perf_stub_counter!(STEAL_CANDIDATE_FOUND);
+perf_stub_counter!(STEAL_SUCCESS);
+perf_stub_counter!(STEAL_RECHECK_FAILED);
+perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_TOTAL);
+perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_MAX);
+perf_stub_counter!(EXEC_PTLOAD_SEGMENTS);
+perf_stub_counter!(EXEC_PTLOAD_PAGES);
+perf_stub_counter!(EXEC_PTLOAD_FILE_BYTES);
+perf_stub_counter!(EXEC_FALLBACK_KMAP_WAIT_TICKS);
+perf_stub_counter!(FILEMAP_BACKEND_READ_TICKS_MAX);
+perf_stub_counter!(FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL);
+perf_stub_counter!(FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX);
+perf_stub_counter!(FILEMAP_RETRY_WAIT_CALLS);
+perf_stub_counter!(FILEMAP_RETRY_WAIT_TICKS_TOTAL);
+perf_stub_counter!(FILEMAP_RETRY_WAIT_TICKS_MAX);
+perf_stub_counter!(FILEMAP_REVALIDATE_RETRY);
+perf_stub_counter!(FILEMAP_REVALIDATE_VMA_CHANGED);
+perf_stub_counter!(FILEMAP_REVALIDATE_EOF_CHANGED);
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3373,6 +4245,22 @@ pub static FILEMAP_FAULT_TICKS: core::sync::atomic::AtomicUsize = core::sync::at
 pub static FILEMAP_PRIVATE_COPY_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_READ_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_PRIVATE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_READY_HIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_NOT_READY_RETRY: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_BACKEND_READ_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB flush cycle stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -3393,6 +4281,32 @@ pub static EXECVE_INTERP_TICKS: core::sync::atomic::AtomicUsize = core::sync::at
 pub static EXECVE_STACK_TABLES_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_DIRECT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_FALLBACK_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static EXEC_DIRECT_ENOSYS_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// ── Stage 0 VM/MM switch stubs ──
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_READ_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_WRITE_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TASK_SWITCH_SAME_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TASK_SWITCH_DIFFERENT_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 // ── PF action names stub ──
 #[cfg(not(feature = "perf_stats"))]

@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-07-16
+last_update: 2026-08-08
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -74,6 +74,7 @@ cat /sys/kernel/stats/features
 | `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
+| `vm` | ro | filemap、VM 锁/TLB、exec 路径和 MM 切换归因 |
 | `blockio` | ro | VirtIO 与 2K1000LA SATA 请求、字节和耗时 |
 | `anon_unmap` | ro | private anonymous VMA 释放次数、页数、精确 retain 扫描步数和耗时 |
 | `net` | ro | poll、RX/TX/drop 与 exec/openat/read/mmap 运行时归因 |
@@ -204,6 +205,46 @@ echo 1 > /sys/kernel/tracing/clear
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
 | `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
 
+#### Stage 0：VM/filemap/exec 归因
+
+阶段 0 的第一批计数器用于回答“时间是在地址空间锁、文件映射后端，还是 exec 路径选择上消耗”的问题。filemap 和 VM
+锁/flush 计数器属于 `memory_io` profile，exec 与 MM 切换计数器属于 `core` profile；只有对应 profile 被选中且
+`stats_on=1` 时才执行原子更新和取时钟，默认竞赛构建仍为编译期 no-op。`filemap_ready_hit` 表示
+`frame_for_filemap_read()` 返回可用 frame，不等同于磁盘缓存命中；后端读计时覆盖 PageCache 的 filemap 读取调用窗口，
+`under_vm` 用于区分该调用是否发生在 AddressSpace 写锁保护范围内。
+
+| 计数器 | 类型 | 含义 |
+|--------|------|------|
+| `filemap_{read,private,shared_write}_fault_calls` | counter | 三类 filemap fault 入口次数 |
+| `filemap_ready_hit` | counter | read fault 获得可用 frame 的次数 |
+| `filemap_not_ready_retry` | counter | PageCache 返回 Retry、需要稍后重试的次数 |
+| `filemap_backend_read_calls` | counter | filemap 调用 PageCache 后端读取的次数 |
+| `filemap_backend_read_ticks_total` | counter | 上述 PageCache 读取累计 ticks |
+| `filemap_backend_read_under_vm_calls` | counter | 后端读取发生在 VM 写锁内的次数 |
+| `exec_direct_count` | counter | exec 尝试 direct ELF loader 的次数 |
+| `exec_direct_enosys_count` | counter | direct loader 返回 ENOSYS 的次数 |
+| `exec_fallback_count` | counter | 回退到通用 ELF loader 的次数 |
+| `vm_{read,write}_lock_calls` | counter | AddressSpace 读/写锁成功获取次数 |
+| `vm_{read,write}_lock_wait_ticks_total` | counter | 获取锁前等待累计 ticks |
+| `vm_{read,write}_lock_hold_ticks_total` | counter | 持锁执行操作累计 ticks |
+| `vm_flush_outside_lock_ticks_total` | counter | 释放 VM 写锁后执行 TLB flush 的累计 ticks |
+| `task_switch_{same,different}_mm` | counter | 调度切换中复用/切换地址空间的次数（core profile） |
+
+推荐采样窗口：
+
+```sh
+echo 0 > /sys/kernel/stats/stats_on
+echo memory_io > /sys/kernel/stats/profile
+echo 1 > /sys/kernel/stats/reset
+echo 1 > /sys/kernel/stats/stats_on
+# 运行一个明确边界的 mmap/exec/filemap workload
+echo 0 > /sys/kernel/stats/stats_on
+cat /sys/kernel/stats/vm
+```
+
+如果同时需要 `task_switch_same_mm/different_mm` 或 exec 路径计数，应在另一个窗口选择 `core`（或仅在接口排障时使用
+`all`），避免把两个 profile 的原子开销混入同一次正式基线。
+
 #### anonymous private VMA release
 
 `anon_unmap` 只在 `memory_io` profile 下记录 anonymous + private VMA；file/shared mapping
@@ -263,6 +304,21 @@ echo 1 > /sys/kernel/tracing/clear
 
 ## Initproc 集成
 
+### 阶段 0 扩展字段
+
+阶段 0 的采样 hook 已扩展到以下低扰动归因域：
+
+- VM 锁等待/持锁最大值、MM activate/deactivate、generation 追赶和 ASID rollover；
+- filemap retry wait、后端读最大值及 VM 锁内读耗时；
+- 帧分配器全局锁、reserve/OOM、fresh/recycled 来源和 contiguous 页初始化；
+- 堆锁等待/持锁、slab class 与 buddy 分配路径；
+- 唤醒本地/远程、保持最近 CPU、空闲 CPU 选择、wake-to-run 和运行片段；
+- work stealing 尝试、候选、成功、复核失败及 kernel-TLB 同步；
+- ELF PT_LOAD 段/页/文件字节、prefetch、目标页分配/清零、PageCache copy 和 fallback kmap 等阶段。
+
+这些字段只通过 `/sys/kernel/stats/taskq` 与 `/sys/kernel/stats/vm` 读取，仍受 `stats_on` 和 profile
+门禁控制；默认构建下对应 hook 为 no-op，不向串口输出逐事件日志。
+
 在 `os_test.conf` 中设置 `diag=1`，每组测试每个 libc 完成时自动打印 stats：
 
 ```ini
@@ -313,7 +369,10 @@ perf_diag feature 关闭时（默认构建）：
 | `os/src/task/perf.rs` | profile-aware AtomicUsize 计数器、时钟门禁与 record 函数 |
 | `os/src/task/manager.rs` | 调度 + 计时器插桩点 |
 | `os/src/task/processor.rs` | 调度循环队列快照 |
+| `os/src/mm/address_space.rs` | AddressSpace 锁等待/持锁与锁外 TLB flush 计时 |
+| `os/src/mm/filemap.rs` | filemap fault 类型、PageCache 重试和后端读归因 |
 | `os/src/syscall/mod.rs` | Syscall 入口/出口计时 |
+| `os/src/syscall/process/exec.rs` | direct ELF loader 与 fallback 路径计数 |
 | `os/src/hal/arch/*/trap/mod.rs` | Trap enter 计时 |
 | `os/src/trace.rs` | Ring buffer + tracing_on/dropped 运行时控制 |
 | `os/src/fs/sysfs/mod.rs` | sysfs 写支持（write_fn + write_at + resize） |
