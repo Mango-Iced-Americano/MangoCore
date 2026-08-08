@@ -805,6 +805,16 @@ impl MountFSInode {
         }
     }
 
+    /// 若 inode 是挂载点，返回穿透到被挂载文件系统根的 MountFSInode；
+    /// 否则原样返回该 inode。chroot/pivot_root 需要被挂载根而非被覆盖的目录。
+    pub(crate) fn overlay_if_mountpoint(inode: &Arc<dyn IndexNode>) -> Arc<dyn IndexNode> {
+        if let Some(mnt) = inode.as_any_ref().downcast_ref::<MountFSInode>() {
+            MountFSInode::overlaid_inode(mnt.self_arc())
+        } else {
+            inode.clone()
+        }
+    }
+
     /// 检查挂载是否可写
     fn ensure_mount_writable(&self) -> Result<(), SyscallErr> {
         if self.mount_fs.mount_flags.load(Ordering::Acquire) & MountFlags::RDONLY.bits() != 0 {
@@ -866,7 +876,7 @@ impl MountFSInode {
     ///
     /// 如果在当前 inode 的子挂载表中找到了匹配的 inode_id，
     /// 返回子文件系统的根 inode。限制穿透深度防止 mount tree 环路。
-    fn overlaid_inode(self_inode: Arc<MountFSInode>) -> Arc<MountFSInode> {
+    pub(crate) fn overlaid_inode(self_inode: Arc<MountFSInode>) -> Arc<MountFSInode> {
         const MAX_OVERLAY: u32 = 32;
         let mut current = self_inode;
         for _ in 0..MAX_OVERLAY {

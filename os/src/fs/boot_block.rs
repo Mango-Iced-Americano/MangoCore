@@ -152,9 +152,35 @@ fn boot_descriptors() -> Vec<BlockDeviceDescriptor> {
     let raw_devices = descriptors.clone();
 
     for raw_device in raw_devices {
-        let parts = match probe_mbr(raw_device.device()) {
-            Ok(MbrProbe::Partitions(parts)) => parts,
-            Ok(MbrProbe::NoMbr | MbrProbe::Unsupported) | Err(_) => continue,
+        let probe_result = probe_mbr(raw_device.device());
+        let parts = match probe_result {
+            Ok(MbrProbe::Partitions(ref parts)) => {
+                println!(
+                    "[mbr] {} probe: {} partitions",
+                    raw_device.node().name().as_str(),
+                    parts.len()
+                );
+                parts.clone()
+            }
+            Ok(MbrProbe::NoMbr) => {
+                println!("[mbr] {} probe: NoMbr", raw_device.node().name().as_str());
+                continue;
+            }
+            Ok(MbrProbe::Unsupported) => {
+                println!(
+                    "[mbr] {} probe: Unsupported",
+                    raw_device.node().name().as_str()
+                );
+                continue;
+            }
+            Err(e) => {
+                println!(
+                    "[mbr] {} probe: Err {:?}",
+                    raw_device.node().name().as_str(),
+                    e
+                );
+                continue;
+            }
         };
         for part in parts {
             let Some(number) = allocator.allocate(raw_device.node().number().major()) else {
@@ -213,10 +239,29 @@ pub fn mount_boot_block_devices(config: &crate::bootargs::BootConfig) {
             }
         }
     } else {
-        match crate::drivers::block::get_block_device(0) {
+        // 优先挂载 GPT/MBR 分区（如 mmcblk0p1），裸设备 block 0 是分区表头无法探测；
+        // 无分区时回退到裸设备（整盘 ext4 场景）。
+        let all = crate::drivers::block::block_devices();
+        let raw_name = all
+            .first()
+            .map(|d| alloc::string::String::from(d.node().name().as_str()))
+            .unwrap_or_default();
+        let first_part = resolve_block_device(&partition_name(&raw_name, 1))
+            .or_else(|| resolve_block_device(&partition_name(&raw_name, 0)));
+        let root_device = match first_part {
+            Some(part) => {
+                println!(
+                    "[kernel] mounting first partition of {} instead of raw device",
+                    raw_name
+                );
+                Some(part)
+            }
+            None => crate::drivers::block::get_block_device(0),
+        };
+        match root_device {
             Some(device) => {
                 if super::mount_block_fs(&root, &device, "sdcard", "root device").is_none() {
-                    println!("[initramfs] first raw block device mount failed");
+                    println!("[initramfs] root device mount failed");
                 }
             }
             None => println!("[initramfs] no raw block device found"),

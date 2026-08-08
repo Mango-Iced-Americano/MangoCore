@@ -319,6 +319,10 @@ pub fn mount_block_fs(
         .metadata()
         .expect("mount_inode metadata failed")
         .inode_id;
+    println!(
+        "[kernel] mount_block_fs {} at {} inode_id={}",
+        label, mount_point, inode_id
+    );
 
     let mount_path = if mount_point.starts_with('/') {
         alloc::string::String::from(mount_point)
