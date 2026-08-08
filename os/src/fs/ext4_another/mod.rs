@@ -9,6 +9,4 @@ mod mutations;
 mod namespace;
 mod page_cache;
 
-pub(crate) use fs::sync_all_instances;
-pub(crate) use fs::shutdown_all_instances;
 pub use fs::Ext4FileSystem;

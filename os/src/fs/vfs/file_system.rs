@@ -138,12 +138,12 @@ pub trait FileSystem: Any + Send + Sync + Debug {
 
     /// Persist dirty data and metadata belonging to this filesystem instance.
     ///
-    /// The fallback preserves the historical global PageCache behavior for
-    /// filesystems that do not yet keep an instance-local cache registry.
-    /// Persistent backends should override this method so `syncfs(2)` does
-    /// not flush unrelated mounts.
+    /// Memory-only filesystems need no durability work. Persistent backends
+    /// must override this method; backends that do not yet keep an
+    /// instance-local cache registry may explicitly use the global PageCache
+    /// compatibility path in their implementation.
     fn sync(&self) -> Result<(), SyscallErr> {
-        crate::fs::page_cache::flush_all_page_caches()
+        Ok(())
     }
 
     /// 卸载后回调。
@@ -152,7 +152,7 @@ pub trait FileSystem: Any + Send + Sync + Debug {
     /// `Ok(())`。返回错误时，VFS 会保留后端的 `Dying` 状态并在后续
     /// drain 中重试，避免将尚未完全卸载的文件系统误标为 `Dead`。
     fn on_umount(&self) -> Result<(), SyscallErr> {
-        Ok(())
+        self.sync()
     }
 
     /// 转换为 Any 引用（用于向下转型）

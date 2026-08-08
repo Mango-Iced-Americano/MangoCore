@@ -656,12 +656,47 @@ pub fn drain_one_dying_lifecycle() -> bool {
     }
 }
 
+/// Persist every registered filesystem backend without holding the lifecycle
+/// registry lock across filesystem or block I/O.
+///
+/// All backends are attempted even after an error. This matches the global
+/// `sync(2)` scope while preserving the first error for diagnostics; the
+/// syscall itself still returns success according to Linux semantics.
+pub fn sync_all_backends() -> Result<(), SyscallErr> {
+    let filesystems: alloc::vec::Vec<_> = LIFECYCLE_REGISTRY
+        .lock()
+        .iter()
+        .filter(|lifecycle| lifecycle.state() != LC_STATE_DEAD)
+        .map(|lifecycle| lifecycle.fs.clone())
+        .collect();
+    let mut first_error = None;
+
+    for fs in filesystems {
+        if let Err(error) = fs.sync() {
+            log::error!(
+                "filesystem backend sync failed for {}: {:?}; continuing other backends",
+                fs.name(),
+                error
+            );
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Commit and detach every registered filesystem backend before an orderly
 /// machine shutdown.
 ///
-/// PageCache writeback must run before this function.  The registry lock is
-/// released before any backend I/O, and all backends are attempted even if
-/// one fails so independent filesystems still get a durability boundary.
+/// Each backend's `on_umount()` owns its complete data/metadata sync and
+/// teardown order. The registry lock is released before any backend I/O, and
+/// all backends are attempted even if one fails so independent filesystems
+/// still get a durability boundary.
 pub fn shutdown_all_backends() -> Result<(), SyscallErr> {
     let lifecycles: alloc::vec::Vec<_> = LIFECYCLE_REGISTRY
         .lock()

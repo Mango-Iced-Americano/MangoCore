@@ -9,6 +9,7 @@ use super::layout::BPB;
 use super::{BlockDevice, DiskInodeType, Fat};
 use crate::fs::vfs::file_system::{FileSystem, FsInfo, SuperBlock};
 use crate::fs::vfs::IndexNode;
+use crate::utils::error::SyscallErr;
 use alloc::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -229,6 +230,14 @@ impl FileSystem for EasyFileSystem {
             flags: 0,
             f_spare: [0; 4],
         }
+    }
+
+    fn sync(&self) -> Result<(), SyscallErr> {
+        // FAT does not yet keep an instance-local PageCache registry. Keep
+        // the historical compatibility barrier here instead of in VFS or the
+        // syscall layer, so the ownership is explicit and can be narrowed
+        // when FAT gains such a registry.
+        crate::fs::page_cache::flush_all_page_caches()
     }
 
     fn as_any_ref(&self) -> &dyn Any {

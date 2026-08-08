@@ -236,11 +236,13 @@ pub trait FileSystem: Any + Send + Sync + Debug {
 `root_inode` 是路径解析的起点。`info` 返回 FsInfo（块设备 ID / 最大文件名长度 / 特性列表）。`super_block` 和 `statfs` 提供 statfs 系统调用所需信息。
 
 `sync()` 是文件系统实例级持久化入口。`syncfs(2)` 只负责从 fd 解析所属
-`FileSystem` 并调用该接口，不在 syscall 层识别具体后端。持久化后端应覆盖默认实现，
-使用自己的 PageCache registry、journal 和块设备 flush 顺序；尚未提供实例级 registry
-的后端暂时回退到全局 PageCache flush，以保持原有兼容语义。
+`FileSystem` 并调用该接口，不在 syscall 层识别具体后端；`sync(2)` 则快照
+`BackendLifecycle` registry 后逐实例调用，同样不枚举具体文件系统类型。持久化后端应
+覆盖默认 no-op，使用自己的 PageCache registry、journal 和块设备 flush 顺序。FAT32
+尚无实例级 PageCache registry，因此在 FAT 后端内部显式保留全局 flush 兼容路径。
 
-`on_umount()` 是可失败的 teardown 事务：具体后端只有在数据/元数据写回、journal/cache
+`on_umount()` 是可失败的 teardown 事务，默认委托 `sync()`；需要停止 journal、C cache
+或注销设备的后端覆盖完整流程。具体后端只有在数据/元数据写回、journal/cache
 停止和 C/设备注册表脱钩全部成功后才返回 `Ok(())`。`BackendLifecycle` 使用
 `Active -> Dying -> Dead` 状态机；最后一个 MountFS 引用消失后进入 Dying，调度器在不持
 registry 锁时调用回调。失败时仍保持 Dying 并重新入队，不能把半卸载后端标成 Dead。
