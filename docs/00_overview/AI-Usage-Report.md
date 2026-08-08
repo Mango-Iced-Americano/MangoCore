@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-01
+> Coverage: 2026-04-01 to 2026-08-08
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -47,6 +47,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | VisionFive 2 watchdog reboot | 2026-08-01 | Oracle, GPT-5.6-terra | OpenSBI SRST 固件依赖审查、JH7110 reset 序列与 QEMU 回归验证 | Oracle 定位 U-Boot 关闭 I2C5 后 OpenSBI PMIC cold reboot 会永久挂起；实现内核直接 watchdog reset，保留 QEMU shutdown |
 | another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |
 | another_ext4 close 持久化语义 ktest | 2026-08-01 | Oracle, GPT-5.6-terra | close 不作为 durability barrier 的掉电重启、fsync/global-sync 与 clean-unmount 用例设计 | Oracle 约束可判定边界：close 后不观察 raw 介质；仅 fsync/sync/on_umount 后要求 raw remount；双架构 74/74 ktest 通过 |
+| buildstorm rustc Unix stream 永久等待 | 2026-08-08 | GPT-5.6-terra | QEMU task/futex 快照、Unix stream 生命周期审查、最小关闭传播修复与双架构验证 | 将 rustc 的 `recvfrom` 阻塞、zombie cc 子进程和主线程 futex join 关联到 Drop 未传播 EOF/HUP；修复后 minibuild cargo build 在 8 秒内完成 |
 
 ## 4. 详细使用场景
 
@@ -280,6 +281,15 @@ Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 - Human action: 审核最小 diff、确认 RED（`size=27262976`）与 GREEN（5/5 + 26 MiB 逐字节 round-trip）证据、跑双架构 build 与 L4 regression。
 - Verification: RED→GREEN ktest（`ext4_another_lifetime` 5/5）、page_cache 12/12、ext4_another 20/20、RV64→LA64 serial kernel build、L4 regression 22 passed/0 failed/1 skipped。
 
+### Case 13: buildstorm rustc Unix stream 永久等待
+
+- Evidence: `docs/Work_Log/2026-08-08.md`、`docs/Work_Log/evidence/2026-08-08/buildstorm-wait-args-qemu.log`、`buildstorm-fixed-qemu.log`。
+- AI tools: GPT-5.6-terra。
+- Problem: buildstorm 的最小 `cargo build` 长期停在 `Building 0/1`；rustc 主线程等待 worker，worker 则阻塞在 Unix stream `recvfrom()`。
+- AI contribution: 将同一 QEMU 快照中的 rustc worker `recvfrom(fd=11)`、主线程针对 worker `clear_child_tid` 的 futex wait 与 zombie `/usr/bin/cc` 子进程关联，并把检查范围收敛为 Unix stream fd Drop 是否向对端传播关闭。
+- Human action: 审核并采用最小修复：Drop 标记交叉 RingBuffer 的发送/接收关闭状态，并唤醒对端读写等待队列；临时 task/futex 诊断插桩在确认后全部删除。
+- Verification: 修复后 minibuild `cargo build` 在 QEMU 中从 16.00s 到 24.00s 完成并进入 STEP5；Docker 中 RV64→LA64 serial kernel build、RV64 ktest 98/98 和 L4 regression 22 passed/0 failed/1 skipped 均通过。后续 Step6 的独立 rustc `Bad address` panic 未归因于此修复。
+
 ## 6. 质量控制与验证方式
 
 AI 输出进入项目之前，采用以下质量控制流程：
@@ -319,6 +329,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-08-01 | 工作树（未提交） | another_ext4 close 持久化语义 | Oracle 掉电重启测试方案；`docs/Work_Log/2026-08-01.md` | Docker 双架构 build、lint、ktest 74/74；证据保留 raw-remount 与 clean-RECOVER 检查 |
 | 2026-08-03 | `c628ac0d` | PageCache miss-run staging | `Root cause identified by Oracle analysis` | 分批 ≤256 页修复 miss-run 无界 staging；RED `size=27262976` → GREEN |
 | 2026-08-03 | `d2e92bae` | PageCache ktest regression | `Co-authored-by: Sisyphus-Junior` | 新增 large-miss-run OOM 复现 ktest，5/5 PASS |
+| 2026-08-08 | 工作树（未提交） | buildstorm Unix stream close propagation | GPT-5.6-terra；`docs/Work_Log/2026-08-08.md` | QEMU minibuild 从永久 `Building 0/1` 恢复到 8 秒完成；双架构 build、RV64 ktest/regression 通过 |
 
 ## 8. Work_Log 证据表
 
@@ -341,6 +352,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*` | read_at_user 多页回归 | 记录 Oracle 的 O(pages × segments) 根因、部分回退/顺序 cursor 方案、原始 +16% 纠正和受控 5+5 验证 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/power-cut-ktest-20260801T000000Z/` | another_ext4 close 持久化语义 | 记录 Oracle 对 close 非 durability barrier、fsync/global sync 可判定持久化、journal replay 和 clean RECOVER 检查的边界约束 |
 | `docs/Work_Log/2026-08-03.md`、`docs/Work_Log/evidence/2026-08-03/red-ktest-missrun-oom-qemu-output.log`、`docs/Work_Log/evidence/2026-08-03/green-ktest-missrun-oom-qemu-output.log`、`docs/Work_Log/evidence/2026-08-03/green-regression-rv64-qemu-output.log` | PageCache miss-run staging 无界堆分配 | 记录 Oracle 根因、RED（`size=27262976`）→ GREEN（5/5 + 26 MiB round-trip）复现、分批 ≤256 页修复、双架构 build 与 L4 regression 22/22+1skipped |
+| `docs/Work_Log/2026-08-08.md`、`docs/Work_Log/evidence/2026-08-08/buildstorm-wait-args-qemu.log`、`docs/Work_Log/evidence/2026-08-08/buildstorm-fixed-qemu.log` | buildstorm Unix stream 永久等待 | 记录 GPT-5.6-terra 的 QEMU task/futex 关联分析、Drop 关闭传播修复、minibuild cargo build 恢复和 RV64/LA64 验证 |
 
 ## 9. 交互记录与留痕方式
 

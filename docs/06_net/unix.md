@@ -4,7 +4,7 @@ module: net/socket/unix
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: 2026-06-29
+last_updated: 2026-08-08
 code_paths:
   - "os/src/net/socket/unix/"
 entry_points:
@@ -112,6 +112,12 @@ pub enum UnixEndpoint {
 
 两个方向各有一个独立的 `RingBuffer<u8>`，通过 `Arc<Mutex<>>` 共享。`side_a.peer_rx == side_b.rx`，形成交叉引用。
 
+### 对端进程退出与 Drop
+
+进程关闭最后一个 Unix stream fd 时，`UnixStreamSocket::Drop` 必须把关闭状态传播到交叉的两个 RingBuffer：对端接收缓冲区标记发送端已关闭，本端接收缓冲区标记接收端已关闭。随后通知对端的读、写等待队列。这样，等待 `recvfrom()` 的任务会在已缓冲的数据耗尽后观察到 EOF；等待发送的任务也会重新检查接收端关闭状态，而不是永久睡眠。
+
+该路径与显式 `shutdown()` 的方向性语义一致，但由最后一个 fd 的 RAII Drop 触发。Drop 只负责端点关闭和命名空间清理，不保留对端资源的强引用。
+
 ### Listener
 
 监听状态。由 Init bind 后调用 listen 进入。持有 `local_addr`、`backlog` 和 `incoming` 连接队列。backlog 固定为 16。当对端发起 connect 时，`Connected` 对象被推入 incoming 队列，等待 accept 取出。
@@ -175,6 +181,7 @@ pub fn make_unix_socket_pair(
 | Unix bind / listen / accept | `sys_bind` / `sys_listen` / `sys_accept4` | `socketpair01` | pass |
 | SO_PEERCRED | `sys_getsockopt` | `unix_peercred01` | partial |
 | Unix shutdown | `sys_shutdown` | `unix_shutdown01` | pass |
+| 对端进程退出后的 EOF/唤醒 | fd Drop | buildstorm rustc QEMU 回归 | pass（minibuild cargo build） |
 | O_NONBLOCK Unix I/O | `sys_read` / `sys_write` | `unix_nonblock01` | pass |
 | Unix abstract namespace | `sys_bind` (abstract) | `unix_abstract01` | pass |
 

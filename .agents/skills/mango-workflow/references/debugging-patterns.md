@@ -685,3 +685,27 @@
 - **修复**: `run_group_chrooted()`：子进程先 `vf2_mounts::bind_pseudo_filesystems_in(root)`（/proc,/sys,/dev,/dev/shm,/run,/tmp 绑进新根，保证 /sys/kernel/stats 等仍在），再 `chroot(root)` + `chdir(work_dir)`，然后 exec 脚本；父侧 wait/timeout/kill pgid 与 `run_group_in_dir` 完全一致。
 - **教训**: 任何依赖 SD 根 Debian 用户态（rust 工具链/tgoskits/cargo cache）的测试组脚本必须 chroot 进 SD 根执行，chdir 不够；bind pseudo-fs 必须在 chroot 之前完成。QEMU 无 SD 用户态时该组 exit 126 属预期。
 - **相关文件**: `user/src/bin/test_runner/groups/execute.rs`、`user/src/bin/test_runner/vf2_mounts.rs`
+
+## FAT32 扇区号与 BLOCK_SZ 块设备 API 的单位不匹配
+
+- **现象**: ktest 在真实 FAT32 镜像上 create/write 时 panic `FAT inode identity collision for Cluster(2)`（新文件被分到根目录簇 2）。仅读、不写的实板场景不暴露此 bug。
+- **根因**: `BlockDevice::read_block/write_block` 以 BLOCK_SZ(4096) 字节为单位编址，FAT32 内部（FAT 表、簇数据）却以 BPB_BytsPerSec(512) 扇区为单位。`bitmap.rs` 把 512B 扇区号 + 512B buffer 直接传给 4096B API：`validate_block_buffer_length` 失败，Result 又被 `;` 静默丢弃 → FAT 表读到全零 → 分配器误判 cluster 2 空闲。数据路径 `FatPageCacheBackend` 有换算，FAT 表路径漏了。
+- **修复**: 在每个 FAT 访问点做扇区→父块换算：`block_id = sector / (BLOCK_SZ/byts_per_sec)`、`block_off = (sector % 每块扇区数) * byts_per_sec`，整块(4096)读入切片；写用 read-modify-write。见 `os/src/fs/fat32/bitmap.rs::sector_to_parent/read_fat_sector/write_fat_sector`。
+- **教训**: 引入新的 BlockDevice 访问点时，先确认调用方扇区单位与 API 块单位一致；静默丢弃 `read_block` 的 `Result` 会把设备拒绝伪装成"读到了全零"。若挂载路径依赖 `BlockSizeAdapter`（`buf.len()==child_size` 精确契约），同时改数据路径会导致双换算；本项目 VFS Phase 5 后改用各访问点内联换算。
+- **相关文件**: `os/src/fs/fat32/bitmap.rs`、`os/src/fs/page_cache.rs::FatPageCacheBackend`
+
+## exec 大动态 ELF 静默 exit 127：PageCache 批量读超 256 页上限 → EFBIG → EIO
+
+- **现象**: chroot 到 SD 根后 exec `/bin/bash ./script.sh`，脚本未执行任何一行（其首行 echo 不二次出现），进程静默 exit 127，无任何 bash/stderr 输出；但同 cwd 下 `open("./script.sh")` 返回有效 fd。
+- **根因**: 零拷贝 ELF loader `prefetch_load_pages`（os/src/mm/address_space.rs）把首个 PT_LOAD 的全部连续缺页一次交给 `PageCache::sync_batch_read_pages`；后者把连续 run **不分片**地传给 ext4 后端 `read_pages`，而该后端硬性要求 `pages.len() <= MAX_BATCH_PAGES(256)`（超限返回 EFBIG，防内核堆 staging Vec 超大分配）。bash 首个 PT_LOAD 为 1091440B=267 页 → EFBIG → `prefetch_load_pages` 统一映射为 EIO(-5) → `load_elf_direct` 失败 → `exec_opened_file` 调 `exit_current_and_run_next(127)`，**内核在用户态任何代码运行前直接杀进程**，故无返回、无诊断、无 stderr。
+- **修复**: 在 `sync_batch_read_pages` 的 run 收集循环按 `MAX_BATCH_PAGES=256` 分片（与 `fill_miss_runs` 的既有契约一致），或在 `prefetch_load_pages` 内把区间切成 ≤256 页子批。**不要**放宽后端 256 上限。
+- **教训**: (1) exec 失败静默 127 的排查入口是 `exec_opened_file` 的 `exit_current_and_run_next(127)` —— 内核直接杀进程，exec 不返回，别只查用户态；(2) 批处理读/写路径都有 256 页上限约定，调用方必须分片；(3) 多个不同大小动态 ELF 正常而大文件失败时，先怀疑批量读边界（filesz/4096 的页数是否恰超 256）。
+- **相关文件**: `os/src/fs/page_cache.rs::sync_batch_read_pages/fill_miss_runs`、`os/src/fs/ext4_another/page_cache.rs::read_pages`、`os/src/mm/address_space.rs::prefetch_load_pages`、`os/src/syscall/process/exec.rs::exec_opened_file`
+
+## 小容量 FAT32（<65536 扇区）挂载失败：total_sectors_16 与探测条件
+
+- **现象**: 512KB FAT32 镜像（`mkfs.fat -F 32 -C img 512`，`file` 报 FAT(32 bit)）挂载失败；探测打印 `[fs] no filesystem found`。用 64MiB 大卷才正常。
+- **根因**: mkfs.fat 对 <65536 扇区的卷把总扇区数写进 BPB `total_sectors_16`（offset 19），`total_sectors_32`（offset 32）置 0。内核探测 `filesystem.rs::fat32_sector_size` 要求 `total_sectors_32 != 0`，小卷探测失败。`layout.rs::BPB::data_sector_count()` 也只读 `tot_sec32`，即便探测通过数据扇区数也会算错。
+- **修复**: 探测条件改为 `(total_sectors_16 != 0 || total_sectors_32 != 0)`，仍保留 FAT32 签名检查（root_entry_count==0、fat_size_16==0、fat_size_32!=0、root_cluster>=2）。`BPB::data_sector_count()`/`is_valid()` 的总量一律 `tot_sec32 != 0 ? tot_sec32 : tot_sec16 as u32`。`is_valid()` 原要求 `tot_sec16==0 && count_of_cluster()>=66625` 对小卷同样误杀，一并放宽。注意 `mkfs.fat -C` 的 `-C` 参数是 **KB**，`-C 65536` 实际生成 64MiB。
+- **教训**: FAT BPB 的 `tot_sec16`/`tot_sec32` 是按卷大小二选一填写的（<65536 扇区用 16 位），任何读取总扇区数的地方都必须做 32→16 回退，探测条件和数据扇区计算都不能只信 32 位字段。`fat_type()` 按 cluster 数会把小卷判成 FAT12/16，但若仅探测路径使用则无影响——以探测函数的 FAT32 签名判定为准。
+- **相关文件**: `os/src/fs/filesystem.rs::fat32_sector_size`、`os/src/fs/fat32/layout.rs::BPB::{is_valid,data_sector_count}`、`scripts/build_initramfs.sh`（6a mkfs 参数）

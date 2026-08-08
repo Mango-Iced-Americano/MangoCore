@@ -105,8 +105,18 @@ reset，并轮询 `0x10230078`。随后以 256-bit 模式执行 reseed，轮询 
 返回 0。实现按 256 字节内核临时块生成并写入用户 buffer，返回前清零临时块。
 
 正常平台会在创建首个用户任务前完成播种，因此常规请求不会看到未就绪状态。
-当前未实现 Linux 的“无 `GRND_NONBLOCK` 时等待熵源”路径；平台熵源初始化失败时
-统一 fail closed 为 `EAGAIN`，避免启动永久阻塞或退回弱随机数。
+当前未实现 Linux 的“无 `GRND_NONBLOCK` 时等待熵源”路径。熵源初始化失败时按
+失败类型区分处理：
+
+- `EntropyError::DeviceUnavailable`（平台**完全不存在**熵源，如官方测试用的无
+  virtio-rng QEMU）：`random::init()` 回退到启动期 bootstrap 种子并标记
+  secure-ready，打印 `[kernel] random: no trusted entropy source; using bootstrap
+  fallback (insecure)`。该路径不产生可信熵，仅保证系统在无熵硬件上可启动
+  （buildstorm 的 openssl/libgit2 依赖 getrandom 可用），也不影响实板
+  （jh7110-trng / 2k1000-rng 存在时走正常可信路径）。
+- 其余错误（`DeviceInit`/`DeviceRead`/`ShortRead`，即熵源**存在但故障**）：
+  统一 fail closed 为 `EAGAIN`，避免启动永久阻塞或退回弱随机数；存在但故障的
+  熵源绝不静默降级为 bootstrap。
 
 ### 随机设备
 
@@ -139,13 +149,17 @@ make -f make/la64.mk uimage BOARD=2k1000 BLK_MODE=sata \
 /bin/rng_test
 ```
 
-VisionFive 2 的下一次启动应打印 `random: initialized from jh7110-trng`，不再出现
-`PRNG init warning: Entropy(DeviceUnavailable)`；QEMU 则仍打印 `virtio-rng`。
+VisionFive 2 的下一次启动应打印 `random: initialized from jh7110-trng`；带
+virtio-rng 的 QEMU 打印 `random: initialized from virtio-rng`；不带任何熵源的
+QEMU 打印 `[kernel] random: no trusted entropy source; using bootstrap fallback (insecure)`。
 
 ## 已知边界
 
 - 当前只在启动时采集可信硬件熵，尚未实现按时间或输出量周期性重播种。
 - 健康检查只拒绝明显常量/重复输出，不对熵率作定量估计。
 - `/dev/random` 尚未实现独立的阻塞熵计数模型；它与 `/dev/urandom` 共用 CSPRNG。
+- 无平台熵源（`DeviceUnavailable`）时回退到 bootstrap 种子并标记就绪；该回退输出
+  不含可信熵，仅供无熵硬件（如官方测试用的无 virtio-rng QEMU）保持可启动与
+  getrandom 可用，安全强度等同于 `GRND_INSECURE`。
 - 实现未持久化 VirtIO RNG 队列或 2K1000 RNG 设备状态；运行期重播种需要先补齐
   生命周期、锁顺序和错误恢复设计。

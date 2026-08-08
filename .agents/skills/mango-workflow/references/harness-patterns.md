@@ -342,6 +342,14 @@ diag=1
 
 ## 网络栈
 
+### Unix stream 对端 Drop 必须传播关闭状态并唤醒阻塞 I/O
+
+- **根因**: `UnixStreamSocket::Drop` 只移除命名空间注册，没有标记交叉 RingBuffer 的发送端 EOF/接收端关闭，也没有通知对端读写等待队列。进程退出后，对端可能永久阻塞在 `recvfrom()`；若该读取线程又被父线程 futex join，用户态表现为编译或管道式工作负载永久卡住。
+- **定位**: 在 QEMU 任务快照中同时关联阻塞 `recvfrom` 的 worker、等待其 `clear_child_tid` 的 joiner，以及已 zombie 的子进程。不要因 CPU 停在调度器空闲循环就误判为块 I/O 或 PageCache 性能问题。
+- **修复**: 最后一个 Unix stream fd 的 Drop 必须同时标记对端接收缓冲区的发送关闭和本端接收缓冲区的接收关闭，再唤醒对端读/写等待队列；保持命名空间 cleanup，并避免为对端保存强引用。
+- **验证**: 先保存修改前的 QEMU wait/futex 快照，再验证原先永久停在 `cargo build` 的最小工作负载可完成；最后运行双架构 kernel build、RV64 ktest 和 regression。
+- **相关文件**: `os/src/net/socket/unix/stream/{mod.rs,inner.rs}`、`docs/Work_Log/evidence/2026-08-08/buildstorm-{wait-args,fixed}-qemu.log`
+
 ### WaitQueue 闭包内 poll 导致唤醒丢失（accept 永久阻塞）
 - **根因**: `WaitQueue::wait_until_interruptible()` 的 condition 闭包在队列锁持有时执行；如果在闭包内调用 `NET_INTERFACE.poll()`，轮询路径中 `notify_events_all_if_unlocked` 会因为队列锁已持有而静默丢弃唤醒，导致阻塞的 waiter 永久睡眠。TCP accept() 在闭包内 poll 会错过首个 SYN 连接。
 - **修复**: 

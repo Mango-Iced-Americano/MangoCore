@@ -4,6 +4,12 @@
 //! userspace starts. All consumers share this state, and each request rekeys
 //! the generator with hidden output so later state disclosure cannot recover
 //! bytes returned by earlier requests.
+//!
+//! When NO platform entropy source exists at all (e.g. QEMU without a
+//! virtio-rng device), `init()` falls back to the untrusted bootstrap seed and
+//! marks the stream ready while logging a clear warning, so the system stays
+//! bootable on such hardware — at the cost of not being cryptographically
+//! seeded. A present-but-faulty source still fails closed.
 
 use crate::drivers::rng::{self, EntropyError};
 use lazy_static::lazy_static;
@@ -87,6 +93,36 @@ impl RandomState {
         wipe_sensitive(&mut next_seed);
     }
 
+    /// Reseed from freshly-derived bootstrap material and mark the stream ready.
+    ///
+    /// This is the insecure fallback used only when NO platform entropy source
+    /// exists (e.g. QEMU without a virtio-rng). It is deliberately never used
+    /// when a source is present but faulty, so a broken TRNG cannot silently
+    /// downgrade the system to an insecure state.
+    fn install_bootstrap_fallback(&mut self) {
+        // Re-derive the seed at fallback time rather than reusing the
+        // lazy_static construction-time seed.
+        let mut seed = bootstrap_seed();
+        // Mix in one more low-cost non-deterministic input (current time and a
+        // fresh stack address) to distinguish this reseed from the bootstrap.
+        let mut extra = [0u8; SEED_BYTES];
+        for chunk in extra.chunks_exact_mut(8) {
+            let stack_marker = 0u8;
+            let value = (crate::hal::get_time() as u64)
+                ^ ((&stack_marker as *const u8 as usize) as u64).rotate_left(13);
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+        for (dst, src) in seed.iter_mut().zip(extra.iter()) {
+            *dst ^= *src;
+        }
+
+        self.rng = ChaCha20Rng::from_seed(seed);
+        self.ready = true;
+
+        wipe_sensitive(&mut seed);
+        wipe_sensitive(&mut extra);
+    }
+
     fn mix_untrusted(&mut self, input: &[u8]) {
         if input.is_empty() {
             return;
@@ -116,7 +152,20 @@ pub fn init() -> Result<(), RandomInitError> {
         Ok(source) => source,
         Err(error) => {
             wipe_sensitive(&mut sample);
-            return Err(RandomInitError::Entropy(error));
+            match error {
+                // No entropy source at all (e.g. QEMU without a virtio-rng
+                // device): fall back to the untrusted bootstrap seed so the
+                // system can still boot. A present-but-faulty source takes the
+                // default path below and fails closed.
+                EntropyError::DeviceUnavailable => {
+                    RANDOM_STATE.lock().install_bootstrap_fallback();
+                    println!(
+                        "[kernel] random: no trusted entropy source; using bootstrap fallback (insecure)"
+                    );
+                    return Ok(());
+                }
+                _ => return Err(RandomInitError::Entropy(error)),
+            }
         }
     };
     if !boot_health_check(&sample) {
