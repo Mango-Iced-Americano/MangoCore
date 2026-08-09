@@ -292,6 +292,8 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 self.record_charge(charge);
                 #[cfg(feature = "heap_trace")]
                 crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, charge);
+                #[cfg(feature = "heap_trace")]
+                crate::mm::heap_trace::probe_49152_alloc(layout);
                 return ptr.as_ptr();
             }
 
@@ -311,6 +313,8 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     self.record_charge(charge);
                     #[cfg(feature = "heap_trace")]
                     crate::mm::heap_trace::record_alloc(ptr.as_ptr(), layout, charge);
+                    #[cfg(feature = "heap_trace")]
+                    crate::mm::heap_trace::probe_49152_alloc(layout);
                     return ptr.as_ptr();
                 }
                 Err(_) => {
@@ -340,6 +344,8 @@ unsafe impl GlobalAlloc for KernelAllocator {
 
         #[cfg(feature = "heap_trace")]
         crate::mm::heap_trace::record_dealloc(ptr.as_ptr());
+        #[cfg(feature = "heap_trace")]
+        crate::mm::heap_trace::probe_49152_dealloc(layout);
 
         crate::task::perf::record_heap_dealloc();
         let dealloc_start = memory_perf_time_now();

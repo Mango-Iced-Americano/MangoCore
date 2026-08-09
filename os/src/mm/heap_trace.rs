@@ -4,7 +4,7 @@
 //! Post-processing: `rust-addr2line -e os -f -p 0x8020XXXX` maps PC to source.
 
 use core::alloc::Layout;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // ── constants ───────────────────────────────────────────────────────────────
@@ -585,4 +585,76 @@ fn first_useful_pc(pcs: &[usize; STACK_DEPTH]) -> usize {
         }
     }
     0
+}
+
+// ── targeted 49152/8 probe (temporary diagnostic) ───────────────────────────
+
+/// 临时诊断探针：专门观察 `size=49152, align=8` 的内核堆分配。
+///
+/// 背景：CI 上 `HEAP ALLOCATION FAILED layout: size=49152, align=8`
+/// 在 netperf TCP_CRR / pipe09 场景双架构复现，需要区分：
+///   - "凶手"：某调用点反复分配 49152 却不释放，堆被它耗尽；
+///   - "受害者"：49152 分配本身无辜，只是堆被其它对象泄漏耗尽后
+///     第一个撞上 OOM 的分配。
+/// 判定方式：对比 `PROBE_49152_ALLOCS` 与 `PROBE_49152_DEALLOCS`——
+/// alloc 远大于 dealloc（且随时间单调上涨）=> 该调用点是凶手；
+/// 两者基本平衡 => 是受害者，真正的泄漏在别处（用 dump_oom 的
+/// top_live 站点表找凶手）。
+///
+/// 仅 `heap_trace` feature 下编译（整个模块已按该 feature 门控），
+/// 默认构建完全不含此代码，无性能开销。命中时打印前 N 次调用栈
+/// （RISC-V 通过 frame pointer 捕获；LA64 尚无栈回溯，pcs 为 0），
+/// 并带出 `KERNEL_HEAP_CURRENT_BYTES` 当前堆水位。
+pub static PROBE_49152_ALLOCS: AtomicUsize = AtomicUsize::new(0);
+pub static PROBE_49152_DEALLOCS: AtomicUsize = AtomicUsize::new(0);
+static PROBE_49152_LOGGED: AtomicUsize = AtomicUsize::new(0);
+
+/// 前 N 次命中打印完整调用栈；之后只累加计数，避免刷屏。
+const PROBE_49152_LOG_LIMIT: usize = 5;
+
+const PROBE_49152_SIZE: usize = 49152;
+const PROBE_49152_ALIGN: usize = 8;
+
+#[inline]
+fn is_probe_49152(layout: Layout) -> bool {
+    layout.size() == PROBE_49152_SIZE && layout.align() == PROBE_49152_ALIGN
+}
+
+pub fn probe_49152_alloc(layout: Layout) {
+    if !is_probe_49152(layout) {
+        return;
+    }
+    // 计数始终累加，不受 LOG 级别影响。
+    PROBE_49152_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    if PROBE_49152_LOGGED.fetch_add(1, Ordering::Relaxed) >= PROBE_49152_LOG_LIMIT {
+        return;
+    }
+    // `log_off` 时 `log::error!` 完全展开为空，这里直接不计算，
+    // 避免无用变量告警；诊断构建需用 `LOG=error`（或更高级别）。
+    #[cfg(not(feature = "log_off"))]
+    {
+        let mut pcs = [0usize; STACK_DEPTH];
+        // Safety: 与 capture_stack 文档一致——只在内核栈上下文读 fp/ra。
+        let depth = unsafe { capture_stack(&mut pcs) };
+        let heap_current =
+            super::heap_allocator::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed);
+        let useful = first_useful_pc(&pcs);
+        log::error!(
+            "[heap-probe] 49152 alloc: size={} align={} heap_current={}K allocs={} deallocs={} site={:#x} depth={} pcs={:#018x},{:#018x},{:#018x},{:#018x},{:#018x},{:#018x}",
+            layout.size(),
+            layout.align(),
+            heap_current >> 10,
+            PROBE_49152_ALLOCS.load(Ordering::Relaxed),
+            PROBE_49152_DEALLOCS.load(Ordering::Relaxed),
+            useful,
+            depth,
+            pcs[0], pcs[1], pcs[2], pcs[3], pcs[4], pcs[5],
+        );
+    }
+}
+
+pub fn probe_49152_dealloc(layout: Layout) {
+    if is_probe_49152(layout) {
+        PROBE_49152_DEALLOCS.fetch_add(1, Ordering::Relaxed);
+    }
 }
