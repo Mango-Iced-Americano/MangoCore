@@ -170,7 +170,7 @@ TTY line discipline。环或 TTY 输入空间耗尽时会计数并暂时屏蔽 U
 - **poll**：基于环形缓冲区状态和端对关闭情况计算可读/可写/挂起事件位。
 - **ioctl**：`FIONREAD` 用于读取当前缓冲区中可用字节数。
 
-PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）；满管道扩容后会在释放 ring 锁后唤醒全部写 waiter。被信号或错误中断的 splice 等待若仍有可读数据或可写空间，也会把 reader/writer baton 广播给其余 waiter。资源使用支持原子计数器跟踪。
+PipeRingBuffer 状态机为 FULL / EMPTY / NORMAL。支持 `F_SETPIPE_SZ` 调整容量（需 `CAP_SYS_RESOURCE` 权限，上限 2GB 实际受 64KB 硬限制）；满管道扩容时在 ring 锁内按 FIFO 顺序压平旧环，避免 `FULL` 的 `head == tail` 编码在新容量下误判已用空间，然后在释放 ring 锁后唤醒全部写 waiter。被信号或错误中断的 splice 等待若仍有可读数据或可写空间，也会把 reader/writer baton 广播给其余 waiter。资源使用支持原子计数器跟踪。
 
 **Named FIFO**：通过 `fifo_open` 在全局 `FIFO_REGISTRY` 中以 `(dev_id, inode_id)` 标识建立管道端点。支持 `compact_fifo_registry` 周期回收两端已关闭的陈旧条目。
 

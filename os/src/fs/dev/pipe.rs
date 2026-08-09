@@ -976,6 +976,7 @@ impl PipeRingBuffer {
         if new_capacity > RING_DEFAULT_BUFFER_SIZE {
             return Err(SyscallErr::EINVAL);
         }
+        let old_capacity = self.capacity;
         let used = self.get_used_size();
         if used > new_capacity {
             return Err(SyscallErr::EBUSY);
@@ -987,14 +988,17 @@ impl PipeRingBuffer {
         } else if self.head >= new_capacity || self.tail > new_capacity {
             return Err(SyscallErr::EBUSY);
         }
-        self.capacity = new_capacity;
-        // After capacity increase, a formerly FULL ring may now
-        // have free space and must transition to NORMAL so that
-        // subsequent writes can proceed and blocked writers are
-        // correctly woken by set_pipe_capacity_compat().
-        if self.status == RingBufferStatus::FULL && self.get_free_size() > 0 {
+        if self.status == RingBufferStatus::FULL && used < new_capacity {
+            // 满环以 head == tail 编码。扩容后若只改状态，读取 used 会断言
+            // head != tail；若只改 tail 又会把环绕段解释成未初始化数据。在
+            // ring 锁内把旧容量中的逻辑 FIFO 顺序压平，才可安全发布
+            // FULL -> NORMAL 并让锁外 wake 的 writer 重新尝试写入。
+            self.arr[..old_capacity].rotate_left(self.head);
+            self.head = 0;
+            self.tail = used;
             self.status = RingBufferStatus::NORMAL;
         }
+        self.capacity = new_capacity;
         Ok(self.capacity)
     }
     #[inline]

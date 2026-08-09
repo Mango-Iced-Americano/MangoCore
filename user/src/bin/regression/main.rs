@@ -156,10 +156,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     if r == 0 { passed += 1; println!("ok 22 child_wait"); }
     else { failed += 1; println!("not ok 22 child_wait"); }
 
-    // Test 23: pipe capacity resize wakes writers and splice wakes readers
+    // Test 23: pipe capacity resize wakes a blocked writer
     let r = regression_pipe_resize::run();
-    if r == -1 { skipped += 1; println!("ok 23 pipe_resize # SKIP known kernel bug: resize wakeup"); }
-    else if r == 0 { passed += 1; println!("ok 23 pipe_resize"); }
+    if r == 0 { passed += 1; println!("ok 23 pipe_resize"); }
     else { failed += 1; println!("not ok 23 pipe_resize"); }
 
     // Test 24: SIGUSR1 with and without SA_RESTART controls waitpid interruption.
