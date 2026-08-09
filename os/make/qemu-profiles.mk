@@ -31,7 +31,11 @@ $(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_DEVELOPMENT_BEFORE_DRIVES) $(call qe
 endef
 
 define qemu_buildstorm_command
-$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_BUILDSTORM_BEFORE_DRIVES) $(call qemu_two_drives,$(QEMU_COMPETITION_X0),$(QEMU_ROLE_ARCH)) $(QEMU_BUILDSTORM_AFTER_DRIVES)
+$(QEMU_EXECUTABLE) $(QEMU_BASE_ARGS) $(QEMU_BUILDSTORM_BEFORE_DRIVES) $(call qemu_buildstorm_two_drives,$(QEMU_BUILDSTORM_X0),$(QEMU_ROLE_ARCH)) $(QEMU_BUILDSTORM_AFTER_DRIVES)
+endef
+
+define qemu_buildstorm_two_drives
+-drive if=none,file=$(1),format=qcow2,id=x0 $(BLK_DEV_x0) -drive if=none,file=$(IMAGE_ROLE_$(2)_X1),format=raw,id=x1 $(BLK_DEV_x1)
 endef
 
 define qemu_zero_drive_command

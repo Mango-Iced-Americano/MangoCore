@@ -127,6 +127,7 @@ impl VirtIONetWrapper {
 impl NetDevice for VirtIONetWrapper {
     fn receive(&self, buf: &mut [u8]) -> Option<usize> {
         let mut net = self.net.lock();
+        let _bridge = crate::drivers::block::virtio_dma_pool::dma_bridge_lock();
         match net.receive() {
             Ok(rx_buffer) => {
                 let packet = rx_buffer.packet();
@@ -143,6 +144,7 @@ impl NetDevice for VirtIONetWrapper {
 
     fn transmit(&self, buf: &[u8]) {
         let mut net = self.net.lock();
+        let _bridge = crate::drivers::block::virtio_dma_pool::dma_bridge_lock();
         let tx_buf = TxBuffer::from(buf);
         net.send(tx_buf).expect("Virtio Net Send Failed");
     }

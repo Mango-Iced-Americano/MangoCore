@@ -9,11 +9,14 @@ QEMU_ROLE_ARCH = RV64
 QEMU_COMPETITION_X0 = $(IMAGE_ROLE_RV64_COMPETITION_X0)
 QEMU_DERIVED_X0 = $(IMAGE_ROLE_RV64_DERIVED_X0)
 QEMU_DEVELOPMENT_X0 = $(IMAGE_ROLE_RV64_DEVELOPMENT_X0)
+QEMU_BUILDSTORM_X0 = $(IMAGE_ROLE_RV64_BUILDSTORM_X0)
+BUILDSTORM_GOLDEN_X0 = $(IMAGE_ROLE_RV64_BUILDSTORM_GOLDEN_X0)
+BUILDSTORM_ARCHIVE = $(IMAGE_ROLE_RV64_BUILDSTORM_ARCHIVE)
 QEMU_COMPETITION_BEFORE_DRIVES = -kernel $(KERNEL_IMAGE) -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) -bios default
 QEMU_COMPETITION_AFTER_DRIVES = -no-reboot -rtc base=utc $(NET_DEV) -object filter-dump,id=f1,netdev=net,file=packets.pcap
 QEMU_COMPETITION_GDB_BEFORE_DRIVES = $(QEMU_COMPETITION_BEFORE_DRIVES)
 QEMU_COMPETITION_GDB_AFTER_DRIVES = $(QEMU_COMPETITION_AFTER_DRIVES) -S -s
-QEMU_BUILDSTORM_BEFORE_DRIVES = -kernel $(BUILDSTORM_KERNEL_RV) -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) -bios default
+QEMU_BUILDSTORM_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(BUILDSTORM_KERNEL_RV) -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) -bios default
 QEMU_BUILDSTORM_AFTER_DRIVES = $(QEMU_COMPETITION_AFTER_DRIVES) -device virtio-rng-device,bus=virtio-mmio-bus.2
 BUILDSTORM_PRODUCT_ROOT ?= $(PRODUCT_ROOT)/buildstorm
 BUILDSTORM_KERNEL_OUTPUT_ROOT ?= $(BUILDSTORM_PRODUCT_ROOT)/kernel
@@ -134,13 +137,29 @@ derived-comp: toolchain-preflight
 comp-gdb: toolchain-preflight
 	@$(call qemu_competition_gdb_command)
 
-buildstorm: toolchain-preflight
+buildstorm: toolchain-preflight buildstorm-input
 	@$(MAKE) -B -f $(firstword $(MAKEFILE_LIST)) build \
 		PRODUCT_ROOT="$(BUILDSTORM_PRODUCT_ROOT)" \
 		KERNEL_OUTPUT_ROOT="$(BUILDSTORM_KERNEL_OUTPUT_ROOT)" \
 		USER_OUTPUT_ROOT="$(BUILDSTORM_USER_OUTPUT_ROOT)" \
 		KERNEL_CMDLINE="$(BUILDSTORM_CMDLINE)"
 	@$(call qemu_profile_command,buildstorm)
+
+buildstorm-input:
+	@set -eu; \
+		mkdir -p "$(dir $(BUILDSTORM_GOLDEN_X0))"; \
+		if [ ! -f "$(BUILDSTORM_GOLDEN_X0)" ]; then \
+			archive="$(BUILDSTORM_ARCHIVE)"; \
+			[ -n "$$archive" ] && [ -f "$$archive" ] || { echo "[buildstorm] missing RV64 pub archive (set BUILDSTORM_ARCHIVE)" >&2; exit 1; }; \
+			tmp="$(BUILDSTORM_GOLDEN_X0).tmp.$$$$"; \
+			echo "[buildstorm] expanding official RV64 image once: $$archive"; \
+			gzip -dc "$$archive" > "$$tmp"; \
+			mv -f "$$tmp" "$(BUILDSTORM_GOLDEN_X0)"; \
+		else \
+			echo "[buildstorm] reusing official RV64 golden image $(BUILDSTORM_GOLDEN_X0)"; \
+		fi; \
+		rm -f "$(QEMU_BUILDSTORM_X0)"; \
+		qemu-img create -q -f qcow2 -F raw -b "$(abspath $(BUILDSTORM_GOLDEN_X0))" "$(QEMU_BUILDSTORM_X0)"
 
 .PHONY: user env toolchain-preflight check ktest-build-only check-development-x0 derived-comp
 

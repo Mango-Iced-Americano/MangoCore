@@ -19,6 +19,17 @@ IMAGE_ROLE_LA64_DEVELOPMENT_X0 = $(IMAGE_ROLE_LA64_PRODUCT_ROOT)/image/rootfs-la
 IMAGE_ROLE_RV64_COMPETITION_X0 := ../sdcard-rv.img
 IMAGE_ROLE_LA64_COMPETITION_X0 := ../sdcard-la.img
 
+# BuildStorm uses the official public userspace image, not the 4 GiB
+# competition image above.  Keep one decompressed golden copy and run QEMU
+# through a disposable qcow2 overlay so repeated runs neither re-expand the
+# archive nor mutate the supplied official image.
+IMAGE_ROLE_RV64_BUILDSTORM_GOLDEN_X0 ?= $(BUILD_ROOT)/buildstorm-input/sdcard-rv-pub.img
+IMAGE_ROLE_LA64_BUILDSTORM_GOLDEN_X0 ?= $(BUILD_ROOT)/buildstorm-input/sdcard-la-pub.img
+IMAGE_ROLE_RV64_BUILDSTORM_X0 ?= $(BUILD_ROOT)/buildstorm-input/sdcard-rv-pub-run.qcow2
+IMAGE_ROLE_LA64_BUILDSTORM_X0 ?= $(BUILD_ROOT)/buildstorm-input/sdcard-la-pub-run.qcow2
+IMAGE_ROLE_RV64_BUILDSTORM_ARCHIVE ?= $(or $(wildcard ../sdcard-rv-pub.img.gz),$(wildcard ../sdcard-rv-pub.img(1).gz))
+IMAGE_ROLE_LA64_BUILDSTORM_ARCHIVE ?= $(or $(wildcard ../sdcard-la-pub.img.gz),$(wildcard ../sdcard-la-pub.img(1).gz))
+
 # A command-line development-x0 override is parsed before recipes execute, so
 # reject an official x0 alias even for `make -n`.  The Python checker resolves
 # symlinks and compares existing files by device/inode as well as pathname.

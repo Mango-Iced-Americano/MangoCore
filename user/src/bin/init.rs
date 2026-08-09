@@ -7,8 +7,8 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
 use user_lib::{
-    chdir, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
-    waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
+    chdir, close, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction,
+    sleep, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
 };
 
 #[path = "init/mounts.rs"]
@@ -131,6 +131,64 @@ fn enable_buildstorm_cpus() {
     }
 }
 
+fn write_buildstorm_stat_control(path: &str, value: &[u8]) -> bool {
+    let fd = open(path, OpenFlags::WRONLY);
+    if fd < 0 {
+        println!("[init] BuildStorm stats open {} failed: {}", path, fd);
+        return false;
+    }
+    let written = write(fd as usize, value);
+    let _ = close(fd as usize);
+    if written != value.len() as isize {
+        println!("[init] BuildStorm stats write {} failed: {}", path, written);
+        return false;
+    }
+    true
+}
+
+fn enable_buildstorm_stats() {
+    let profile_ok = write_buildstorm_stat_control("/sys/kernel/stats/profile\0", b"core\n");
+    let reset_ok = write_buildstorm_stat_control("/sys/kernel/stats/reset\0", b"1\n");
+    let stats_on_ok = write_buildstorm_stat_control("/sys/kernel/stats/stats_on\0", b"1\n");
+    println!(
+        "[init] BuildStorm stats enabled profile=core profile_ok={} reset_ok={} stats_on_ok={}",
+        profile_ok, reset_ok, stats_on_ok
+    );
+}
+
+fn dump_buildstorm_stats(sample: usize) {
+    println!("BUILDSTORM_STATS_BEGIN sample={}", sample);
+    for path in ["/sys/kernel/stats/taskq\0"] {
+        let fd = open(path, OpenFlags::RDONLY);
+        if fd < 0 {
+            println!("[init] BuildStorm stats read {} failed: {}", path, fd);
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        let size = read(fd as usize, &mut buf);
+        let _ = close(fd as usize);
+        if size > 0 {
+            let _ = write(1, &buf[..size as usize]);
+        }
+    }
+    println!("BUILDSTORM_STATS_END sample={}", sample);
+}
+
+fn start_buildstorm_stats_collector() {
+    let child = fork();
+    if child == 0 {
+        let mut sample = 0;
+        loop {
+            dump_buildstorm_stats(sample);
+            sample = sample.wrapping_add(1);
+            sleep(60_000);
+        }
+    }
+    if child < 0 {
+        println!("[init] BuildStorm stats collector fork failed: {}", child);
+    }
+}
+
 fn exec_buildstorm_init() -> ! {
     let env = runner_environment("buildstorm");
     // Official x0 images may ship a generic /sbin/init shell. Prefer the
@@ -175,31 +233,35 @@ fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
     }
 }
 
-fn boot_profile() -> &'static str {
+fn read_boot_cmdline(buf: &mut [u8]) -> usize {
     let fd = open("/proc/cmdline\0", OpenFlags::RDONLY);
     if fd < 0 {
-        return "normal";
+        return 0;
     }
+    let size = read(fd as usize, buf);
+    let _ = close(fd as usize);
+    size.max(0) as usize
+}
+
+fn cmdline_contains(cmdline: &[u8], needle: &[u8]) -> bool {
+    cmdline.windows(needle.len()).any(|value| value == needle)
+}
+
+fn boot_cmdline_contains(needle: &[u8]) -> bool {
     let mut cmdline = [0u8; 256];
-    let size = read(fd as usize, &mut cmdline);
-    let _ = user_lib::close(fd as usize);
-    if size > 0
-        && cmdline[..size as usize]
-            .windows(b"mango.mode=regression".len())
-            .any(|v| v == b"mango.mode=regression")
-    {
+    let size = read_boot_cmdline(&mut cmdline);
+    cmdline_contains(&cmdline[..size], needle)
+}
+
+fn boot_profile() -> &'static str {
+    let mut cmdline = [0u8; 256];
+    let size = read_boot_cmdline(&mut cmdline);
+    let cmdline = &cmdline[..size];
+    if cmdline_contains(cmdline, b"mango.mode=regression") {
         "regression"
-    } else if size > 0
-        && cmdline[..size as usize]
-            .windows(b"profile=buildstorm".len())
-            .any(|v| v == b"profile=buildstorm")
-    {
+    } else if cmdline_contains(cmdline, b"profile=buildstorm") {
         "buildstorm"
-    } else if size > 0
-        && cmdline[..size as usize]
-            .windows(b"profile=rescue".len())
-            .any(|v| v == b"profile=rescue")
-    {
+    } else if cmdline_contains(cmdline, b"profile=rescue") {
         "rescue"
     } else {
         "normal"
@@ -259,6 +321,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::prepare_pseudo_fs_framework();
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
+    let buildstorm_stats = profile == "buildstorm" && boot_cmdline_contains(b"buildstorm.stats=core");
     if profile == "buildstorm" {
         // mount_boot_block_devices() already owns the x0 → /sdcard mount.
         // PID1 must reuse it so the chroot does not fail on a second EBUSY mount.
@@ -266,6 +329,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         if !enter_buildstorm_root() {
             println!("[init] BuildStorm root unavailable; entering rescue");
             rescue_forever();
+        }
+        if buildstorm_stats {
+            enable_buildstorm_stats();
+            start_buildstorm_stats_collector();
         }
         enable_buildstorm_cpus();
         exec_buildstorm_init();
