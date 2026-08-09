@@ -8,8 +8,8 @@ pub(crate) use crate::fs::vfs::fcntl::{FcntlCommand, PosixFlock, F_UNLCK};
 pub(crate) use crate::fs::vfs::posix_lock::{init_posix_lock_manager, mgr, posix_lock_get, posix_lock_set, release_posix_for_owner, LockKey, LockOwner};
 pub(crate) use crate::fs::*;
 pub(crate) use crate::mm::{
-    check_user_range, MapPermission, UserBufferReader, UserBufferWriter, UserCString,
-    UserIoVec, UserPtr, UserPtrMut, UserSlice, VirtAddr,
+    check_user_range, UserBufferReader, UserBufferWriter, UserCString, UserIoVec, UserPtr,
+    UserPtrMut, UserSlice, VirtAddr,
 };
 pub(crate) use crate::task::{
     current_task, current_user_token, find_process_by_pid, find_task_by_tid,

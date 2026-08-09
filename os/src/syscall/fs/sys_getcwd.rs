@@ -34,11 +34,12 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if working_dir.len() + 1 > size {
         return ERANGE;
     }
-    let vm_ref = task.process.vm();
     let write_len = working_dir.len() + 1;
-    if !vm_ref.read(|vm| vm.contains_valid_buffer(buf, write_len, MapPermission::W)) {
-        return EFAULT;
-    }
+    // UserBufferWriter performs the authoritative range check and fault-in
+    // under the current address-space lock. The old VMA-only precheck could
+    // reject a valid lazy heap/mmap allocation before its pages were faulted
+    // in, returning EFAULT to libc's getcwd and making rustc report a
+    // misleading current-working-directory "Bad address" error.
     let token = task.get_user_token();
     let mut user_buf = match UserBufferWriter::new(token, buf as *mut u8, write_len) {
         Ok(writer) => writer,
