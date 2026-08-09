@@ -3,6 +3,10 @@
     .equ MAX_CPUS, 8
     .equ BOOT_STACK_SHIFT, 18
     .equ BOOT_STACK_SIZE, 1 << BOOT_STACK_SHIFT
+    # The early FDT parser runs before the final kernel page table exists.
+    # Keep enough temporary 1 GiB leaves for an 8 GiB QEMU guest (whose DTB is
+    # placed near the top of RAM), with headroom for larger validation guests.
+    .equ BOOTSTRAP_GIB_LEAVES, 16
 
     .section .text.entry
     .globl _start
@@ -32,9 +36,9 @@ _start:
     # The RAM base is NOT hardcoded: U-Boot may load the Image at any
     # platform DRAM base (QEMU virt: 0x8000_0000; VisionFive 2: 0x4000_0000).
     # Derive the 1 GiB-aligned base from the runtime physical Image address.
-    # Four 1 GiB leaves cover up to 4 GiB of DRAM, which also spans the
-    # high-address DTB that pre-heap FDT parsing reads before mm::init()
-    # (QEMU: ~0x87e0_0000; VisionFive 2 U-Boot: ~0xf76d_f9b0).
+    # BOOTSTRAP_GIB_LEAVES temporary 1 GiB leaves cover the high-address DTB
+    # that pre-heap FDT parsing reads before mm::init().  In particular, an
+    # 8 GiB QEMU guest places it near 0x27fe_0000_0; four leaves are not enough.
     # Keep the derived base in t3 across the satp switch: `la` is no longer
     # physical once translation is enabled, so the high-half alias offset is
     # computed from t3 *before* enabling the MMU.
@@ -49,7 +53,7 @@ _start:
     srli t5, t3, 30
     slli t5, t5, 3                 # * 8 bytes per PTE
     add t5, t5, t0
-    li t6, 4
+    li t6, BOOTSTRAP_GIB_LEAVES
     li t4, 0x10000000
 1:  sd t1, 0(t5)
     add t1, t1, t4
@@ -64,7 +68,7 @@ _start:
     li t5, 0xef
     or t1, t1, t5
     li t4, 0x10000000
-    li t6, 4
+    li t6, BOOTSTRAP_GIB_LEAVES
 2:  sd t1, 0(t2)
     add t1, t1, t4
     addi t2, t2, 8

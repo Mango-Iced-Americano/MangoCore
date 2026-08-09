@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-03
+last_updated: 2026-08-09
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -101,6 +101,11 @@ RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入�
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`
 计算向下增长栈的初始栈顶。整个 `.bss.stack` 位于普通 `sbss` 之前，因此
 CPU0 的 `mem_clear()` 不会清除 AP 正在使用的启动栈。
+
+RV64 的可重定位 Image 会在进入 Rust 前建立临时 Sv39 根页表，同时提供 DRAM
+低地址恒等映射和固定高半区别名。两侧各使用 16 个 1 GiB 叶子，使 8 GiB QEMU
+放在 RAM 顶部的 FDT 在 `populate_memory_regions()` 阶段仍可访问；最终内核页表
+仍由固件报告的真实内存区构造，不继承这组宽松的早期 RWX 叶子。
 
 两架构还按 configured CPU 数预留页对齐的 `.bss.idle_stack`。该 section
 由现有 `.bss.*` 通配符放入 `sbss..ebss`，因此 CPU0 会在 Release AP 前清零
