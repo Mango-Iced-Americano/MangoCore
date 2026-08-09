@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::format;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
-use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_mount, sys_sched_setaffinity};
+use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
 use user_lib::{
     chdir, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction, sleep,
     waitpid_wnohang, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
@@ -61,24 +61,6 @@ fn reap_orphans() {
     let mut status = 0;
     while waitpid_wnohang(-1, &mut status) > 0 {}
     CHILD_EVENT.store(false, Ordering::Release);
-}
-
-fn try_mount(source: &'static str, target: &'static str, fstype: &'static str) -> bool {
-    let result = mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, 0);
-    if result < 0 {
-        println!(
-            "[init] mount {} at {} failed: {}",
-            fstype.trim_end_matches('\0'),
-            target.trim_end_matches('\0'),
-            result
-        );
-        return false;
-    }
-    true
-}
-
-fn mount_disk(source: &'static str, target: &'static str) -> bool {
-    try_mount(source, target, "ext4\0") || try_mount(source, target, "fat32\0")
 }
 
 fn try_bind_mount(source: &str, target: &str) -> bool {
@@ -278,11 +260,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
     if profile == "buildstorm" {
-        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
-        // BuildStorm owns the complete x0 userspace.  Give it a fresh tmpfs
-        // and expose only the pseudo-filesystems needed by its toolchain.
-        let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
-        if !disk_ok || !enter_buildstorm_root() {
+        // mount_boot_block_devices() already owns the x0 → /sdcard mount.
+        // PID1 must reuse it so the chroot does not fail on a second EBUSY mount.
+        mounts::mount_tmpfs("/tmp\0");
+        if !enter_buildstorm_root() {
             println!("[init] BuildStorm root unavailable; entering rescue");
             rescue_forever();
         }
@@ -290,51 +271,9 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         exec_buildstorm_init();
     }
     if profile != "regression" {
-        let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
-        let tools_ok =
-            mount_disk("/dev/vdb1\0", "/tools\0") || mount_disk("/dev/vdb\0", "/tools\0");
-        // /tmp: prefer ext4-backed /tmp if a block device is available
-        if disk_ok {
-            const AT_FDCWD: isize = -100;
-            let _ = sys_mkdirat(AT_FDCWD, "/sdcard/tmp\0", 0o1777);
-            let result = sys_mount(
-                "/sdcard/tmp\0".as_ptr(),
-                "/tmp\0".as_ptr(),
-                core::ptr::null(),
-                MS_BIND,
-                0,
-            );
-            if result < 0 {
-                println!(
-                    "[init] bind-mount /sdcard/tmp → /tmp failed: {}, falling back to tmpfs",
-                    result
-                );
-                let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
-            } else {
-                println!("[init] /tmp is bind-mounted from ext4 /sdcard/tmp");
-            }
-        } else {
-            let _ = try_mount("none\0", "/tmp\0", "tmpfs\0");
-        }
-        if tools_ok {
-            let result = sys_mount(
-                "/tools/etc\0".as_ptr(),
-                "/etc\0".as_ptr(),
-                core::ptr::null(),
-                MS_BIND,
-                0,
-            );
-            if result < 0 {
-                println!(
-                    "[init] bind-mount /tools/etc → /etc failed: {}, keeping initramfs /etc",
-                    result
-                );
-            } else {
-                println!("[init] /etc is bind-mounted from tools disk");
-            }
-        }
-        // Bind-mount tools and sdcard subdirectories so writes persist.
-        bind_tools_and_sdcard(tools_ok, disk_ok);
+        // mount_boot_block_devices() already owns x0 → /sdcard and x1 → /tools.
+        // Bind their persistent subtrees instead of remounting the same devices.
+        mounts::setup_persistent_mounts();
     } else {
         // No block device in regression mode
         mounts::mount_tmpfs("/tmp\0");

@@ -176,7 +176,12 @@ ktest-run: toolchain-preflight ktest-build-only ktest-clean-ext4
 		echo "PASS: KTEST_FIXTURE=borrows-initproc — ktest is independent of INITPROC"; \
 	fi
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest) >/tmp/ktest-rv.log 2>&1; \
+	qemu_status=$$?; \
+	cat /tmp/ktest-rv.log; \
+	test $$qemu_status -eq 0 && test -s /tmp/ktest-rv.log && grep -Fq "[KTEST RESULT: PASS]" /tmp/ktest-rv.log \
+		&& echo "=== KTEST PASS ===" \
+		|| (echo "=== KTEST FAIL ===" >&2; exit 1)
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."

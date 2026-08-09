@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -15,9 +15,14 @@ use super::lifetime::{InodeKey, InodeLifetime};
 
 /// Mango-owned regular-file data backend for one writable ext4 inode.
 pub(crate) struct AnotherExt4PageCacheBackend {
-    fs: Arc<Ext4FileSystem>,
+    /// 后端不得反向持有文件系统；dirty lifetime 已持有缓存，强引用会形成
+    /// `fs -> lifetime -> cache -> backend -> fs` 环并使独立挂载在收尾时存活。
+    fs: Weak<Ext4FileSystem>,
     key: InodeKey,
-    lifetime: Arc<InodeLifetime>,
+    /// 写回只需要逻辑文件大小。保留该原子值而非 `InodeLifetime` 本身，既让
+    /// dirty cache 能在临时 VFS inode 销毁后完成 sync，也不形成
+    /// `lifetime -> dirty cache -> backend -> lifetime` 引用环。
+    logical_size: Arc<AtomicUsize>,
     writeback_staging: Mutex<Vec<u8>>,
 }
 
@@ -27,13 +32,16 @@ impl AnotherExt4PageCacheBackend {
         key: InodeKey,
         lifetime: Arc<InodeLifetime>,
     ) -> Self {
-        lifetime.pin();
         Self {
-            fs,
+            fs: Arc::downgrade(&fs),
             key,
-            lifetime,
+            logical_size: lifetime.logical_size.clone(),
             writeback_staging: Mutex::new(Vec::new()),
         }
+    }
+
+    fn fs(&self) -> Result<Arc<Ext4FileSystem>, SyscallErr> {
+        self.fs.upgrade().ok_or(SyscallErr::EIO)
     }
 
     fn page_offset(index: usize) -> Result<usize, SyscallErr> {
@@ -50,11 +58,12 @@ impl AnotherExt4PageCacheBackend {
         start_offset: usize,
         data: &[u8],
     ) -> Result<bool, SyscallErr> {
+        let fs = self.fs()?;
         let batch_end = start_offset
             .checked_add(data.len())
             .ok_or(SyscallErr::EFBIG)?;
-        let prepared = self.fs.run_metadata_operation(|| {
-            self.fs.inner().prepare_buffered_write_with_data(
+        let prepared = fs.run_metadata_operation(|| {
+            fs.inner().prepare_buffered_write_with_data(
                 inode_id,
                 start_offset,
                 data.len(),
@@ -67,10 +76,8 @@ impl AnotherExt4PageCacheBackend {
         match prepared {
             Ok(data_written) => {
                 if !data_written {
-                    self.fs.run_metadata_operation(|| {
-                        self.fs
-                            .inner()
-                            .write_data_only(inode_id, start_offset, data)
+                    fs.run_metadata_operation(|| {
+                        fs.inner().write_data_only(inode_id, start_offset, data)
                     })?;
                 }
                 Ok(data_written)
@@ -88,12 +95,6 @@ impl AnotherExt4PageCacheBackend {
     }
 }
 
-impl Drop for AnotherExt4PageCacheBackend {
-    fn drop(&mut self) {
-        self.lifetime.unpin();
-    }
-}
-
 impl PageCacheBackend for AnotherExt4PageCacheBackend {
     fn read_page(&self, index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_ext4_pc_readpages_calls();
@@ -102,13 +103,14 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             return Err(SyscallErr::ENOBUFS);
         }
         let offset = Self::page_offset(index)?;
-        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let size = self.logical_size.load(Ordering::Acquire);
+        let fs = self.fs()?;
         buffer[..PAGE_SIZE].fill(0);
         if offset >= size {
             return Ok(PAGE_SIZE);
         }
         let read_len = PAGE_SIZE.min(size - offset);
-        self.fs
+        fs
             .inner()
             .read(
                 u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
@@ -134,7 +136,8 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             .len()
             .checked_mul(PAGE_SIZE)
             .ok_or(SyscallErr::EFBIG)?;
-        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let size = self.logical_size.load(Ordering::Acquire);
+        let fs = self.fs()?;
         let mut staging = Vec::new();
         staging
             .try_reserve_exact(total_bytes)
@@ -142,7 +145,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         staging.resize(total_bytes, 0);
         if start_offset < size {
             let read_len = total_bytes.min(size - start_offset);
-            self.fs
+            fs
                 .inner()
                 .read(
                     u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
@@ -163,7 +166,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
-        let size = self.lifetime.logical_size.load(Ordering::Acquire);
+        let size = self.logical_size.load(Ordering::Acquire);
         let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
         let start_offset = Self::page_offset(start_index)?;
         if start_offset >= size {
@@ -220,9 +223,6 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn npages(&self) -> usize {
-        self.lifetime
-            .logical_size
-            .load(Ordering::Acquire)
-            .div_ceil(PAGE_SIZE)
+        self.logical_size.load(Ordering::Acquire).div_ceil(PAGE_SIZE)
     }
 }

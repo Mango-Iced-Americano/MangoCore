@@ -1489,3 +1489,19 @@
 - **教训**: "零盘"不等于"零网络"。loopback TCP/UDP 不需要外部 NIC；跳过 net init 的
   profile 若套件含 net 用例，会得到难定位的失败/panic。
 - **相关文件**: `os/src/main.rs`
+
+## PageCache backend 反向强引用会让 dirty retention 自循环
+
+- **现象**: 全部 ktest 用例通过后，收尾 `flush_all_page_caches()` 对同一 another_ext4 inode
+  反复返回 `EINVAL`；跨架构一致，且错误只在先后运行独立文件系统 fixture 后出现。
+- **根因**: filesystem 强持有 inode lifetime，lifetime 为 dirty 数据强持有 PageCache，而
+  PageCache backend 又强持有 filesystem/lifetime，形成 `fs → lifetime → cache → backend → fs`
+  环。fixture 的本地 `Arc<Ext4FileSystem>` 已离开作用域，但已删除 inode 的 cache 仍在全局
+  PageCache registry 中，于最终 flush 命中失效 inode。
+- **修复**: backend 对 filesystem 与 lifetime 只保存 `Weak`，每次 read/write 临界 I/O
+  前升级为短生命周期 `Arc`；owner 已销毁时返回 `EIO`，但正常 dirty retention 不再能自行延长
+  已卸载 fixture 的寿命。
+- **教训**: PageCache 的 dirty-retention owner 可以强持有 cache，但 cache/backend 不能反向
+  强持有该 owner 或其 filesystem。审计生命周期时必须画出 owner→cache→backend 的完整图，而
+  不能只检查全局 registry 为 Weak。
+- **相关文件**: `os/src/fs/ext4_another/{page_cache.rs,lifetime.rs,fs.rs}`

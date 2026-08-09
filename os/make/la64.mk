@@ -210,7 +210,12 @@ ktest-run: toolchain-preflight ktest-build-only ktest-clean-ext4
 	fi
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	@echo "[ktest] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
-	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest)
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest) >/tmp/ktest-la.log 2>&1; \
+	qemu_status=$$?; \
+	cat /tmp/ktest-la.log; \
+	test $$qemu_status -eq 0 && test -s /tmp/ktest-la.log && grep -Fq "[KTEST RESULT: PASS]" /tmp/ktest-la.log \
+		&& echo "=== KTEST PASS ===" \
+		|| (echo "=== KTEST FAIL ===" >&2; exit 1)
 
 regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."

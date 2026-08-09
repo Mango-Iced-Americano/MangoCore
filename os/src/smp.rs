@@ -1764,7 +1764,7 @@ pub fn bring_up_secondary_cpus() {
     // 所以在发布 AP 前用同一镜像基址反算物理入口，不能把高半区地址交给固件。
     let secondary_entry = crate::hal::boot::kernel_linked_to_phys(_start as usize);
 
-    for cpu_id in 1..CONFIGURED_CPU_COUNT {
+    for (cpu_id, _) in PER_CPUS.iter().enumerate().take(CONFIGURED_CPU_COUNT).skip(1) {
         let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
         // RV64 uses OpenSBI HSM. LA64 uses QEMU's mailbox-plus-IPI slave ROM.
         if let Err(error) = crate::hal::start_secondary_cpu(hardware_id, secondary_entry) {

@@ -30,6 +30,11 @@ fn try_mount(source: &str, target: &str, fstype: &str) -> bool {
         );
         return false;
     }
+    println!(
+        "[init] mount {} at {}",
+        fstype.trim_end_matches('\0'),
+        target.trim_end_matches('\0')
+    );
     true
 }
 

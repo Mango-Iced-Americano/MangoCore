@@ -29,7 +29,6 @@ jobs:
     name: Toolchain provisioning contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,7 +69,8 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && cargo clippy --features "riscv block_virt" -- -W warnings
+              # 对齐 os/make/rv64.mk 真实内核构建 features（riscv + block_virt + oom_handler）
+              cd /app/os && cargo clippy --features "riscv block_virt oom_handler" -- -W warnings
             '
       - name: Clippy la64
         run: |
@@ -78,7 +78,8 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo \
             os-dev bash -lc '
-              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "boot_la_qemu block_virt_pci" -- -W warnings
+              # 对齐 os/make/la64.mk 真实内核构建 features（boot_la_qemu 已含 oom_handler，显式列出保持一致）
+              cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "boot_la_qemu block_virt_pci oom_handler" -- -W warnings
             '
       - name: Docker compose down
         if: always()
@@ -275,8 +276,9 @@ jobs:
             make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf'
       - name: Run QEMU
         run: |
-          set -o pipefail
+          set -euo pipefail
           docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euo pipefail
             cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-rv64.log'
       - name: Score
         if: always()
@@ -347,8 +349,9 @@ jobs:
             make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf'
       - name: Run QEMU
         run: |
-          set -o pipefail
+          set -euo pipefail
           docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+            set -euo pipefail
             cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-la64.log'
       - name: Score
         if: always()

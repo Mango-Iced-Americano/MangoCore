@@ -582,6 +582,10 @@ impl PageEntry {
 
     /// # Safety
     /// 调用者必须唯一持有 `data` 写锁，并只把返回值约束在该锁的作用域内。
+    // `PageEntry` 通过 `data` 实现运行期内部可变性；调用方只能经
+    // `with_bytes_mut` 在唯一写锁和 HRTB 闭包作用域内取得该借用，不能改为
+    // `&mut self` 而破坏缓存条目的共享所有权模型。
+    #[allow(clippy::mut_from_ref)]
     unsafe fn bytes_mut_unchecked(&self) -> &mut [u8] {
         let ptr = self.page.ppn.start_addr().direct_map_ptr();
         // SAFETY: PageEntry 始终持有该 frame 的 Arc；唯一 data 写锁排斥所有

@@ -27,6 +27,7 @@ pub fn tests() -> Vec<KernelTest> {
             "mm::local_mmu_gather_map_protect_unmap",
             test_local_mmu_gather_map_protect_unmap,
         ),
+        #[cfg(feature = "oom_handler")]
         KernelTest::new(
             "mm::shared_futex_pin_blocks_reclaim",
             test_shared_futex_pin_blocks_reclaim,
@@ -73,6 +74,7 @@ fn test_firmware_memory_reaches_allocator() -> Result<(), &'static str> {
 ///
 /// 第一次深度回收必须跳过被 pin 的页并保留候选；pin 解除后第二次回收应能压缩
 /// 同一页。固定到 mmap 区以下，确保覆盖过去会进入 `force_swap` 的分支。
+#[cfg(feature = "oom_handler")]
 fn test_shared_futex_pin_blocks_reclaim() -> Result<(), &'static str> {
     const TEST_BASE: usize = crate::config::ELF_PIE_BASE + 0x20_0000;
     let test_vpn = VirtAddr::from(TEST_BASE).floor();
