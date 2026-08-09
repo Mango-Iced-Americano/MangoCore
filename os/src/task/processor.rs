@@ -676,7 +676,7 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
 
         // kernel-only AP 任务不参与 CPU0 的 OOM active tracker。优先取本地
         // 任务；本地为空时只向一个 victim 窃取一个 affinity 允许的任务。
-        let next_task = super::run_queue::fetch(cpu).or_else(|| super::run_queue::steal(cpu));
+        let next_task = super::run_queue::fetch_or_steal(cpu);
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
             dispatch_task(cpu, task_state, task, false, 0);

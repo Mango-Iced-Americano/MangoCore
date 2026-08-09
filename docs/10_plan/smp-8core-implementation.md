@@ -1023,10 +1023,12 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
   初始 mask 仍 CPU0-only，默认全核 mask 仍是后续项；
 - 远程入队后，如果目标 CPU idle 或任务优先级需要尽快运行，发送 RESCHEDULE IPI；
 - Phase 3a 先只实现 per-CPU queue、目标选择和远程 enqueue；work stealing 默认关闭；
-- B49 已完成 Phase 3b 的基础 steal：idle CPU 按近似排队数选择 victim，跳过 pinned 或
-  已有显式 migration target 的任务；候选栈映射在 runqueue 锁外同步，随后在同一 victim
-  锁内执行 `Queued(victim) -> Migrating`，锁外直接交给 `Running(thief)`。每次最多取得一个
-  任务，不同时持有两把 runqueue 锁；高竞争下二次复核失败只让本轮短暂空转；
+- B49 已完成 Phase 3b 的基础 steal，本批进一步收口为 CPU0/AP 共用的
+  `fetch_or_steal(cpu)`：先取一次远端 `nr_running` 快照，快照全空时不获取 runqueue 锁；
+  每个候选 victim 至多加锁一次，跳过 pinned 或已有显式 migration target 的任务；在 victim
+  锁内先执行 `Queued(victim) -> Migrating`、摘队和 checked 计数递减，再由 thief 的
+  `Arc + Migrating` 独占任务执行本地 kernel-TLB 同步，最后直接交给 `Running(thief)`。
+  每次最多取得一个任务，不同时持有两把 runqueue 锁，也不再存在同步后的二次复核失败；
 - affinity 变化后，正在运行的非法 CPU 通过唯一 `remote_affinity_request` 发布 mask/target，
   设置 migration target 并发送 RESCHEDULE；owner 在安全点持请求槽锁交给单个目标 runqueue，
   完成状态用原子 CAS 通知等待者。已排队任务仍使用 `Migrating` 单-owner 窗口，避免跨队列双锁；
@@ -1292,6 +1294,9 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
     继续表达协议完成状态，不用可合并的 mailbox 消费次数代替；
   - B93 已完成互斥后端口径的 TLB shootdown 轮数、精准页数、远端目标数、同步总/最大
     raw ticks 和错误数；本地-only flush 不冒充 shootdown；
+  - scheduler counter schema v2 增加 `steal_no_remote_ready`、
+    `steal_no_eligible_candidate` 和 `steal_ktlb_sync_calls`。候选只在 claim 成功后计数，
+    因此正常完成必须满足 candidate = KTLB sync = success，兼容旧日志的 recheck-failed 为零；
   - B39 的 per-CPU `timer_irq_count`/`timer_deferred_count` 与既有 `reschedule_count` 已覆盖
     timer hard IRQ、deferred 批次和安全点消费；B92 的逐 reason publication/consumption
     又补齐 RESCHEDULE IPI 的发起/接收侧口径；

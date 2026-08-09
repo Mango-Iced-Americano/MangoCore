@@ -530,7 +530,7 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
 
 /// 从本 CPU runqueue 取出下一个可运行任务。
 pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
-    let task = super::run_queue::fetch(cpu).or_else(|| super::run_queue::steal(cpu))?;
+    let task = super::run_queue::fetch_or_steal(cpu)?;
     #[cfg(feature = "oom_handler")]
     TASK_MANAGER
         .lock()

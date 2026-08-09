@@ -108,11 +108,17 @@ fn add_running(cpu: usize) {
 
 fn sub_running(cpu: usize, count: usize) {
     if count != 0 {
-        let _ = state(cpu).nr_running.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| Some(value.saturating_sub(count)),
-        );
+        state(cpu)
+            .nr_running
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_sub(count)
+            })
+            .unwrap_or_else(|value| {
+                panic!(
+                    "runqueue count underflow: cpu={} value={} decrement={}",
+                    cpu, value, count
+                )
+            });
     }
 }
 
@@ -207,6 +213,12 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         TaskStatus::Running(cpu),
         "fetch ready task",
     );
+    drop(queue);
+    Some(finish_running_claim(cpu, task))
+}
+
+/// 完成已经交给本 CPU current 路径的运行态记账。
+fn finish_running_claim(cpu: usize, task: Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
     // 从这一刻起任务已由本 CPU current 路径唯一拥有。后续 Running ->
     // Blocking -> Blocked 的 AcqRel 状态链会把该提示发布给远程唤醒方。
     if task.note_running_cpu(cpu) {
@@ -218,55 +230,88 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
     }
     task.run_started_ticks.store(now, Ordering::Release);
-    Some(task)
+    task
+}
+
+/// 优先取得本地任务，本地为空时至多从一个远端队列 claim 一个任务。
+///
+/// CPU0 与 AP 共用这一入口，保证快速拒绝、计数口径和 claim 顺序不会分叉。
+pub(crate) fn fetch_or_steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+    fetch(cpu).or_else(|| steal(cpu))
 }
 
 /// 本地队列为空时，从一个远端 victim 取得至多一个允许迁移的任务。
 ///
-/// victim 按排队数选择；多个 CPU 同时窃取时，真正的所有权仍由 victim
-/// runqueue 锁和 `Queued -> Migrating` 状态交接决定。候选栈映射的本地 TLB
-/// 同步可能等待，因此先在锁内克隆候选、锁外同步，再回到同一队列复核。
-pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+/// victim 按一次 `nr_running` 快照选择；多个 CPU 同时窃取时，真正的所有权由
+/// victim runqueue 锁和锁内 `Queued -> Migrating` 状态交接决定。任务被摘除后由
+/// 本调用方的强引用唯一持有，再在 thief CPU 同步 kernel TLB，因此不会发生
+/// “同步后候选已经被其它 fetch/stealer 取走”的二次复核失败。
+fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     crate::task::perf::record_steal_attempt(cpu);
     let runnable_cpus = crate::smp::online_cpu_mask()
         & crate::smp::scheduler_cpu_mask()
         & !crate::smp::stopped_cpu_mask()
         & !(1usize << cpu);
+    let mut load_snapshot = [0usize; crate::smp::MAX_CPUS];
     let mut remaining = runnable_cpus;
-    let (victim, candidate) = loop {
-        // 先按无锁近似负载选择；若该队列只有 pinned 任务，就排除它并选择
-        // 下一个 victim，避免一个繁忙的 pinned 队列永久遮住其它可迁移任务。
-        let victim = (0..crate::smp::configured_cpu_count())
-            .filter(|candidate| remaining & (1usize << candidate) != 0)
-            .max_by_key(|candidate| nr_running(*candidate))?;
-        if nr_running(victim) == 0 {
-            return None;
+    for victim in 0..crate::smp::configured_cpu_count() {
+        if remaining & (1usize << victim) != 0 {
+            load_snapshot[victim] = nr_running(victim);
         }
+    }
+    if load_snapshot.iter().all(|load| *load == 0) {
+        crate::task::perf::record_steal_no_remote_ready();
+        return None;
+    }
+
+    let task = loop {
+        // 按单次快照从高负载 victim 开始；每个 victim 至多取得一次队列锁。
+        // pinned-only 队列被排除后继续检查其它快照非空的队列。
+        let victim = (0..crate::smp::configured_cpu_count())
+            .filter(|candidate| {
+                remaining & (1usize << candidate) != 0 && load_snapshot[*candidate] != 0
+            })
+            .max_by_key(|candidate| (load_snapshot[*candidate], core::cmp::Reverse(*candidate)));
+        let Some(victim) = victim else {
+            crate::task::perf::record_steal_no_eligible_candidate();
+            return None;
+        };
+        remaining &= !(1usize << victim);
+
         // 从队尾选择，尽量不与 victim 即将从队首 fetch 的任务竞争。
-        let candidate = state(victim)
-            .run_queue
-            .lock()
+        let mut queue = state(victim).run_queue.lock();
+        let candidate_index = queue
             .tasks
             .iter()
+            .enumerate()
             .rev()
-            .find(|task| task.is_cpu_allowed(cpu) && !task.has_migration_target())
-            .cloned();
-        if let Some(candidate) = candidate {
-            crate::task::perf::record_steal_candidate();
-            break (victim, candidate);
-        }
-        remaining &= !(1usize << victim);
+            .find(|(_, task)| task.is_cpu_allowed(cpu) && !task.has_migration_target())
+            .map(|(index, _)| index);
+        let Some(index) = candidate_index else {
+            drop(queue);
+            continue;
+        };
+        queue.tasks[index].require_sched_transition(
+            TaskStatus::Queued(victim),
+            TaskStatus::Migrating,
+            "claim task for work stealing",
+        );
+        let task = queue.remove_at(index);
+        sub_running(victim, 1);
+        drop(queue);
+        break task;
     };
+    crate::task::perf::record_steal_candidate();
 
     // 新建内核栈只保证发布 CPU 已看见映射；窃取 CPU 必须在接管前刷新本地
-    // kernel-global TLB。等待期间任务仍完整留在 victim 队列。
-    let ktlb_start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_CORE,
-    );
+    // kernel-global TLB。此时任务已经不属于 victim runqueue，Arc + Migrating
+    // 由当前调用方唯一持有；同步失败表示正在运行的 thief CPU 破坏了调度不变量，
+    // 因此保持 fail-stop，不把半迁移任务回滚到已经变化的远端队列。
+    let ktlb_start = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
     crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
         panic!(
             "failed to synchronize stolen task {} stack on CPU {}: {:?}",
-            candidate.gettid(),
+            task.gettid(),
             cpu,
             error
         )
@@ -276,27 +321,6 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
             .wrapping_sub(ktlb_start),
     );
 
-    let mut queue = state(victim).run_queue.lock();
-    let index = queue
-        .tasks
-        .iter()
-        .position(|task| Arc::ptr_eq(task, &candidate))?;
-    if candidate.task_status() != TaskStatus::Queued(victim)
-        || !candidate.is_cpu_allowed(cpu)
-        || candidate.has_migration_target()
-    {
-        crate::task::perf::record_steal_recheck_failed();
-        return None;
-    }
-    candidate.require_sched_transition(
-        TaskStatus::Queued(victim),
-        TaskStatus::Migrating,
-        "detach task for work stealing",
-    );
-    let task = queue.remove_at(index);
-    sub_running(victim, 1);
-    drop(queue);
-
     // Migrating 窗口由当前窃取调用方独占；此处直接交给本 CPU current 路径，
     // 无需先插入目标队列再重新 fetch。
     task.require_sched_transition(
@@ -304,15 +328,7 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         TaskStatus::Running(cpu),
         "claim stolen task",
     );
-    if task.note_running_cpu(cpu) {
-        state(cpu).record_migration();
-    }
-    let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
-    let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
-    if enqueued != 0 {
-        crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
-    }
-    task.run_started_ticks.store(now, Ordering::Release);
+    let task = finish_running_claim(cpu, task);
     state(cpu).record_steal();
     crate::task::perf::record_steal_success(cpu);
     Some(task)
@@ -331,8 +347,9 @@ pub(crate) fn set_queued_affinity(
         let source_cpu = match task.task_status() {
             TaskStatus::Queued(cpu) => cpu,
             TaskStatus::Migrating => {
-                // 迁移方进入该状态前已完成所有 TLB 等待，之后不会获取
-                // TASK_MANAGER；这里只等待两个短 runqueue 临界区之间的交接。
+                // affinity 搬队在进入该状态前完成目标 TLB 同步；steal 则会在
+                // claim 后以当前 Arc 独占状态执行 thief 本地同步。两条路径都不
+                // 持有 runqueue/TASK_MANAGER，完成后会发布稳定 Queued/Running owner。
                 spin_loop();
                 continue;
             }

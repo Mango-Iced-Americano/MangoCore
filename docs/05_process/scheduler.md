@@ -124,8 +124,9 @@ B36 对稳定 Queued 使用 owner runqueue 作为 placement 锁。只有新 mask
 不是某个 CPU。mask 在这段无容器窗口发布，再由目标 runqueue 接管。
 B38 的 Running 路径不借用 `Migrating`：任务切回 idle 前仍是 `Running(source)`，
 切栈后直接由目标 runqueue 提交为 `Queued(target)`。B49 又让空闲 CPU 在本地队列为空时
-从一个 victim 窃取一个 affinity 允许的任务；目标栈 TLB 同步在 victim 队列锁外完成，
-真正摘取仍由 victim 锁内 `Queued -> Migrating` 唯一交接。
+从一个 victim 窃取一个 affinity 允许的任务；窃取方在 victim 锁内先完成
+`Queued(victim) -> Migrating` 和摘队，再由本地 `Arc` 独占任务执行 thief CPU 的
+kernel-TLB 同步，最后提交 `Migrating -> Running(thief)`。
 
 ## 3. RunQueue 选择策略
 
@@ -154,7 +155,26 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 安全点交接。work stealing 已可用于 affinity 允许的任务，但普通用户任务默认 mask 仍为
 CPU0-only，因此这不等于已经解除共享子系统门禁。
 
-### 3.1 首次发布与精确目标入口
+### 3.1 Work stealing claim 顺序
+
+CPU0 与 AP 在本地队列为空时统一进入 `fetch_or_steal(cpu)`。steal 只取一次远端
+`nr_running` 快照；快照全空时直接累计 `steal_no_remote_ready`，不获取任何远端
+runqueue 锁。其余情况按快照负载从高到低检查，每个 victim 至多加锁一次，并从队尾选择
+affinity 允许且没有显式 migration target 的任务。
+
+候选必须在 victim 锁内完成 `Queued(victim) -> Migrating`、摘队和 `nr_running` 的
+checked decrement。释放锁后，任务由当前调用方的 `Arc + Migrating` 唯一持有；thief
+在本 CPU 执行 kernel-TLB 同步后直接提交为 `Running(thief)`。这样昂贵同步不再发生在
+“候选仍可被 victim fetch 或其他 stealer 取得”的窗口，也不需要第二次锁队列复核。
+若快照非空但所有任务都 pinned 或已有 migration target，只累计
+`steal_no_eligible_candidate`，不能触发 TLB 同步。
+
+core profile 的 scheduler counter schema 为版本 2；成功路径必须满足
+`steal_candidate_found == steal_ktlb_sync_calls == steal_success`，兼容旧日志保留的
+`steal_recheck_failed` 应恒为零。KTLB 同步失败表示当前在线 thief CPU 破坏调度不变量，
+因此保持 fail-stop，不尝试把半迁移任务回滚到已变化的远端队列。
+
+### 3.2 首次发布与精确目标入口
 
 `publish_task(task)` 是普通新任务入口。启动期尚无 current 的 init/ktest runner 显式发布到
 CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择目标：preferred
@@ -178,7 +198,7 @@ CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
 普通 clone 使用可失败的 `try_publish_task_on()`：最终门禁已关闭时返回 `EAGAIN`，
 并由 syscall 层清理尚未发布的用户资源；启动/ktest wrapper 仍把拒绝视为不变量错误。
 
-### 3.2 显式 yield 后迁移
+### 3.3 显式 yield 后迁移
 
 `TaskControlBlock::request_migration(target)` 当前只接受两类调用者：尚未发布的 `New`
 任务创建路径，或本 CPU 的 current Running 任务。入口先验证目标属于
@@ -201,7 +221,7 @@ requeue_after_switch(task, source, target)
 目标 CPU fetch 时再执行 `Queued(target) -> Running(target)` 并更新 `last_cpu`。若任务真正
 进入 Blocked 或 Zombie，未消费请求会被丢弃；本节点不改变 blocked wake 的目标语义。
 
-### 3.3 运行期 affinity
+### 3.4 运行期 affinity
 
 #### Current 线程自迁移
 
@@ -252,9 +272,11 @@ B36 在目标精确处于 `Queued(source)` 时执行：
    依据最新状态重试或明确失败，不能在失败返回前部分写入 mask。
 
 这条路径从不同时持有两个 runqueue，也不增加 per-task 锁、IPI reason 或第二套迁移容器。
-目标栈 TLB 同步必须发生在进入 `Migrating` 前；否则 exit/remove 等待迁移时可能间接等待 IPI
-ack 并破坏锁依赖。`update_nice()` 若在 hint 写入后读到旧 owner，会先重算旧队列派生计数，再
-按最新状态追到新 owner，避免 `nonzero_nice_count` 漂移。
+对 queued affinity 搬队，目标栈 TLB 同步必须发生在进入 `Migrating` 前；否则
+exit/remove 等待迁移时可能间接等待 IPI ack 并破坏锁依赖。work stealing 不等待远端
+IPI：它在锁内 claim 后只同步正在运行调度器的 thief 本地 TLB，因此允许由 `Arc + Migrating`
+独占该短窗口。`update_nice()` 若在 hint 写入后读到旧 owner，会先重算旧队列派生计数，再按
+最新状态追到新 owner，避免 `nonzero_nice_count` 漂移。
 
 #### 远程 Running/Blocking owner 交接
 
@@ -280,7 +302,7 @@ B38 对远程 Running 任务分两种情况：
 之间的窗口。不存在 RunQueue 反向取请求槽的路径；该锁也不跨 IPI、
 TLB ack、context switch 或请求方等待点。
 
-### 3.4 跨 CPU group exit
+### 3.5 跨 CPU group exit
 
 B40 沿用已有六态调度状态，不增加 `Exiting/WakePending` 等第二状态机：
 
@@ -298,7 +320,7 @@ B40 沿用已有六态调度状态，不增加 `Exiting/WakePending` 等第二�
 永久 group exit 不由发起者同步等待 completion：每个线程的 live token 就是 ack，
 最后一个 ack 自然拥有 PCB/MM 收尾权。
 
-### 3.5 多线程 exec 临时停止
+### 3.6 多线程 exec 临时停止
 
 B41 不增加 `TaskStatus`，也不让 exec owner 从远端 runqueue 摘除 sibling：
 
@@ -589,8 +611,9 @@ idle: clear current -> Blocking(cpu) -> Blocked
 - `last_cpu` 只是无 owner 含义的唤醒提示，不能代替 `Queued/Running(cpu)`；
 - `cpus_allowed` 只是 owner 允许集合；任何 `Queued(cpu)` 和 `Running(cpu)` 中的
   `cpu` 都必须属于该集合；
-- `Migrating` 只允许出现在 queued 跨队列搬运的短窗口；此时 TCB 不在任何 runqueue/current，
-  且迁移调用方不得等待 IPI、获取 `TASK_MANAGER` 或释放最后一个 `Arc`；
+- `Migrating` 只允许出现在 queued 跨队列搬运或 steal claim 的短窗口；此时 TCB 不在任何
+  runqueue/current，迁移调用方不得获取 `TASK_MANAGER` 或释放最后一个 `Arc`。queued affinity
+  必须在进入该状态前完成目标同步；steal claim 只能执行 thief 本地 KTLB 同步，不能等待远端 IPI；
 - 一个任务最多属于一个 per-CPU runqueue 或一个 current slot；interruptible registry
   只是等待登记簿，`Blocking(cpu)` 期间会有意与 current slot 重叠，但不拥有执行权；
 - 本 CPU `Processor.current` 只能在真实 context switch 回到 idle 栈后清空；yield、block、exit

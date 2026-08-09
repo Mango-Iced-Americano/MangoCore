@@ -866,6 +866,16 @@ pub(crate) fn reschedule_count(cpu_id: usize) -> usize {
         .load(Ordering::Relaxed)
 }
 
+/// RESCHEDULE 已由 hard handler 发布但尚未在安全点消费，或仍保留在 mailbox。
+///
+/// 仅供 focused test 区分“尚未消费”与“发布丢失”；生产调度不能用快照代替
+/// `take_reschedule_request()` 或 runqueue 锁。
+pub(crate) fn reschedule_pending(cpu_id: usize) -> bool {
+    let cpu = &PER_CPUS[cpu_id];
+    cpu.need_resched.load(Ordering::Acquire)
+        || cpu.pending_ipi.load(Ordering::Acquire) & IpiReason::RESCHEDULE.bits() != 0
+}
+
 /// 远程 runqueue 发布完成后唤醒目标 CPU。
 pub(crate) fn request_reschedule(cpu_id: usize) -> Result<(), isize> {
     send_ipi(cpu_id, IpiReason::RESCHEDULE)

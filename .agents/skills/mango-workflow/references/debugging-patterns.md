@@ -1520,3 +1520,20 @@
   运行一次、IPI 请求被消费且任务 owner/队列计数恢复基线。
 - **相关文件**：`os/src/hal/arch/loongarch64/{mod.rs,trap/trap.S,trap/mod.rs}`、
   `os/src/task/processor.rs`、`os/src/kernel_tests/smp.rs`
+
+## 昂贵准备依赖可变候选时，先 claim 所有权再执行准备
+
+- **危险模式**：先在 owner 容器中克隆候选，释放锁执行 TLB 同步、DMA 映射或校验，再重新
+  取得 owner 锁确认候选仍在。高竞争下准备结果经常失效，不仅浪费昂贵操作，还会把“竞争
+  消失”伪装成后端性能问题。
+- **固定协议**：在原 owner 锁内先把对象切换到显式的无容器中间态并摘除，由调用方强引用
+  唯一持有；释放 owner 锁后执行只影响本地、失败可 fail-stop 的准备，最后提交到新 owner。
+  中间态期间不得释放最后一个强引用、获取可能反向等待原 owner 的全局锁，或执行需要复杂
+  回滚的远端协议。
+- **计数验收**：候选计数放在 claim 成功之后，并分别记录“无远端工作”“无合格候选”和
+  “实际昂贵调用”。正常成功路径应满足 `claimed == prepared == committed`；旧的二次复核失败
+  应恒为零。先用 focused 高竞争测试证明对象恰好提交一次，再用长测验证昂贵调用率下降。
+- **适用范围**：runqueue steal、跨 owner DMA handoff、异步资源迁移，以及任何
+  “弱候选快照→昂贵准备→二次复核”的路径。
+- **相关文件**：`os/src/task/run_queue.rs`、`os/src/task/perf.rs`、
+  `os/src/kernel_tests/smp.rs`

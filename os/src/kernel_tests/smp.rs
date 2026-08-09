@@ -458,6 +458,21 @@ static RUNNING_AFFINITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static STEAL_RUNS: AtomicUsize = AtomicUsize::new(0);
 static STEAL_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static STEAL_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_PINNED_RUNS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_PINNED_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static STEAL_CONTENTION_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static STEAL_CONTENTION_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_CONTENTION_TIDS: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(usize::MAX) }; crate::smp::MAX_CPUS];
+static STEAL_CONTENTION_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+static STEAL_AFFINITY_RACE_START: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_READY: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_HELPER_DONE: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_HELPER_OK: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static STEAL_AFFINITY_RACE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_ZOMBIE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_ZOMBIE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LOCAL_ZOMBIE_ERRORS: AtomicUsize = AtomicUsize::new(0);
@@ -524,6 +539,8 @@ lazy_static! {
     static ref CPU0_IDLE_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     static ref CPU0_IDLE_WAKE_TARGET: Mutex<Option<Weak<crate::task::TaskControlBlock>>> =
+        Mutex::new(None);
+    static ref STEAL_AFFINITY_RACE_TARGET: Mutex<Option<Weak<crate::task::TaskControlBlock>>> =
         Mutex::new(None);
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
@@ -620,6 +637,18 @@ pub fn tests() -> Vec<KernelTest> {
             running_affinity_waits_for_owner_handoff,
         ),
         KernelTest::new("smp::idle_cpu_steals_one_task", idle_cpu_steals_one_task),
+        KernelTest::new(
+            "smp::pinned_victim_skips_ktlb_sync",
+            pinned_victim_skips_ktlb_sync,
+        ),
+        KernelTest::new(
+            "smp::multiple_idle_cpus_compete_for_victim",
+            multiple_idle_cpus_compete_for_victim,
+        ),
+        KernelTest::new(
+            "smp::affinity_update_races_with_steal",
+            affinity_update_races_with_steal,
+        ),
         KernelTest::new(
             "smp::zombie_reclaims_on_owner_idle",
             zombie_reclaims_on_owner_idle,
@@ -2131,8 +2160,10 @@ fn cpu0_idle_wakes_on_remote_reschedule() -> Result<(), &'static str> {
     if CPU0_IDLE_WAKE_ERRORS.load(Ordering::Acquire) != 0 {
         return Err("CPU1 did not observe and wake a stable CPU0 idle runner");
     }
-    if crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID) <= reschedules_before {
-        return Err("CPU0 did not consume the remote idle RESCHEDULE");
+    if crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID) <= reschedules_before
+        && !crate::smp::reschedule_pending(crate::smp::BOOT_CPU_ID)
+    {
+        return Err("CPU0 remote idle RESCHEDULE was neither consumed nor pending");
     }
     #[cfg(feature = "perf_stats")]
     if waits_after <= waits_before {
@@ -3003,6 +3034,18 @@ fn record_stolen_task() {
     STEAL_RUNS.fetch_add(1, Ordering::Release);
 }
 
+fn begin_core_stats() -> (bool, usize) {
+    let stats_was_on = crate::task::perf::STATS_ON.swap(true, Ordering::AcqRel);
+    let profile_before = crate::task::perf::STATS_PROFILE
+        .swap(crate::task::perf::STATS_PROFILE_CORE, Ordering::AcqRel);
+    (stats_was_on, profile_before)
+}
+
+fn restore_core_stats(stats_was_on: bool, profile_before: usize) {
+    crate::task::perf::STATS_PROFILE.store(profile_before, Ordering::Release);
+    crate::task::perf::STATS_ON.store(stats_was_on, Ordering::Release);
+}
+
 /// CPU0 runner 占据本地 current，并把 subject 明确留在 CPU0 队列；mask 只允许
 /// CPU0/CPU1，因此唯一空闲且合法的 CPU1 必须通过生产 steal 路径取得它。
 fn idle_cpu_steals_one_task() -> Result<(), &'static str> {
@@ -3016,35 +3059,433 @@ fn idle_cpu_steals_one_task() -> Result<(), &'static str> {
     STEAL_RUNS.store(0, Ordering::Release);
     STEAL_CPU.store(usize::MAX, Ordering::Release);
     STEAL_ERRORS.store(0, Ordering::Release);
+    let (stats_was_on, profile_before) = begin_core_stats();
+    #[cfg(feature = "perf_stats")]
+    let candidate_before = crate::task::perf::STEAL_CANDIDATE_FOUND.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let success_before = crate::task::perf::STEAL_SUCCESS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let recheck_before = crate::task::perf::STEAL_RECHECK_FAILED.load(Ordering::Acquire);
     let queue_before = crate::task::run_queue_count(crate::smp::BOOT_CPU_ID);
-    // 先用 bit0 把 subject 稳定留在 CPU0 队列，避免“发布后检查”与 AP
-    // timer 唤醒竞争；确认 victim 后再通过生产 affinity 写侧允许 CPU1。
-    let task = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, record_stolen_task);
-    if task.task_status()
-        != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
-        || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before + 1
-    {
-        return Err("work-stealing subject was not queued on the victim CPU");
+    let result = (|| {
+        // 先用 bit0 把 subject 稳定留在 CPU0 队列，避免“发布后检查”与 AP
+        // timer 唤醒竞争；确认 victim 后再通过生产 affinity 写侧允许 CPU1。
+        let task = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, record_stolen_task);
+        if task.task_status() != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
+            || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before + 1
+        {
+            return Err("work-stealing subject was not queued on the victim CPU");
+        }
+        let wide_mask = (1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1);
+        if !crate::task::set_remote_affinity(&task, wide_mask) {
+            return Err("work-stealing subject affinity could not be widened");
+        }
+
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        while task.task_status() != crate::task::TaskStatus::Zombie {
+            if crate::hal::get_time() >= deadline {
+                return Err("idle CPU did not steal the queued task");
+            }
+            core::hint::spin_loop();
+        }
+        if STEAL_RUNS.load(Ordering::Acquire) != 1
+            || STEAL_CPU.load(Ordering::Acquire) != 1
+            || STEAL_ERRORS.load(Ordering::Acquire) != 0
+            || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before
+        {
+            return Err("stolen task did not keep a unique CPU/runqueue owner");
+        }
+        #[cfg(feature = "perf_stats")]
+        {
+            let candidate = crate::task::perf::STEAL_CANDIDATE_FOUND
+                .load(Ordering::Acquire)
+                .wrapping_sub(candidate_before);
+            let ktlb = crate::task::perf::STEAL_KTLB_SYNC_CALLS
+                .load(Ordering::Acquire)
+                .wrapping_sub(ktlb_before);
+            let success = crate::task::perf::STEAL_SUCCESS
+                .load(Ordering::Acquire)
+                .wrapping_sub(success_before);
+            let recheck = crate::task::perf::STEAL_RECHECK_FAILED
+                .load(Ordering::Acquire)
+                .wrapping_sub(recheck_before);
+            if candidate != 1 || candidate != ktlb || ktlb != success || recheck != 0 {
+                return Err("single steal counter/state transition mismatch");
+            }
+        }
+        Ok(())
+    })();
+    restore_core_stats(stats_was_on, profile_before);
+    result
+}
+
+fn record_pinned_steal_subject() {
+    STEAL_PINNED_CPU.store(crate::smp::cpu_id(), Ordering::Release);
+    STEAL_PINNED_RUNS.fetch_add(1, Ordering::Release);
+}
+
+/// pinned-only victim 只能计入 no-eligible，不能触发 kernel-TLB 同步。
+fn pinned_victim_skips_ktlb_sync() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("pinned steal test did not run on CPU0");
     }
-    let wide_mask = (1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1);
-    if !crate::task::set_remote_affinity(&task, wide_mask) {
-        return Err("work-stealing subject affinity could not be widened");
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
     }
 
-    let deadline =
-        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
-    while task.task_status() != crate::task::TaskStatus::Zombie {
-        if crate::hal::get_time() >= deadline {
-            return Err("idle CPU did not steal the queued task");
+    STEAL_PINNED_RUNS.store(0, Ordering::Release);
+    STEAL_PINNED_CPU.store(usize::MAX, Ordering::Release);
+    let queue_before = crate::task::run_queue_count(crate::smp::BOOT_CPU_ID);
+    let task =
+        crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, record_pinned_steal_subject);
+    let (stats_was_on, profile_before) = begin_core_stats();
+    #[cfg(feature = "perf_stats")]
+    let no_eligible_before = crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
+    #[cfg(not(feature = "perf_stats"))]
+    let timer_before = crate::smp::timer_irq_count(1);
+
+    let result = (|| {
+        crate::smp::request_reschedule(1)
+            .map_err(|_| "failed to kick CPU1 for pinned steal test")?;
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        loop {
+            #[cfg(feature = "perf_stats")]
+            let attempted = crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE.load(Ordering::Acquire)
+                > no_eligible_before;
+            #[cfg(not(feature = "perf_stats"))]
+            let attempted = crate::smp::timer_irq_count(1) > timer_before;
+            if attempted {
+                break;
+            }
+            if crate::hal::get_time() >= deadline {
+                return Err("CPU1 did not inspect the pinned-only victim");
+            }
+            core::hint::spin_loop();
+        }
+        if task.task_status() != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
+            || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before + 1
+        {
+            return Err("pinned subject lost its CPU0 runqueue owner");
+        }
+        #[cfg(feature = "perf_stats")]
+        if crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire) != ktlb_before {
+            return Err("pinned-only victim triggered a kernel-TLB sync");
+        }
+        Ok(())
+    })();
+    restore_core_stats(stats_was_on, profile_before);
+
+    // 无论计数断言是否成功，都让 pinned subject 在 CPU0 正常执行并回收，避免
+    // 污染后续并发用例。
+    if task.task_status() == crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID) {
+        crate::task::suspend_current_and_run_next();
+    }
+    if task.task_status() != crate::task::TaskStatus::Zombie
+        || STEAL_PINNED_RUNS.load(Ordering::Acquire) != 1
+        || STEAL_PINNED_CPU.load(Ordering::Acquire) != crate::smp::BOOT_CPU_ID
+        || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before
+    {
+        return Err("pinned subject cleanup did not restore CPU0 baseline");
+    }
+    result
+}
+
+fn run_contended_stolen_subject() {
+    let cpu = crate::smp::cpu_id();
+    let Some(task) = crate::task::current_task() else {
+        STEAL_CONTENTION_ERRORS.fetch_or(1, Ordering::Release);
+        return;
+    };
+    let tid = task.gettid();
+    let owner_ok = task.task_status() == crate::task::TaskStatus::Running(cpu);
+    let index = STEAL_CONTENTION_TIDS
+        .iter()
+        .position(|expected| expected.load(Ordering::Acquire) == tid);
+    let Some(index) = index else {
+        STEAL_CONTENTION_ERRORS.fetch_or(2, Ordering::Release);
+        return;
+    };
+    if cpu == crate::smp::BOOT_CPU_ID || !owner_ok {
+        STEAL_CONTENTION_ERRORS.fetch_or(4, Ordering::Release);
+    }
+    STEAL_CONTENTION_RUNS[index].fetch_add(1, Ordering::AcqRel);
+    while STEAL_CONTENTION_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+}
+
+/// 所有 AP 同时从 CPU0 victim 竞争任务；每个 claim 必须恰好对应一次本地
+/// kernel-TLB 同步和一次成功 dispatch。
+fn multiple_idle_cpus_compete_for_victim() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("steal contention test did not run on CPU0");
+    }
+    let task_count = crate::smp::configured_cpu_count().saturating_sub(1);
+    if task_count == 0 {
+        return Ok(());
+    }
+
+    STEAL_CONTENTION_RELEASE.store(0, Ordering::Release);
+    STEAL_CONTENTION_ERRORS.store(0, Ordering::Release);
+    for index in 0..crate::smp::MAX_CPUS {
+        STEAL_CONTENTION_TIDS[index].store(usize::MAX, Ordering::Release);
+        STEAL_CONTENTION_RUNS[index].store(0, Ordering::Release);
+    }
+    let mut queue_before = [0usize; crate::smp::MAX_CPUS];
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        queue_before[cpu] = crate::task::run_queue_count(cpu);
+    }
+    let mut tasks = Vec::new();
+    for index in 0..task_count {
+        let task =
+            crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, run_contended_stolen_subject);
+        STEAL_CONTENTION_TIDS[index].store(task.gettid(), Ordering::Release);
+        tasks.push(task);
+    }
+
+    let (stats_was_on, profile_before) = begin_core_stats();
+    #[cfg(feature = "perf_stats")]
+    let candidate_before = crate::task::perf::STEAL_CANDIDATE_FOUND.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let success_before = crate::task::perf::STEAL_SUCCESS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let recheck_before = crate::task::perf::STEAL_RECHECK_FAILED.load(Ordering::Acquire);
+
+    let result = (|| {
+        let all_cpus = (1usize << crate::smp::configured_cpu_count()) - 1;
+        for task in &tasks {
+            if !crate::task::set_remote_affinity(task, all_cpus) {
+                return Err("failed to widen contended steal subject affinity");
+            }
+        }
+        for cpu in 1..crate::smp::configured_cpu_count() {
+            crate::smp::request_reschedule(cpu)
+                .map_err(|_| "failed to kick AP for steal contention")?;
+        }
+
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while !(0..task_count)
+            .all(|index| STEAL_CONTENTION_RUNS[index].load(Ordering::Acquire) == 1)
+        {
+            if crate::hal::get_time() >= deadline {
+                return Err("not all APs claimed a contended victim task");
+            }
+            core::hint::spin_loop();
+        }
+        if STEAL_CONTENTION_ERRORS.load(Ordering::Acquire) != 0 {
+            return Err("contended steal observed an invalid current/CPU owner");
+        }
+        #[cfg(feature = "perf_stats")]
+        {
+            let candidate = crate::task::perf::STEAL_CANDIDATE_FOUND
+                .load(Ordering::Acquire)
+                .wrapping_sub(candidate_before);
+            let ktlb = crate::task::perf::STEAL_KTLB_SYNC_CALLS
+                .load(Ordering::Acquire)
+                .wrapping_sub(ktlb_before);
+            let success = crate::task::perf::STEAL_SUCCESS
+                .load(Ordering::Acquire)
+                .wrapping_sub(success_before);
+            let recheck = crate::task::perf::STEAL_RECHECK_FAILED
+                .load(Ordering::Acquire)
+                .wrapping_sub(recheck_before);
+            if candidate != task_count || candidate != ktlb || ktlb != success || recheck != 0 {
+                return Err("contended candidate/KTLB/success counters diverged");
+            }
+        }
+        Ok(())
+    })();
+
+    STEAL_CONTENTION_RELEASE.store(1, Ordering::Release);
+    let cleanup_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    while !tasks
+        .iter()
+        .all(|task| task.task_status() == crate::task::TaskStatus::Zombie)
+    {
+        if crate::hal::get_time() >= cleanup_deadline {
+            restore_core_stats(stats_was_on, profile_before);
+            return Err("contended steal subjects did not exit");
         }
         core::hint::spin_loop();
     }
-    if STEAL_RUNS.load(Ordering::Acquire) != 1
-        || STEAL_CPU.load(Ordering::Acquire) != 1
-        || STEAL_ERRORS.load(Ordering::Acquire) != 0
-        || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != queue_before
+    restore_core_stats(stats_was_on, profile_before);
+    result?;
+    if (0..task_count).any(|index| STEAL_CONTENTION_RUNS[index].load(Ordering::Acquire) != 1) {
+        return Err("a contended steal subject executed more than once");
+    }
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        if crate::task::run_queue_count(cpu) != queue_before[cpu] {
+            return Err("steal contention did not restore runqueue baseline");
+        }
+    }
+    Ok(())
+}
+
+fn affinity_race_gate() {
+    STEAL_AFFINITY_RACE_READY.fetch_or(1, Ordering::AcqRel);
+    while STEAL_AFFINITY_RACE_START.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+}
+
+fn affinity_race_helper() {
+    STEAL_AFFINITY_RACE_READY.fetch_or(2, Ordering::AcqRel);
+    while STEAL_AFFINITY_RACE_START.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let target = STEAL_AFFINITY_RACE_TARGET.lock().as_ref().cloned();
+    let Some(target) = target.and_then(|target| target.upgrade()) else {
+        STEAL_AFFINITY_RACE_ERRORS.fetch_or(1, Ordering::Release);
+        STEAL_AFFINITY_RACE_HELPER_DONE.store(1, Ordering::Release);
+        return;
+    };
+    let mask = (1usize << 1) | (1usize << 2);
+    if crate::task::set_remote_affinity(&target, mask) {
+        STEAL_AFFINITY_RACE_HELPER_OK.store(1, Ordering::Release);
+    } else {
+        STEAL_AFFINITY_RACE_ERRORS.fetch_or(2, Ordering::Release);
+    }
+    STEAL_AFFINITY_RACE_HELPER_DONE.store(1, Ordering::Release);
+}
+
+fn affinity_race_subject() {
+    let cpu = crate::smp::cpu_id();
+    let owner_ok = crate::task::current_task()
+        .map(|task| task.task_status() == crate::task::TaskStatus::Running(cpu))
+        .unwrap_or(false);
+    if cpu == crate::smp::BOOT_CPU_ID || !owner_ok {
+        STEAL_AFFINITY_RACE_ERRORS.fetch_or(4, Ordering::Release);
+    }
+    STEAL_AFFINITY_RACE_RUNS.fetch_add(1, Ordering::AcqRel);
+    while STEAL_AFFINITY_RACE_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+}
+
+/// CPU1 从 victim claim 的同时，CPU2 通过生产 affinity 写侧排除 CPU0。
+/// 无论 runqueue 写侧还是 stealer 先线性化，最终都必须得到一个稳定 owner，
+/// 不能留下永久 Migrating、重复执行或计数下溢。
+fn affinity_update_races_with_steal() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("steal/affinity race test did not run on CPU0");
+    }
+    if crate::smp::configured_cpu_count() < 3 {
+        return Ok(());
+    }
+
+    STEAL_AFFINITY_RACE_START.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_READY.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_HELPER_DONE.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_HELPER_OK.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_RELEASE.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_RUNS.store(0, Ordering::Release);
+    STEAL_AFFINITY_RACE_ERRORS.store(0, Ordering::Release);
+    *STEAL_AFFINITY_RACE_TARGET.lock() = None;
+
+    // gate 占住 CPU1，确保 subject 在 start 发布前不会被 timer 提前 steal；
+    // helper 占住 CPU2，并与 gate 退出后的 CPU1 steal 同时修改 affinity。
+    let gate = crate::task::spawn_ktest_task_on(1, affinity_race_gate);
+    let helper = crate::task::spawn_ktest_task_on(2, affinity_race_helper);
+    let ready_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while STEAL_AFFINITY_RACE_READY.load(Ordering::Acquire) != 3 {
+        if crate::hal::get_time() >= ready_deadline {
+            STEAL_AFFINITY_RACE_START.store(1, Ordering::Release);
+            return Err("steal/affinity race helpers did not start");
+        }
+        core::hint::spin_loop();
+    }
+
+    let subject = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, affinity_race_subject);
+    *STEAL_AFFINITY_RACE_TARGET.lock() = Some(Arc::downgrade(&subject));
+    let initial_mask = (1usize << crate::smp::BOOT_CPU_ID) | (1usize << 1);
+    if !crate::task::set_remote_affinity(&subject, initial_mask) {
+        STEAL_AFFINITY_RACE_START.store(1, Ordering::Release);
+        STEAL_AFFINITY_RACE_RELEASE.store(1, Ordering::Release);
+        return Err("failed to prepare steal/affinity race subject");
+    }
+
+    let (stats_was_on, profile_before) = begin_core_stats();
+    #[cfg(feature = "perf_stats")]
+    let candidate_before = crate::task::perf::STEAL_CANDIDATE_FOUND.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let success_before = crate::task::perf::STEAL_SUCCESS.load(Ordering::Acquire);
+    #[cfg(feature = "perf_stats")]
+    let recheck_before = crate::task::perf::STEAL_RECHECK_FAILED.load(Ordering::Acquire);
+
+    STEAL_AFFINITY_RACE_START.store(1, Ordering::Release);
+    let result = (|| {
+        let deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+        while STEAL_AFFINITY_RACE_HELPER_DONE.load(Ordering::Acquire) == 0
+            || STEAL_AFFINITY_RACE_RUNS.load(Ordering::Acquire) == 0
+        {
+            if crate::hal::get_time() >= deadline {
+                return Err("steal/affinity race did not reach stable execution");
+            }
+            core::hint::spin_loop();
+        }
+        let status = subject.task_status();
+        if !matches!(status, crate::task::TaskStatus::Running(1 | 2))
+            || subject.cpus_allowed() != ((1usize << 1) | (1usize << 2))
+            || STEAL_AFFINITY_RACE_HELPER_OK.load(Ordering::Acquire) != 1
+            || STEAL_AFFINITY_RACE_ERRORS.load(Ordering::Acquire) != 0
+        {
+            return Err("affinity update did not publish one stable running owner");
+        }
+        #[cfg(feature = "perf_stats")]
+        {
+            let candidate = crate::task::perf::STEAL_CANDIDATE_FOUND
+                .load(Ordering::Acquire)
+                .wrapping_sub(candidate_before);
+            let ktlb = crate::task::perf::STEAL_KTLB_SYNC_CALLS
+                .load(Ordering::Acquire)
+                .wrapping_sub(ktlb_before);
+            let success = crate::task::perf::STEAL_SUCCESS
+                .load(Ordering::Acquire)
+                .wrapping_sub(success_before);
+            let recheck = crate::task::perf::STEAL_RECHECK_FAILED
+                .load(Ordering::Acquire)
+                .wrapping_sub(recheck_before);
+            if candidate != ktlb || ktlb != success || recheck != 0 {
+                return Err("steal/affinity race counter schema diverged");
+            }
+        }
+        Ok(())
+    })();
+
+    STEAL_AFFINITY_RACE_RELEASE.store(1, Ordering::Release);
+    let cleanup_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    while subject.task_status() != crate::task::TaskStatus::Zombie
+        || helper.task_status() != crate::task::TaskStatus::Zombie
+        || gate.task_status() != crate::task::TaskStatus::Zombie
     {
-        return Err("stolen task did not keep a unique CPU/runqueue owner");
+        if crate::hal::get_time() >= cleanup_deadline {
+            restore_core_stats(stats_was_on, profile_before);
+            return Err("steal/affinity race cleanup timed out");
+        }
+        core::hint::spin_loop();
+    }
+    *STEAL_AFFINITY_RACE_TARGET.lock() = None;
+    restore_core_stats(stats_was_on, profile_before);
+    result?;
+    if STEAL_AFFINITY_RACE_RUNS.load(Ordering::Acquire) != 1
+        || subject.task_status() == crate::task::TaskStatus::Migrating
+    {
+        return Err("steal/affinity race left duplicate or migrating ownership");
     }
     Ok(())
 }

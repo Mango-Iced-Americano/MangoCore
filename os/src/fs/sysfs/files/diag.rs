@@ -74,6 +74,11 @@ fn stats_taskq_content(
     let mut s = String::with_capacity(1400);
     let _ = writeln!(
         s,
+        "scheduler_counter_schema_version={}",
+        crate::task::perf::SCHED_COUNTER_SCHEMA_VERSION
+    );
+    let _ = writeln!(
+        s,
         "ready_len_max={}",
         read_counter(&crate::task::perf::READY_LEN_MAX)
     );
@@ -157,8 +162,11 @@ fn stats_taskq_content(
     let _ = writeln!(s, "task_run_slice_ticks_total={}", read_counter(&crate::task::perf::TASK_RUN_SLICE_TICKS_TOTAL));
     let _ = writeln!(s, "steal_attempts={}", read_counter(&crate::task::perf::STEAL_ATTEMPTS));
     let _ = writeln!(s, "steal_candidate_found={}", read_counter(&crate::task::perf::STEAL_CANDIDATE_FOUND));
+    let _ = writeln!(s, "steal_no_remote_ready={}", read_counter(&crate::task::perf::STEAL_NO_REMOTE_READY));
+    let _ = writeln!(s, "steal_no_eligible_candidate={}", read_counter(&crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE));
     let _ = writeln!(s, "steal_success={}", read_counter(&crate::task::perf::STEAL_SUCCESS));
     let _ = writeln!(s, "steal_recheck_failed={}", read_counter(&crate::task::perf::STEAL_RECHECK_FAILED));
+    let _ = writeln!(s, "steal_ktlb_sync_calls={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_CALLS));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_total={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_max={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX));
     for cpu in 0..crate::smp::MAX_CPUS {

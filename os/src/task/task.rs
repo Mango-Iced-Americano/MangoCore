@@ -2326,8 +2326,9 @@ impl Drop for TaskControlBlock {
 /// 任务的调度所有权状态。
 ///
 /// `Queued(cpu)` 和 `Running(cpu)` 直接携带 owner。`Migrating` 只覆盖 queued
-/// 任务已经离开源队列、尚未进入目标队列的短窗口；此时唯一 owner 是迁移调用方，
-/// 状态本身不携带 CPU，避免把尚未取得任务的目标误写成 owner。
+/// 任务已经离开源队列、尚未交给目标 runqueue/current 的窗口；此时唯一 owner 是
+/// 迁移调用方持有的强引用。work stealing 可在该状态执行 thief 本地 kernel-TLB
+/// 同步，状态本身不携带 CPU，避免把尚未取得任务的目标误写成 owner。
 pub enum TaskStatus {
     New,
     Queued(usize),

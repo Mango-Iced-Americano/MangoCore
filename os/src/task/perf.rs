@@ -22,6 +22,8 @@ pub const STATS_PROFILE_ALL: usize =
     STATS_PROFILE_CORE | STATS_PROFILE_MEMORY_IO | STATS_PROFILE_NETWORK_RUNTIME;
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
+/// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 2;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -274,10 +276,13 @@ mod enabled {
     pub static STEAL_ATTEMPTS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
         [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     pub static STEAL_CANDIDATE_FOUND: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_NO_REMOTE_READY: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_NO_ELIGIBLE_CANDIDATE: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_SUCCESS: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_SUCCESS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
         [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     pub static STEAL_RECHECK_FAILED: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_KTLB_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_KTLB_SYNC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_KTLB_SYNC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static SCHED_IDLE_BUSY_LOOPS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
@@ -703,6 +708,20 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_steal_no_remote_ready() {
+        if stats_enabled() {
+            STEAL_NO_REMOTE_READY.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_steal_no_eligible_candidate() {
+        if stats_enabled() {
+            STEAL_NO_ELIGIBLE_CANDIDATE.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_steal_success(cpu: usize) {
         if stats_enabled() {
             STEAL_SUCCESS.fetch_add(1, Ordering::Relaxed);
@@ -736,6 +755,7 @@ mod enabled {
         if !stats_enabled() {
             return;
         }
+        STEAL_KTLB_SYNC_CALLS.fetch_add(1, Ordering::Relaxed);
         STEAL_KTLB_SYNC_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&STEAL_KTLB_SYNC_TICKS_MAX, ticks);
     }
@@ -2743,11 +2763,14 @@ mod enabled {
             counter.store(0, Ordering::Relaxed);
         }
         STEAL_CANDIDATE_FOUND.store(0, Ordering::Relaxed);
+        STEAL_NO_REMOTE_READY.store(0, Ordering::Relaxed);
+        STEAL_NO_ELIGIBLE_CANDIDATE.store(0, Ordering::Relaxed);
         STEAL_SUCCESS.store(0, Ordering::Relaxed);
         for counter in &STEAL_SUCCESS_BY_CPU {
             counter.store(0, Ordering::Relaxed);
         }
         STEAL_RECHECK_FAILED.store(0, Ordering::Relaxed);
+        STEAL_KTLB_SYNC_CALLS.store(0, Ordering::Relaxed);
         STEAL_KTLB_SYNC_TICKS_TOTAL.store(0, Ordering::Relaxed);
         STEAL_KTLB_SYNC_TICKS_MAX.store(0, Ordering::Relaxed);
         for counter in &SCHED_IDLE_BUSY_LOOPS_BY_CPU {
@@ -3683,6 +3706,14 @@ pub fn record_steal_candidate() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_steal_no_remote_ready() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_steal_no_eligible_candidate() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_steal_success(_cpu: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3791,11 +3822,14 @@ perf_stub_counter!(STEAL_ATTEMPTS);
 pub static STEAL_ATTEMPTS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 perf_stub_counter!(STEAL_CANDIDATE_FOUND);
+perf_stub_counter!(STEAL_NO_REMOTE_READY);
+perf_stub_counter!(STEAL_NO_ELIGIBLE_CANDIDATE);
 perf_stub_counter!(STEAL_SUCCESS);
 #[cfg(not(feature = "perf_stats"))]
 pub static STEAL_SUCCESS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 perf_stub_counter!(STEAL_RECHECK_FAILED);
+perf_stub_counter!(STEAL_KTLB_SYNC_CALLS);
 perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_TOTAL);
 perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_MAX);
 #[cfg(not(feature = "perf_stats"))]
