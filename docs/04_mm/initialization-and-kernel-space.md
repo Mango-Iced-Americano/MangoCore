@@ -176,8 +176,8 @@ lazy_static! {
 | `.rodata` | `R` | `srodata..erodata` |
 | `.data` | `R | W | G` | `sdata..edata` |
 | `.bss` | `R | W | G` | `sbss_with_stack..ebss` |
-| usable DRAM regions | `R | W | G` | 运行期 FDT/实板 fallback region 扣除内核和固件 carveout 后的各区间 |
-| MMIO | `R | W | G` | FDT 早期 MMIO 资源（含 PCI host ECAM 与 memory window） |
+| usable DRAM regions | `R | W`，仅不与用户 VA 相交的 RV64 区间可加 `G` | 运行期 FDT/实板 fallback region 扣除内核和固件 carveout 后的各区间 |
+| MMIO | `R | W`，仅不与用户 VA 相交的 RV64 区间可加 `G` | FDT 早期 MMIO 资源（含 PCI host ECAM 与 memory window） |
 
 映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致。FDT
 MMIO 资源的对齐中段优先使用 2 MiB 映射，避免把 QEMU PCI host 的大 64-bit memory window
@@ -185,6 +185,11 @@ MMIO 资源的对齐中段优先使用 2 MiB 映射，避免把 QEMU PCI host �
 RV64 为每个动态 RAM 页建立真实叶子 PTE；LA64 的低地址恒等访问由 DMW 提供，并按固件
 最高 DRAM 地址建立软件 dirty bitmap。2K1000LA 和 LA64 QEMU 的多个 bank 分别处理，
 中间 MMIO 空洞不会作为普通内存映射、清零或分配。
+
+RV64 的 `G` 位会忽略 `SATP.ASID`。因此低地址 DRAM、MMIO 或固件保留区只要与
+`[USER_VA_BASE, USER_VA_END)` 相交，就必须使用内核 ASID 0 的 non-global 映射；否则用户
+页表在同一 VA 映射另一 PPN 时仍可能命中内核恒等映射的 global TLB 项。高半区内核段、
+trampoline 以及完全位于用户范围之外的恒等映射继续保留 `G`。
 
 ## 8. 动态内核映射
 

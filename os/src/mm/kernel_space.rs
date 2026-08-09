@@ -36,6 +36,25 @@ extern "C" {
     fn strampoline();
 }
 
+/// Return permissions for a kernel identity mapping.
+///
+/// RISC-V global TLB entries ignore SATP.ASID.  A low identity mapping whose
+/// virtual range overlaps user space therefore cannot be global: a user page
+/// table may legally map the same VA to a different physical page.  Keep such
+/// mappings in the reserved kernel ASID 0 while retaining `G` for disjoint
+/// kernel-only ranges.  Other architectures keep their established policy.
+fn kernel_identity_permissions(
+    _start: usize,
+    _end: usize,
+    permissions: MapPermission,
+) -> MapPermission {
+    #[cfg(target_arch = "riscv64")]
+    if _start < USER_VA_END && USER_VA_BASE < _end {
+        return permissions;
+    }
+    permissions | MapPermission::G
+}
+
 lazy_static! {
     /// 内核空间
     pub static ref KERNEL_SPACE: Arc<Mutex<KernelSpace<crate::mm::KernelPageTableImpl>>> =
@@ -246,11 +265,13 @@ impl<T: PageTable> KernelSpace<T> {
             MapPermission::R | MapPermission::W | MapPermission::G
         );
         for_each_usable_frame_region(|start, end| {
+            let start = start.start_addr().0;
+            let end = end.start_addr().0;
             kernel_identical_map!(
                 "physical memory region",
-                start.start_addr().0,
-                end.start_addr().0,
-                MapPermission::R | MapPermission::W | MapPermission::G
+                start,
+                end,
+                kernel_identity_permissions(start, end, MapPermission::R | MapPermission::W)
             );
         });
 
@@ -260,7 +281,11 @@ impl<T: PageTable> KernelSpace<T> {
                 .map_unmapped_identical_range(
                     VirtAddr::from(base),
                     VirtAddr::from(end),
-                    MapPermission::R | MapPermission::W | MapPermission::G,
+                    kernel_identity_permissions(
+                        base,
+                        end,
+                        MapPermission::R | MapPermission::W,
+                    ),
                 )
                 .unwrap();
         }
@@ -276,7 +301,11 @@ impl<T: PageTable> KernelSpace<T> {
             if kernel_start <= base && end <= kernel_end {
                 continue;
             }
-            kernel_identical_map!(base, end, MapPermission::R | MapPermission::G);
+            kernel_identical_map!(
+                base,
+                end,
+                kernel_identity_permissions(base, end, MapPermission::R)
+            );
         }
         kernel_space
     }

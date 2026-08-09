@@ -318,6 +318,11 @@ CPU 的 non-global 项，收到全部 ack 后才推进 epoch 并允许编号复�
 变化时成对写入 `CSR.PGDL/CSR.ASID`。两者的编号复用都发生在全 CPU flush/ack 后，而不是
 依赖每次 context switch 掩盖旧翻译。
 
+RV64 使用 ASID 隔离用户页表与内核页表时，global PTE 必须在所有 ASID 下保持同一 VA→PA
+含义。内核低地址恒等映射可能与用户 VA 范围重叠，不能设置 `G`；它们固定属于内核 ASID
+0。只有高半区内核段、共享 trampoline 和完全不与用户 VA 相交的恒等映射可以跨 ASID
+保留 global TLB 项。
+
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
 页表和 VMA 是两份必须保持一致的状态。VMA 说明“这段虚拟地址应该如何被访问”，页表说明“硬件当前如何翻译这个 VPN”。缺页、mprotect、munmap、fork CoW 都会同时影响二者中的至少一份：只改 VMA 不改已存在 PTE，会让硬件继续按旧权限运行；只改 PTE 不改 VMA，下一次 fault 或 proc maps/mincore 会看到错误语义。
