@@ -227,7 +227,7 @@ pub(crate) fn fetch(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 /// runqueue 锁和 `Queued -> Migrating` 状态交接决定。候选栈映射的本地 TLB
 /// 同步可能等待，因此先在锁内克隆候选、锁外同步，再回到同一队列复核。
 pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
-    crate::task::perf::record_steal_attempt();
+    crate::task::perf::record_steal_attempt(cpu);
     let runnable_cpus = crate::smp::online_cpu_mask()
         & crate::smp::scheduler_cpu_mask()
         & !crate::smp::stopped_cpu_mask()
@@ -314,7 +314,7 @@ pub(crate) fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     }
     task.run_started_ticks.store(now, Ordering::Release);
     state(cpu).record_steal();
-    crate::task::perf::record_steal_success();
+    crate::task::perf::record_steal_success(cpu);
     Some(task)
 }
 

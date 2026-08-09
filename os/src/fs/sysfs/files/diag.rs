@@ -71,7 +71,7 @@ fn stats_taskq_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1400);
     let _ = writeln!(
         s,
         "ready_len_max={}",
@@ -161,6 +161,32 @@ fn stats_taskq_content(
     let _ = writeln!(s, "steal_recheck_failed={}", read_counter(&crate::task::perf::STEAL_RECHECK_FAILED));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_total={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_max={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX));
+    for cpu in 0..crate::smp::MAX_CPUS {
+        let _ = writeln!(
+            s,
+            "steal_attempts_cpu{}={}",
+            cpu,
+            read_counter(&crate::task::perf::STEAL_ATTEMPTS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "steal_success_cpu{}={}",
+            cpu,
+            read_counter(&crate::task::perf::STEAL_SUCCESS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "idle_busy_loops_cpu{}={}",
+            cpu,
+            read_counter(&crate::task::perf::SCHED_IDLE_BUSY_LOOPS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "idle_wait_loops_cpu{}={}",
+            cpu,
+            read_counter(&crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[cpu])
+        );
+    }
     write_str(offset, len, buf, &s)
 }
 
@@ -1091,7 +1117,7 @@ fn stats_blockio_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(768);
+    let mut s = String::with_capacity(1800);
     let _ = writeln!(
         s,
         "blk_vread_reqs={}",
@@ -1422,6 +1448,30 @@ fn stats_blockio_content(
         "pc_read_cycles_total={}",
         read_counter(&crate::task::perf::PC_READ_CYCLES_TOTAL)
     );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_enabled={}",
+        crate::drivers::block::virtio_dma_pool::dma_pool_is_enabled()
+    );
+    let _ = writeln!(s, "virtio_blk_read_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_CHUNKS));
+    let _ = writeln!(s, "virtio_blk_read_bytes={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_BYTES));
+    let _ = writeln!(s, "virtio_blk_write_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_CHUNKS));
+    let _ = writeln!(s, "virtio_blk_write_bytes={}", read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_BYTES));
+    let _ = writeln!(s, "virtio_dma_pool_reserve_success={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_SUCCESS));
+    let _ = writeln!(s, "virtio_dma_pool_reserve_fail={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_FAIL));
+    let _ = writeln!(s, "virtio_dma_pool_consume={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CONSUME));
+    let _ = writeln!(s, "virtio_dma_pool_cancel={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CANCEL));
+    let _ = writeln!(s, "virtio_dma_pool_finish={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_FINISH));
+    let _ = writeln!(s, "virtio_dma_share_calls={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_CALLS));
+    let _ = writeln!(s, "virtio_dma_share_data_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_POOL));
+    let _ = writeln!(s, "virtio_dma_share_data_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_share_header_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_share_status_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_share_indirect_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_share_other_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_OTHER_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_bridge_lock_wait_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL));
+    let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL));
+    let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_max={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX));
     let _ = writeln!(
         s,
         "sata_read_reqs={}",

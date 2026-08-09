@@ -605,6 +605,7 @@ pub fn run_tasks() -> ! {
         } else {
             // 没有就绪的任务 → CPU idle
             let stage_t0 = sched_profile_start(sched_profile);
+            super::perf::record_scheduler_idle(cpu, false);
             if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
                 NET_INTERFACE.request_poll();
             } else {
@@ -657,6 +658,7 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
             super::perf::record_task_switch_idle_no_next();
             // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
             // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
+            super::perf::record_scheduler_idle(cpu, true);
             crate::hal::secondary_cpu_wait();
         }
     }

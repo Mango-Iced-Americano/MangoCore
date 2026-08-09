@@ -85,6 +85,63 @@ lazy_static::lazy_static! {
     });
 }
 
+/// Serialize the short bridge window between a block request's reservation
+/// and the `virtio_drivers::Hal::share()` callbacks that consume it.
+///
+/// The reservation is carried through a legacy global because the virtio
+/// driver API does not pass request context into `share()`.  Block and net
+/// devices use the same HAL implementation, so protecting only each device's
+/// own queue mutex is insufficient on SMP: another device can overwrite the
+/// pending token between the request setup and the driver's share callbacks.
+/// Callers hold this guard across one complete virtio request, including the
+/// `read_blocks`/`write_blocks`/`send`/`receive` call.
+static DMA_BRIDGE_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct DmaBridgeGuard {
+    guard: Option<spin::MutexGuard<'static, ()>>,
+    irq_was_enabled: bool,
+    lock_start_ticks: usize,
+    lock_acquired_ticks: usize,
+}
+
+pub(crate) fn dma_bridge_lock() -> DmaBridgeGuard {
+    // VirtIO completion paths may be interrupted by the scheduler's network
+    // poll on the same hart.  Disable local interrupts before taking the
+    // bridge lock so an interrupt cannot re-enter `share()` and spin forever
+    // on a lock held by the interrupted block request.
+    let irq_was_enabled = crate::hal::local_irq_save();
+    let lock_start_ticks = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    let guard = DMA_BRIDGE_LOCK.lock();
+    let lock_acquired_ticks = crate::task::perf::perf_time_now_for(
+        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+    );
+    DmaBridgeGuard {
+        guard: Some(guard),
+        irq_was_enabled,
+        lock_start_ticks,
+        lock_acquired_ticks,
+    }
+}
+
+impl Drop for DmaBridgeGuard {
+    fn drop(&mut self) {
+        let released_ticks = crate::task::perf::perf_time_now_for(
+            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        );
+        crate::task::perf::record_virtio_dma_bridge_lock(
+            self.lock_acquired_ticks.wrapping_sub(self.lock_start_ticks),
+            released_ticks.wrapping_sub(self.lock_acquired_ticks),
+        );
+        // Release the lock before restoring interrupts; otherwise an
+        // immediately pending interrupt could re-enter the bridge while the
+        // previous guard is still live.
+        drop(self.guard.take());
+        crate::hal::local_irq_restore(self.irq_was_enabled);
+    }
+}
+
 // ── 公开 API ────────────────────────────────────────────────────────────
 
 /// 一次性初始化 DMA 池。
@@ -138,6 +195,8 @@ pub fn dma_pool_reserve(pages: usize) -> Option<DmaReservation> {
     assert!(pages <= DMA_POOL_SLOT_PAGES);
     let mut pool = DMA_POOL.lock();
     if !pool.enabled || pool.slots.is_empty() {
+        drop(pool);
+        crate::task::perf::record_virtio_dma_pool_reserve(false);
         return None;
     }
 
@@ -151,9 +210,14 @@ pub fn dma_pool_reserve(pages: usize) -> Option<DmaReservation> {
             slot.state = SlotState::Reserved { gen, pages };
             slot.gen = slot.gen.wrapping_add(1);
             pool.next = (idx + 1) % n;
-            return Some(DmaReservation { slot: idx, gen });
+            let reservation = Some(DmaReservation { slot: idx, gen });
+            drop(pool);
+            crate::task::perf::record_virtio_dma_pool_reserve(true);
+            return reservation;
         }
     }
+    drop(pool);
+    crate::task::perf::record_virtio_dma_pool_reserve(false);
     None
 }
 
@@ -169,6 +233,8 @@ pub fn dma_pool_consume_reserved(reservation: DmaReservation) -> usize {
         SlotState::Reserved { gen, .. } if gen == reservation.gen => {
             let pa = slot.pa;
             slot.state = SlotState::InUse { gen };
+            drop(pool);
+            crate::task::perf::record_virtio_dma_pool_consume();
             pa
         }
         _ => panic!(
@@ -189,6 +255,8 @@ pub fn dma_pool_cancel_reservation(slot: usize, gen: usize) {
     match entry.state {
         SlotState::Reserved { gen: g, .. } if g == gen => {
             entry.state = SlotState::Free;
+            drop(pool);
+            crate::task::perf::record_virtio_dma_pool_cancel();
         }
         _ => panic!(
             "dma_pool_cancel_reservation: invalid slot={} gen={}",
@@ -212,6 +280,11 @@ pub fn dma_pool_lookup(pa: usize) -> Option<usize> {
     None
 }
 
+/// Return whether the fixed pool completed initialization successfully.
+pub fn dma_pool_is_enabled() -> bool {
+    DMA_POOL.lock().enabled
+}
+
 /// 完成 DMA 后释放槽位，标记为 Free。
 ///
 /// 调用者必须已完成数据拷贝（device → driver 方向）。
@@ -222,6 +295,8 @@ pub fn dma_pool_finish_unshare(slot: usize) {
         match entry.state {
             SlotState::InUse { .. } => {
                 entry.state = SlotState::Free;
+                drop(pool);
+                crate::task::perf::record_virtio_dma_pool_finish();
             }
             _ => {
                 log::warn!(

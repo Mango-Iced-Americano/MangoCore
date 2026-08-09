@@ -55,6 +55,7 @@ impl BlockDevice for VirtIOBlock {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
         while offset < buf.len() {
@@ -78,6 +79,7 @@ impl BlockDevice for VirtIOBlock {
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_read();
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
+            perf::record_virtio_blk_read_chunk(chunk_len);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
@@ -94,6 +96,7 @@ impl BlockDevice for VirtIOBlock {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
         let mut dev = self.0.lock();
+        let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
         while offset < buf.len() {
@@ -117,6 +120,7 @@ impl BlockDevice for VirtIOBlock {
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_write(chunk_len);
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
+            perf::record_virtio_blk_write_chunk(chunk_len);
 
             if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
                 virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
@@ -131,6 +135,7 @@ impl BlockDevice for VirtIOBlock {
 
     fn flush(&self) -> BlockDeviceResult {
         let mut dev = self.0.lock();
+        let _bridge = virtio_dma_pool::dma_bridge_lock();
         if !dev.supports_flush() {
             return Err(BlockDeviceError::FlushUnsupported);
         }
@@ -371,6 +376,7 @@ unsafe impl Hal for VirtioHal {
                 drop(pending);
                 let reservation = virtio_dma_pool::DmaReservation { slot, gen };
                 let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
+                perf::record_virtio_dma_share(0);
 
                 if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
                     core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
@@ -384,6 +390,18 @@ unsafe impl Hal for VirtioHal {
         drop(pending);
 
         assert_eq!(pages, 1, "share: multi-page DMA without pool reservation");
+        let share_kind = if buffer.len() >= BLOCK_SZ {
+            1 // data fallback
+        } else if buffer.len() == 1 {
+            3 // response status
+        } else if buffer.len() == 16 {
+            2 // request header
+        } else if matches!(buffer.len(), 32 | 48) {
+            4 // indirect descriptor table
+        } else {
+            5
+        };
+        perf::record_virtio_dma_share(share_kind);
         let frames = frames_alloc(1).expect("share: failed to alloc frame");
         let pa = frames[0].ppn.start_addr().0;
         if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {

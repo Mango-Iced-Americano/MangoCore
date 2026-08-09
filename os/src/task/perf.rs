@@ -271,11 +271,19 @@ mod enabled {
     pub static WAKE_TO_RUN_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static TASK_RUN_SLICE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_ATTEMPTS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     pub static STEAL_CANDIDATE_FOUND: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_SUCCESS: AtomicUsize = AtomicUsize::new(0);
+    pub static STEAL_SUCCESS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     pub static STEAL_RECHECK_FAILED: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_KTLB_SYNC_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static STEAL_KTLB_SYNC_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static SCHED_IDLE_BUSY_LOOPS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static SCHED_IDLE_WAIT_LOOPS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
     // ── Stage 0: exec detail attribution ──
     pub static EXEC_PTLOAD_SEGMENTS: AtomicUsize = AtomicUsize::new(0);
@@ -678,9 +686,12 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_steal_attempt() {
+    pub fn record_steal_attempt(cpu: usize) {
         if stats_enabled() {
             STEAL_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            if cpu < STEAL_ATTEMPTS_BY_CPU.len() {
+                STEAL_ATTEMPTS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -692,9 +703,24 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_steal_success() {
+    pub fn record_steal_success(cpu: usize) {
         if stats_enabled() {
             STEAL_SUCCESS.fetch_add(1, Ordering::Relaxed);
+            if cpu < STEAL_SUCCESS_BY_CPU.len() {
+                STEAL_SUCCESS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_scheduler_idle(cpu: usize, waited: bool) {
+        if !stats_enabled() || cpu >= crate::smp::MAX_CPUS {
+            return;
+        }
+        if waited {
+            SCHED_IDLE_WAIT_LOOPS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+        } else {
+            SCHED_IDLE_BUSY_LOOPS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -944,6 +970,28 @@ mod enabled {
     pub static WB_TX_ALLOC_EXTENT_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static WB_TX_BOUNDARY_FLUSH_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static WB_TX_BOUNDARY_FLUSH_TICKS: AtomicUsize = AtomicUsize::new(0);
+    // ── Stage 0: VirtIO request/DMA attribution ──
+    // BLK_V* counts the BlockDevice API calls. These counters count the
+    // actual synchronous chunks and share() roles underneath that API.
+    pub static VIRTIO_BLK_READ_CHUNKS: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_BLK_READ_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_BLK_WRITE_CHUNKS: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_BLK_WRITE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_POOL_RESERVE_SUCCESS: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_POOL_RESERVE_FAIL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_POOL_CONSUME: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_POOL_CANCEL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_POOL_FINISH: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_DATA_POOL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_DATA_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_HEADER_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_STATUS_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_INDIRECT_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_OTHER_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: 2K1000LA SATA/AHCI ──
     pub static SATA_READ_REQS: AtomicUsize = AtomicUsize::new(0);
@@ -1928,6 +1976,85 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_virtio_blk_read_chunk(bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_BLK_READ_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        VIRTIO_BLK_READ_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_blk_write_chunk(bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_BLK_WRITE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        VIRTIO_BLK_WRITE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_dma_pool_reserve(success: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        if success {
+            VIRTIO_DMA_POOL_RESERVE_SUCCESS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            VIRTIO_DMA_POOL_RESERVE_FAIL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_dma_pool_consume() {
+        if memory_io_stats_enabled() {
+            VIRTIO_DMA_POOL_CONSUME.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_dma_pool_cancel() {
+        if memory_io_stats_enabled() {
+            VIRTIO_DMA_POOL_CANCEL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_dma_pool_finish() {
+        if memory_io_stats_enabled() {
+            VIRTIO_DMA_POOL_FINISH.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `kind`: 0=data pool, 1=data fallback, 2=header, 3=status,
+    /// 4=indirect descriptor table, 5=other fallback.
+    #[inline(always)]
+    pub fn record_virtio_dma_share(kind: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_DMA_SHARE_CALLS.fetch_add(1, Ordering::Relaxed);
+        match kind {
+            0 => VIRTIO_DMA_SHARE_DATA_POOL.fetch_add(1, Ordering::Relaxed),
+            1 => VIRTIO_DMA_SHARE_DATA_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            2 => VIRTIO_DMA_SHARE_HEADER_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            3 => VIRTIO_DMA_SHARE_STATUS_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            4 => VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            _ => VIRTIO_DMA_SHARE_OTHER_FALLBACK.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_dma_bridge_lock(wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+        VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        update_max(&VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
     pub fn record_sata_read(bytes: usize, ticks: usize) {
         if !memory_io_stats_enabled() {
             return;
@@ -2417,6 +2544,25 @@ mod enabled {
         WB_TX_JOURNAL_FLUSH_TICKS.store(0, Ordering::Relaxed);
         WB_TX_BOUNDARY_FLUSH_COUNT.store(0, Ordering::Relaxed);
         WB_TX_BOUNDARY_FLUSH_TICKS.store(0, Ordering::Relaxed);
+        VIRTIO_BLK_READ_CHUNKS.store(0, Ordering::Relaxed);
+        VIRTIO_BLK_READ_BYTES.store(0, Ordering::Relaxed);
+        VIRTIO_BLK_WRITE_CHUNKS.store(0, Ordering::Relaxed);
+        VIRTIO_BLK_WRITE_BYTES.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_POOL_RESERVE_SUCCESS.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_POOL_RESERVE_FAIL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_POOL_CONSUME.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_POOL_CANCEL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_POOL_FINISH.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_CALLS.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_DATA_POOL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_DATA_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_HEADER_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_STATUS_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_OTHER_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
         SATA_READ_REQS.store(0, Ordering::Relaxed);
         SATA_READ_BYTES.store(0, Ordering::Relaxed);
         SATA_READ_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -2593,11 +2739,23 @@ mod enabled {
         WAKE_TO_RUN_TICKS_MAX.store(0, Ordering::Relaxed);
         TASK_RUN_SLICE_TICKS_TOTAL.store(0, Ordering::Relaxed);
         STEAL_ATTEMPTS.store(0, Ordering::Relaxed);
+        for counter in &STEAL_ATTEMPTS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
         STEAL_CANDIDATE_FOUND.store(0, Ordering::Relaxed);
         STEAL_SUCCESS.store(0, Ordering::Relaxed);
+        for counter in &STEAL_SUCCESS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
         STEAL_RECHECK_FAILED.store(0, Ordering::Relaxed);
         STEAL_KTLB_SYNC_TICKS_TOTAL.store(0, Ordering::Relaxed);
         STEAL_KTLB_SYNC_TICKS_MAX.store(0, Ordering::Relaxed);
+        for counter in &SCHED_IDLE_BUSY_LOOPS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &SCHED_IDLE_WAIT_LOOPS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
         EXEC_PTLOAD_SEGMENTS.store(0, Ordering::Relaxed);
         EXEC_PTLOAD_PAGES.store(0, Ordering::Relaxed);
         EXEC_PTLOAD_FILE_BYTES.store(0, Ordering::Relaxed);
@@ -3517,7 +3675,7 @@ pub fn record_task_run_slice(_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_steal_attempt() {}
+pub fn record_steal_attempt(_cpu: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3525,7 +3683,11 @@ pub fn record_steal_candidate() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_steal_success() {}
+pub fn record_steal_success(_cpu: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_scheduler_idle(_cpu: usize, _waited: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3625,11 +3787,23 @@ perf_stub_counter!(WAKE_TO_RUN_TICKS_TOTAL);
 perf_stub_counter!(WAKE_TO_RUN_TICKS_MAX);
 perf_stub_counter!(TASK_RUN_SLICE_TICKS_TOTAL);
 perf_stub_counter!(STEAL_ATTEMPTS);
+#[cfg(not(feature = "perf_stats"))]
+pub static STEAL_ATTEMPTS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 perf_stub_counter!(STEAL_CANDIDATE_FOUND);
 perf_stub_counter!(STEAL_SUCCESS);
+#[cfg(not(feature = "perf_stats"))]
+pub static STEAL_SUCCESS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 perf_stub_counter!(STEAL_RECHECK_FAILED);
 perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_TOTAL);
 perf_stub_counter!(STEAL_KTLB_SYNC_TICKS_MAX);
+#[cfg(not(feature = "perf_stats"))]
+pub static SCHED_IDLE_BUSY_LOOPS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static SCHED_IDLE_WAIT_LOOPS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 perf_stub_counter!(EXEC_PTLOAD_SEGMENTS);
 perf_stub_counter!(EXEC_PTLOAD_PAGES);
 perf_stub_counter!(EXEC_PTLOAD_FILE_BYTES);
@@ -4062,6 +4236,30 @@ pub fn record_wb_tx_alloc_extent(_pages: usize, _ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_wb_tx_boundary_flush(_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_blk_read_chunk(_bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_blk_write_chunk(_bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_pool_reserve(_success: bool) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_pool_consume() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_pool_cancel() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_pool_finish() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_share(_kind: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_dma_bridge_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_sata_read(_bytes: usize, _ticks: usize) {}
@@ -4678,6 +4876,25 @@ pub static WB_TX_BOUNDARY_FLUSH_COUNT: core::sync::atomic::AtomicUsize =
 #[cfg(not(feature = "perf_stats"))]
 pub static WB_TX_BOUNDARY_FLUSH_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+perf_stub_counter!(VIRTIO_BLK_READ_CHUNKS);
+perf_stub_counter!(VIRTIO_BLK_READ_BYTES);
+perf_stub_counter!(VIRTIO_BLK_WRITE_CHUNKS);
+perf_stub_counter!(VIRTIO_BLK_WRITE_BYTES);
+perf_stub_counter!(VIRTIO_DMA_POOL_RESERVE_SUCCESS);
+perf_stub_counter!(VIRTIO_DMA_POOL_RESERVE_FAIL);
+perf_stub_counter!(VIRTIO_DMA_POOL_CONSUME);
+perf_stub_counter!(VIRTIO_DMA_POOL_CANCEL);
+perf_stub_counter!(VIRTIO_DMA_POOL_FINISH);
+perf_stub_counter!(VIRTIO_DMA_SHARE_CALLS);
+perf_stub_counter!(VIRTIO_DMA_SHARE_DATA_POOL);
+perf_stub_counter!(VIRTIO_DMA_SHARE_DATA_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_HEADER_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_STATUS_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_OTHER_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX);
 
 #[cfg(not(feature = "perf_stats"))]
 pub static SATA_READ_REQS: core::sync::atomic::AtomicUsize =
