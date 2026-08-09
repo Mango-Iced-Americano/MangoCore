@@ -7,6 +7,7 @@
 use core::cell::UnsafeCell;
 
 pub mod info;
+pub mod jh7110_cache;
 #[allow(
     unused_imports,
     reason = "双架构共享公开类型面，部分类型只在 RV64 FDT 后端构造"

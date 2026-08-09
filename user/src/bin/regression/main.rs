@@ -32,6 +32,7 @@ mod regression_futex_requeue;
 mod regression_ipc_msg;
 mod regression_child_wait;
 mod regression_clone_vm_second_slot;
+mod regression_wait_restart;
 
 use user_lib::println;
 
@@ -40,7 +41,7 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     let mut passed = 0u32;
     let mut failed = 0u32;
     let mut skipped = 0u32;
-    let total = 24u32;
+    let total = 25u32;
 
     println!("TAP version 13");
     println!("1..{}", total);
@@ -161,10 +162,15 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     else if r == 0 { passed += 1; println!("ok 23 pipe_resize"); }
     else { failed += 1; println!("not ok 23 pipe_resize"); }
 
-    // Test 24: vfork may share the caller's VM; keep this destructive probe last.
+    // Test 24: SIGUSR1 with and without SA_RESTART controls waitpid interruption.
+    let r = regression_wait_restart::run();
+    if r == 0 { passed += 1; println!("ok 24 wait_restart"); }
+    else { failed += 1; println!("not ok 24 wait_restart"); }
+
+    // Test 25: vfork may share the caller's VM; keep this destructive probe last.
     let r = regression_clone_vm_second_slot::run();
-    if r == 0 { passed += 1; println!("ok 24 clone_vm_second_slot"); }
-    else { failed += 1; println!("not ok 24 clone_vm_second_slot"); }
+    if r == 0 { passed += 1; println!("ok 25 clone_vm_second_slot"); }
+    else { failed += 1; println!("not ok 25 clone_vm_second_slot"); }
 
     println!("# results: {} passed, {} failed, {} skipped, {} total", passed, failed, skipped, total);
 

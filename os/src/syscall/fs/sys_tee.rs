@@ -94,7 +94,9 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
                     }
                     return tee_write_out(&out_file, &mut kbuf[..n], nonblock);
                 }
-                WaitResult::Interrupted => return -(SyscallErr::ERESTART as isize),
+                WaitResult::Interrupted => {
+                    return crate::task::RestartKind::RestartSys.syscall_result()
+                }
                 WaitResult::TimedOut => return -(SyscallErr::EAGAIN as isize),
             }
         }
@@ -106,7 +108,7 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: u32) -> isize {
 }
 
 /// Write kernel buffer to destination pipe.  Handles blocking/nonblocking
-/// and ERESTART conversion.
+/// and signal restart conversion.
 fn tee_write_out(out_file: &crate::fs::vfs::File, data: &mut [u8], nonblock: bool) -> isize {
     let mut try_write = || -> Result<usize, SyscallErr> { out_file.write(data) };
     if nonblock {
@@ -130,7 +132,7 @@ fn tee_write_out(out_file: &crate::fs::vfs::File, data: &mut [u8], nonblock: boo
         });
         match wait_ret {
             WaitResult::Ready(_) => found.unwrap_or(0),
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {

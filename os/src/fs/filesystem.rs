@@ -83,6 +83,7 @@ fn fat32_sector_size(buf: &[u8]) -> Option<usize> {
     let fat_count = buf[16];
     let root_entry_count = read_u16_le(buf, 17).unwrap_or(u16::MAX);
     let fat_size_16 = read_u16_le(buf, 22).unwrap_or(u16::MAX);
+    let total_sectors_16 = read_u16_le(buf, 19).unwrap_or(0);
     let total_sectors_32 = read_u32_le(buf, 32).unwrap_or(0);
     let fat_size_32 = read_u32_le(buf, 36).unwrap_or(0);
     let root_cluster = read_u32_le(buf, 44).unwrap_or(0);
@@ -96,7 +97,9 @@ fn fat32_sector_size(buf: &[u8]) -> Option<usize> {
         && matches!(fat_count, 1 | 2)
         && root_entry_count == 0
         && fat_size_16 == 0
-        && total_sectors_32 != 0
+        // mkfs.fat stores the volume size in total_sectors_16 (BPB offset 19) when
+        // the volume is < 65536 sectors, leaving total_sectors_32 == 0. Accept either.
+        && (total_sectors_16 != 0 || total_sectors_32 != 0)
         && fat_size_32 != 0
         && root_cluster >= 2;
     valid.then_some(bytes_per_sector)

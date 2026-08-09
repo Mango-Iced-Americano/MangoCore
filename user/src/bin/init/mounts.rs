@@ -1,5 +1,5 @@
 use alloc::format;
-use user_lib::syscall::{sys_faccessat2, sys_mkdirat, sys_mount, sys_umount2};
+use user_lib::syscall::{sys_mkdirat, sys_mount};
 use user_lib::{chmod, mount, println};
 
 const AT_FDCWD: isize = -100;
@@ -60,71 +60,6 @@ fn try_bind_mount(source: &str, target: &str) -> bool {
         println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
         false
     }
-}
-
-pub(super) fn mount_root_filesystem(source: &str, root: &str) -> bool {
-    let _ = sys_mkdirat(AT_FDCWD, root, 0o755);
-    for fstype in ["ext4\0", "vfat\0", "fat32\0"] {
-        if !try_mount(source, root, fstype) {
-            continue;
-        }
-        if root_looks_ready(root) {
-            println!(
-                "[init] VF2 root {} mounted as {}",
-                source.trim_end_matches('\0'),
-                fstype.trim_end_matches('\0')
-            );
-            return true;
-        }
-
-        println!(
-            "[init] VF2 {} is not a root filesystem; unmounting {}",
-            source.trim_end_matches('\0'),
-            root.trim_end_matches('\0')
-        );
-        let unmount = sys_umount2(root.as_ptr(), 0);
-        if unmount < 0 {
-            println!(
-                "[init] VF2 unmount {} failed: {}",
-                root.trim_end_matches('\0'),
-                unmount
-            );
-            return false;
-        }
-    }
-    false
-}
-
-fn root_looks_ready(root: &str) -> bool {
-    let bin = root_path(root, "/bin");
-    let etc = root_path(root, "/etc");
-    sys_faccessat2(AT_FDCWD, &bin, 0, 0) == 0
-        || sys_faccessat2(AT_FDCWD, &etc, 0, 0) == 0
-}
-
-fn root_path(root: &str, suffix: &str) -> alloc::string::String {
-    format!("{}{}\0", root.trim_end_matches('\0'), suffix)
-}
-
-pub(super) fn bind_pseudo_filesystems_in(root: &str) -> bool {
-    for suffix in ["/proc", "/sys", "/dev", "/dev/shm", "/run", "/tmp"] {
-        let target = root_path(root, suffix);
-        let _ = sys_mkdirat(AT_FDCWD, &target, 0o755);
-    }
-
-    let mut mounted = true;
-    for (source, suffix) in [
-        ("/proc", "/proc"),
-        ("/sys", "/sys"),
-        ("/dev", "/dev"),
-        ("/dev/shm", "/dev/shm"),
-        ("/run", "/run"),
-        ("/tmp", "/tmp"),
-    ] {
-        let target = root_path(root, suffix);
-        mounted &= try_bind_mount(source, &target);
-    }
-    mounted
 }
 
 /// Bind persistent directories after the kernel has mounted its boot devices.

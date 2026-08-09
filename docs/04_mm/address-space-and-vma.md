@@ -493,7 +493,7 @@ LOAD 段权限来自 `MapPermission::from_ph_flags(ph.flags())`。ELF 类型处�
 | `s` | `VmAreaMapping::Shared` |
 | `p` | `VmAreaMapping::Private` |
 
-`proc_smaps_content()` 和 `proc_smaps_read()` 进一步输出 Size/Rss/Pss/Locked 等字段。Rss 来自 `VmPageStore::in_memory_len_in_range()`，不是 VMA 总长度。
+`proc_smaps_read_cursor()`（配合 per-open `vfs::SmapsCursor`）进一步按段输出 Size/Rss/Pss/Locked 等字段，每次 read(2) 只生成一个 VMA 段，避免为大量 VMA 构建完整快照。Rss 来自 `VmPageStore::in_memory_len_in_range()`，不是 VMA 总长度。
 
 ## 9. VMA 分裂
 

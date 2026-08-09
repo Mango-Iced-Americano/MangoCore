@@ -17,6 +17,10 @@ pub trait NetDevice: Send + Sync {
     fn transmit(&self, buf: &[u8]);
     /// 获取 MAC 地址
     fn mac_address(&self) -> [u8; 6];
+    /// Return the PLIC source and bounded callback used for receive work.
+    fn interrupt(&self) -> Option<(usize, fn())> {
+        None
+    }
 }
 
 use alloc::sync::Arc;
@@ -35,9 +39,20 @@ pub fn init_net_device() {
             let device_manager =
                 crate::hal::device::DeviceManager::new(platform_info.devices.clone());
             if let Some(net_device) = virtio_net::probe_net_from_device_manager(&device_manager) {
-                *NET_DEVICE.lock() = Some(net_device);
+                publish_net_device(net_device);
                 return;
             }
+        }
+    }
+
+    #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+    {
+        match gmac_jh7110::GmacJh7110::new() {
+            Ok(net_device) => {
+                publish_net_device(Arc::new(net_device));
+                return;
+            }
+            Err(error) => println!("[gmac-jh7110] initialization failed: {:?}", error),
         }
     }
 
@@ -48,7 +63,7 @@ pub fn init_net_device() {
     ))]
     {
         match gmac_2k1000::Gmac2k1000::new() {
-            Ok(net_dev) => *NET_DEVICE.lock() = Some(Arc::new(net_dev)),
+            Ok(net_dev) => publish_net_device(Arc::new(net_dev)),
             Err(error) => println!("[gmac] initialization failed: {:?}", error),
         }
     }
@@ -67,10 +82,22 @@ pub fn init_net_device() {
         #[cfg(feature = "block_virt_pci")]
         {
             if let Some(net_dev) = virtio_net::VirtIONetWrapper::new() {
-                *NET_DEVICE.lock() = Some(Arc::new(net_dev));
+                publish_net_device(Arc::new(net_dev));
             } else {
                 println!("[kernel] VirtIO net device not found, skipping network init");
             }
+        }
+    }
+}
+
+fn publish_net_device(net_device: Arc<dyn NetDevice>) {
+    #[cfg(target_arch = "riscv64")]
+    let interrupt = net_device.interrupt();
+    *NET_DEVICE.lock() = Some(net_device);
+    #[cfg(target_arch = "riscv64")]
+    if let Some((irq, handler)) = interrupt {
+        if !crate::hal::arch::riscv::plic::register_handler(irq, handler) {
+            println!("[net] failed to register PLIC irq {}", irq);
         }
     }
 }

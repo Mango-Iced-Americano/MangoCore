@@ -114,20 +114,31 @@ pub enum FatType {
 impl BPB {
     #[inline(always)]
     pub fn is_valid(&self) -> bool {
-        let mut root_ent_cnt: u16 = self.root_ent_cnt;
-        let mut tot_sec16: u16 = self.tot_sec16;
+        // Small FAT32 volumes (< 65536 sectors) store their size in tot_sec16 with
+        // tot_sec32 == 0; at least one of the two total fields must be non-zero.
+        let total_sectors = if self.tot_sec32 != 0 {
+            self.tot_sec32
+        } else {
+            self.tot_sec16 as u32
+        };
         self.root_dir_sec() == 0
-            && self.tot_sec16 == 0
-            && self.count_of_cluster() >= 66625 /*May not apply to the REAL WORLD/test*/
+            && total_sectors != 0
             && self.fat_sz16 == 0
-            && root_ent_cnt == 0
+            && self.fat_sz32 != 0
+            && self.root_ent_cnt == 0
+            && self.root_clus >= 2
     }
     #[inline(always)]
     /// 数据扇区数
     /// # 计算式
     /// 总扇区数 - (保留扇区数 + fat表数*每fat表扇区数 + 根目录扇区数)
     pub fn data_sector_count(&self) -> u32 {
-        self.tot_sec32
+        let total_sectors = if self.tot_sec32 != 0 {
+            self.tot_sec32
+        } else {
+            self.tot_sec16 as u32
+        };
+        total_sectors
             - (self.rsvd_sec_cnt as u32
                 + self.num_fats as u32 * self.fat_sz32
                 + self.root_dir_sec())

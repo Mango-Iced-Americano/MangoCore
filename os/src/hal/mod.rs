@@ -40,7 +40,7 @@ pub use arch::{
     console_flush, console_getchar, console_putchar, console_write_bytes, panic_console_write,
 };
 #[cfg(target_arch = "riscv64")]
-pub use arch::configure_runtime_console;
+pub use arch::{configure_runtime_console, init_runtime_console_rx};
 pub use arch::{get_bad_addr, get_bad_instruction, get_exception_cause};
 pub use arch::{get_clock_freq, get_time};
 pub use arch::{irq_enabled, local_irq_restore, local_irq_save};

@@ -124,8 +124,8 @@ impl EasyFileSystem {
     /// + `block_device`: 指向硬件设备（存储设备）的指针
     pub fn open(block_device: Arc<dyn BlockDevice>) -> Arc<Self> {
         // 直接读取 BPB 获取文件系统参数
-        // The mounted device is adapted to BPB_BytsPerSec before this call.
-        // Reading one page covers every FAT sector size supported by the probe.
+        // 块设备以 BLOCK_SZ(4096) 字节为单位编址；block 0 覆盖 BPB（前 512 字节）。
+        // 读取一个 page 覆盖探测支持的所有 FAT 扇区大小。
         let mut bpb_buf = alloc::vec![0u8; PAGE_SIZE];
         block_device.read_block(0, &mut bpb_buf);
         let super_block = unsafe { &*(bpb_buf.as_ptr() as *const BPB) };

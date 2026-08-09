@@ -29,7 +29,7 @@ fn apply(data: &[u8], cfg: &mut RuntimeConfig) {
             b"mask" => if let Some(mask) = parse_mask(value) { cfg.mask = mask; },
             b"ltp_include" => if let Some(list) = parse_list(value) { cfg.ltp_include = list; },
             b"ltp_from" => cfg.ltp_from = core::str::from_utf8(value).ok().filter(|v| !v.is_empty()).map(String::from),
-            b"ltp_libc" => match value { b"musl" => cfg.ltp_libc = LtpLibc::Musl, b"glibc" => cfg.ltp_libc = LtpLibc::Glibc, _ => {} },
+            b"ltp_libc" => match value { b"musl" => cfg.ltp_libc = LtpLibc::Musl, b"glibc" => cfg.ltp_libc = LtpLibc::Glibc, b"both" => cfg.ltp_libc = LtpLibc::Both, _ => {} },
             b"ltp_runner" => match value { b"inline" => cfg.ltp_runner = LtpRunner::Inline, b"script" => cfg.ltp_runner = LtpRunner::Script, b"suite" => cfg.ltp_runner = LtpRunner::Suite, _ => {} },
             b"diag" => cfg.diag = matches!(value, b"1" | b"true"), b"timer_smoke" => cfg.timer_smoke = matches!(value, b"1" | b"true"),
             b"skip_apk" => cfg.skip_apk = matches!(value, b"1" | b"true"),
@@ -50,4 +50,16 @@ pub fn load_runtime_config() -> RuntimeConfig {
     cfg.conf_source = Some(source.as_bytes().to_vec());
     println!("[initproc] config source={} mode={} mask=0x{:03X} timer_smoke={} skip_apk={}", source, match cfg.mode { RunMode::Run => "run", RunMode::Shell => "shell", RunMode::RunThenShell => "run_then_shell", RunMode::DriftWindow => "drift_window", RunMode::Regression => "regression" }, cfg.mask, cfg.timer_smoke, cfg.skip_apk);
     cfg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ltp_libc_both_selects_both_runtimes() {
+        let mut config = RuntimeConfig::default();
+        apply(b"ltp_libc=both\n", &mut config);
+        assert!(matches!(config.ltp_libc, LtpLibc::Both));
+    }
 }

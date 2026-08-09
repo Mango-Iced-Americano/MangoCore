@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-04
+> Coverage: 2026-04-01 to 2026-08-09
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -105,6 +105,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | develop Batch 7 procfs CPU 拓扑 | 2026-08-03 | GPT/Codex, DeepSeek | Linux procfs ABI 对照、启动门禁/平台模型审查、双架构 8 核 L4 回归 | cpuinfo/stat 输出 8 个逻辑 CPU；修复 regression PID1 缺少 procfs，双架构 8/8 |
 | RV64 全量 LTP removexattr panic 溯源 | 2026-08-06 | GPT/Codex, DeepSeek | 只读检查全量日志、xattr 调用链、vendored/upstream C 控制流和官方 LTP 行为 | 定位 `ext4_xattr_remove()` 传入未初始化 finder 的复制错误；人工复核采纳核心定因，同时纠正模型控制流文字和遗漏的 ENODATA 边界；尚未实施修复 |
 | RV64 removexattr 与 LA64 ASID rollover 修复 | 2026-08-06 | GPT/Codex, DeepSeek | 双架构根因修复、Docker 串行 8 核构建、focused QEMU 回归和只读代码审查 | RV64 musl/glibc 精确用例通过；LA64 ASID rollover ktest 通过，整组另有一个与本补丁无关的 affinity 失败；人工复核纠正模型对该失败历史和预期页权限异常的过度推断 |
+| LA64 PID1 临时 ELF 映射 PGDH 别名 | 2026-08-09 | GPT-5.6-terra, Sisyphus | Docker RED/GREEN、LA64 页表索引和 FDT 映射边界分析 | 定位 `MMAP_BASE` 低 39 位零与低地址资源 PTE 的 PGDH 别名；定义受编译期边界保护的临时 ELF 窗口，LA64 derived basic+busybox 四组 exit_code=0 |
 | Firmware DTB safety gate | 2026-07-28 | Oracle, Sisyphus | 固件启动参数信任边界、FDT 保留区与 2K1000 编译验证 | Oracle 指出非 RISC-V FDT 协议的 `a1` 可能为垃圾值；修复协议门控、DTB 边界校验和保留区，并在 Docker 中完成三个目标编译 |
 | VisionFive 2 watchdog reboot | 2026-08-01 | Oracle, GPT-5.6-terra | OpenSBI SRST 固件依赖审查、JH7110 reset 序列与 QEMU 回归验证 | Oracle 定位 U-Boot 关闭 I2C5 后 OpenSBI PMIC cold reboot 会永久挂起；实现内核直接 watchdog reset，保留 QEMU shutdown |
 | another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |

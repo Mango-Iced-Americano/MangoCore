@@ -107,6 +107,10 @@ $(REGRESSION_CPIO_LA): user
 	@mkdir -p $(dir $(REGRESSION_CPIO_LA))
 	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh la64 $(MODE) $(REGRESSION_CPIO_LA) regression
 
+$(KTEST_CPIO_LA): user
+	@mkdir -p $(dir $(KTEST_CPIO_LA))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh la64 $(MODE) $(KTEST_CPIO_LA) ktest
+
 kernel: $(LWEXT4_LA_PREREQ)
 	@echo Platform: $(BOARD)
 	@test -f $(LINKER_SCRIPT) || { echo "missing linker script: $(LINKER_SCRIPT)" >&2; exit 1; }
@@ -189,9 +193,9 @@ check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_LA)
 #  L3 Kernel self-test (mango.mode=ktest)
 # ─────────────────────────────────────────────────────────
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
-ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_LA) $(LWEXT4_LA_PREREQ)
+ktest-build-only: toolchain-preflight user $(KTEST_CPIO_LA) $(LWEXT4_LA_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
-	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" RUSTFLAGS="$(LA64_LINKER_RUSTFLAGS)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KTEST_CPIO_LA))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
 		cargo build --release --features "$(BOOT_PROFILE) $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)" --target $(TARGET)
 
 ktest-run: toolchain-preflight ktest-build-only ktest-clean-ext4

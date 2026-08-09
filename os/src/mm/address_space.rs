@@ -26,7 +26,7 @@ use super::{
 };
 use crate::config::*;
 use crate::fs::vfs;
-use crate::fs::vfs::IndexNode;
+use crate::fs::vfs::{IndexNode, SmapsCursor};
 use crate::fs::vfs_lookup_absolute;
 use crate::fs::PageCache;
 use crate::hal::boot::kernel_linked_to_phys;
@@ -935,146 +935,133 @@ impl<T: PageTable> AddressSpaceInner<T> {
         *copied >= buf.len()
     }
 
-    pub fn proc_smaps_read(&self, offset: usize, len: usize, buf: &mut [u8]) -> usize {
+    /// Generate the next smaps segment in stream order, advancing the cursor.
+    /// Bounded: each returned segment is at most one VMA block (~1 KiB), so no
+    /// read(2) call ever forces the whole file into the kernel heap.
+    fn next_smaps_segment(&self, cursor: &mut SmapsCursor) -> Option<String> {
+        let compact = self.locked_pages.is_empty()
+            && self
+                .vmas
+                .iter()
+                .filter(|vma| vma.vm_is_user())
+                .count()
+                >= PROC_SMAPS_DENSE_VMA_THRESHOLD;
+        let mut idx = cursor.next_vma;
+        let mut sub = cursor.next_sub;
+        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()).skip(idx) {
+            if compact {
+                let mut seg = String::with_capacity(PROC_SMAPS_COMPACT_ENTRY_ESTIMATE);
+                Self::write_proc_smaps_segment_compact(&mut seg, vma, vma.vm_start(), vma.vm_end());
+                cursor.next_vma = idx + 1;
+                cursor.next_sub = 0;
+                return Some(seg);
+            }
+            if self.locked_pages.is_empty() {
+                let mut seg = String::with_capacity(PROC_SMAPS_FULL_ENTRY_ESTIMATE);
+                Self::write_proc_smaps_segment(&mut seg, vma, vma.vm_start(), vma.vm_end(), 0);
+                cursor.next_vma = idx + 1;
+                cursor.next_sub = 0;
+                return Some(seg);
+            }
+            let mut segment_start = vma.vm_start();
+            let end_vpn = vma.vm_end();
+            let mut run_idx = 0usize;
+            while segment_start < end_vpn {
+                let segment_locked = self.locked_pages.contains(&segment_start);
+                let mut segment_end = VirtPageNum(segment_start.0 + 1);
+                while segment_end < end_vpn
+                    && self.locked_pages.contains(&segment_end) == segment_locked
+                {
+                    segment_end.0 += 1;
+                }
+                if run_idx == sub {
+                    let locked_pages = if segment_locked {
+                        segment_end.0 - segment_start.0
+                    } else {
+                        0
+                    };
+                    let locked_kb = locked_pages * PAGE_SIZE / 1024;
+                    let mut seg = String::with_capacity(PROC_SMAPS_FULL_ENTRY_ESTIMATE);
+                    Self::write_proc_smaps_segment(&mut seg, vma, segment_start, segment_end, locked_kb);
+                    cursor.next_vma = idx;
+                    cursor.next_sub = sub + 1;
+                    return Some(seg);
+                }
+                run_idx += 1;
+                segment_start = segment_end;
+            }
+            cursor.next_vma = idx + 1;
+            cursor.next_sub = 0;
+            idx += 1;
+            sub = 0;
+        }
+        None
+    }
+
+    /// seq_file-style /proc/<pid>/smaps reader. A per-open `SmapsCursor`
+    /// caches at most one segment, so reading the whole file across many
+    /// read(2) calls is O(N) total with bounded kernel-heap usage.
+    pub fn proc_smaps_read_cursor(
+        &self,
+        cursor: &mut SmapsCursor,
+        offset: usize,
+        len: usize,
+        buf: &mut [u8],
+    ) -> usize {
         let want = len.min(buf.len());
         if want == 0 {
             return 0;
         }
-
         let limit = offset.saturating_add(want);
-        let user_vma_count = self.vmas.iter().filter(|vma| vma.vm_is_user()).count();
-        let compact =
-            self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD;
-        let entry_estimate = if compact {
-            PROC_SMAPS_COMPACT_ENTRY_ESTIMATE
-        } else {
-            PROC_SMAPS_FULL_ENTRY_ESTIMATE
-        };
-        let mut segment = String::with_capacity(entry_estimate);
-        let mut emitted = 0;
-        let mut copied = 0;
+        let mut copied = 0usize;
 
-        if compact {
-            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-                segment.clear();
-                Self::write_proc_smaps_segment_compact(
-                    &mut segment,
-                    vma,
-                    vma.vm_start(),
-                    vma.vm_end(),
-                );
-                if Self::copy_proc_smaps_window(
-                    buf,
-                    &mut copied,
-                    &mut emitted,
-                    offset,
-                    limit,
-                    &segment,
-                ) {
-                    return copied;
-                }
+        // Position the cursor so the cached segment covers `offset`.
+        loop {
+            let seg_start = cursor.seg_start;
+            let seg_end = seg_start.saturating_add(cursor.segment.len());
+            if seg_start != usize::MAX && offset >= seg_start && offset < seg_end {
+                break;
             }
-            return copied;
+            if seg_start != usize::MAX && offset < seg_start {
+                cursor.reset();
+            }
+            match self.next_smaps_segment(cursor) {
+                Some(seg) => {
+                    let new_start = if cursor.seg_start == usize::MAX {
+                        0
+                    } else {
+                        cursor.seg_start.saturating_add(cursor.segment.len())
+                    };
+                    cursor.seg_start = new_start;
+                    cursor.segment = seg;
+                }
+                None => return copied,
+            }
         }
 
-        if self.locked_pages.is_empty() {
-            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-                segment.clear();
-                Self::write_proc_smaps_segment(&mut segment, vma, vma.vm_start(), vma.vm_end(), 0);
-                if Self::copy_proc_smaps_window(
-                    buf,
-                    &mut copied,
-                    &mut emitted,
-                    offset,
-                    limit,
-                    &segment,
-                ) {
-                    return copied;
-                }
+        // Copy from the cached segment, generating further segments on demand.
+        loop {
+            let mut emitted = cursor.seg_start;
+            if Self::copy_proc_smaps_window(
+                buf,
+                &mut copied,
+                &mut emitted,
+                offset,
+                limit,
+                &cursor.segment,
+            ) {
+                break;
             }
-            return copied;
-        }
-
-        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-            let mut segment_start = vma.vm_start();
-            let end_vpn = vma.vm_end();
-            while segment_start < end_vpn {
-                let segment_locked = self.locked_pages.contains(&segment_start);
-                let mut segment_end = VirtPageNum(segment_start.0 + 1);
-                while segment_end < end_vpn
-                    && self.locked_pages.contains(&segment_end) == segment_locked
-                {
-                    segment_end.0 += 1;
+            let next_start = cursor.seg_start.saturating_add(cursor.segment.len());
+            match self.next_smaps_segment(cursor) {
+                Some(seg) => {
+                    cursor.seg_start = next_start;
+                    cursor.segment = seg;
                 }
-                let locked_pages = if segment_locked {
-                    segment_end.0 - segment_start.0
-                } else {
-                    0
-                };
-                let locked_kb = locked_pages * PAGE_SIZE / 1024;
-                segment.clear();
-                Self::write_proc_smaps_segment(
-                    &mut segment,
-                    vma,
-                    segment_start,
-                    segment_end,
-                    locked_kb,
-                );
-                if Self::copy_proc_smaps_window(
-                    buf,
-                    &mut copied,
-                    &mut emitted,
-                    offset,
-                    limit,
-                    &segment,
-                ) {
-                    return copied;
-                }
-                segment_start = segment_end;
+                None => break,
             }
         }
         copied
-    }
-
-    pub fn proc_smaps_content(&self) -> String {
-        let user_vma_count = self.vmas.iter().filter(|vma| vma.vm_is_user()).count();
-        if self.locked_pages.is_empty() && user_vma_count >= PROC_SMAPS_DENSE_VMA_THRESHOLD {
-            let mut s = String::with_capacity(user_vma_count * PROC_SMAPS_COMPACT_ENTRY_ESTIMATE);
-            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-                Self::write_proc_smaps_segment_compact(&mut s, vma, vma.vm_start(), vma.vm_end());
-            }
-            return s;
-        }
-
-        let mut s = String::with_capacity(user_vma_count * PROC_SMAPS_FULL_ENTRY_ESTIMATE);
-        if self.locked_pages.is_empty() {
-            for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-                Self::write_proc_smaps_segment(&mut s, vma, vma.vm_start(), vma.vm_end(), 0);
-            }
-            return s;
-        }
-        for vma in self.vmas.iter().filter(|vma| vma.vm_is_user()) {
-            let mut segment_start = vma.vm_start();
-            let end_vpn = vma.vm_end();
-            while segment_start < end_vpn {
-                let segment_locked = self.locked_pages.contains(&segment_start);
-                let mut segment_end = VirtPageNum(segment_start.0 + 1);
-                while segment_end < end_vpn
-                    && self.locked_pages.contains(&segment_end) == segment_locked
-                {
-                    segment_end.0 += 1;
-                }
-                let locked_pages = if segment_locked {
-                    segment_end.0 - segment_start.0
-                } else {
-                    0
-                };
-                let locked_kb = locked_pages * PAGE_SIZE / 1024;
-                Self::write_proc_smaps_segment(&mut s, vma, segment_start, segment_end, locked_kb);
-                segment_start = segment_end;
-            }
-        }
-        s
     }
     /// The REAL handler to page fault.
     /// Handles all types of page fault:(In regex:) "(Store|Load|Instruction)(Page)?Fault"

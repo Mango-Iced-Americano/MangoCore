@@ -195,13 +195,15 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
         fs::initramfs_init();
         if boot_config.mode != crate::bootargs::BootMode::Regression {
             drivers::init_net_device();
-            net::config::init();
             fs::mount_boot_block_devices(&boot_config);
         } else {
             crate::println!("[kernel] Regression mode — skipping block init");
         }
-        // Network always initialised: Unix sockets, eventfd, epoll, futex
-        // all depend on NET_INTERFACE being up regardless of NIC presence.
+        // 网络始终初始化：零盘回归没有探测 NIC（NET_DEVICE 保持 None），
+        // net::config::init() 退化为仅 loopback + null eth，为回归套件中的
+        // loopback TCP/UDP 用例（net_tcp_accept/net_udp）提供 smoltcp 栈；
+        // Unix socket、eventfd、epoll、futex 也依赖 NET_INTERFACE 结构就绪。
+        net::config::init();
     }
 
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
@@ -234,11 +236,12 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     }
 
     task::add_initproc();
-    if boot_config.mode != crate::bootargs::BootMode::Regression {
-        // 先发布 PID1，再发布常驻 worker，确保 normal 启动仍由 PID1 首次获得
-        // CPU0。worker 首次运行后进入 WaitQueue，不在 scheduler loop 内直接 poll。
-        task::spawn_kernel_worker("[net-poll]", crate::net::config::net_poll_worker);
-    }
+    // 先发布 PID1，再发布常驻 worker，确保 normal 启动仍由 PID1 首次获得
+    // CPU0。worker 首次运行后进入 WaitQueue，不在 scheduler loop 内直接 poll。
+    // 回归模式同样需要 worker：loopback TCP/UDP 用例会创建/关闭 socket，
+    // 其 smoltcp 条目和 128 KiB 缓冲必须由 worker 的 socket-removal drain 回收，
+    // 否则每个关闭的 UDP/TCP socket 都会在 kernel heap 上渐进泄漏。
+    task::spawn_kernel_worker("[net-poll]", crate::net::config::net_poll_worker);
     // note that in run_tasks(), there is yet *another* pre_start_init(),
     // which is used to turn on interrupts in some archs like LoongArch.
     task::run_tasks();

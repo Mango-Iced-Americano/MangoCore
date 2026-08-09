@@ -79,7 +79,7 @@ pub type ListHookFn = fn(inode: &LockedProcInode) -> Vec<String>;
 | `comm` | ProcContentFn | 进程命令名 |
 | `cmdline` | ProcContentFn | 进程命令行参数（以 null 分隔） |
 | `maps` | ProcContentFn | 用户地址空间 VMA 映射，委托给 `MemorySet::proc_maps_content()` |
-| `smaps` | ProcTextFn（缓存） | 逐 VMA 内存统计快照，生成一次后缓存 |
+| `smaps` | ProcCursorFn（有界游标） | 逐 VMA 内存统计，per-open 游标按段流式输出，不缓存完整快照 |
 | `mounts` | ProcContentFn | 进程视角的挂载列表 |
 | `mountinfo` | ProcContentFn | 挂载详细信息（挂载 ID、父 ID、主次设备号等） |
 | `io` | ProcContentFn | I/O 统计（读写字节数，当前为简化版） |
@@ -135,11 +135,11 @@ pub type ListHookFn = fn(inode: &LockedProcInode) -> Vec<String>;
 
 ## 缓存策略
 
-procfs 区分两种缓存模式：
+procfs 区分三种内容生成模式：
 
-**静态缓存（ProcTextFn）**：内容不随每次读取变化的文件使用 `new_cached_text_file_wired()` 构造。首次 `read_at()` 调用 `ProcTextFn` 生成完整字符串，存入 `FilePrivateData::ProcText`。后续读取直接从缓存拷贝，不再调用生成函数。适用于 `/proc/version`、`/proc/cpuinfo`、`/proc/filesystems`、`/proc/config`、`/proc/[pid]/smaps`。
+**有界游标（ProcCursorFn）**：用于可能非常大的逐段生成文件（如 `/proc/[pid]/smaps`）。文件通过 `add_cursor_file()` 构造，`read_at()` 从 `FilePrivateData::ProcSmapsCursor` 惰性创建 per-open 游标（`vfs::SmapsCursor`），每次 read(2) 只生成并缓存**一个 VMA 段**（紧凑约 256 B / 完整约 1 KiB）。顺序读整体 O(N) 且有界内核堆内存，避免了为数千个 VMA 构建多 MiB 快照 String 导致的堆 OOM；offset 回退时游标重置后从头生成，乱序 pread 语义与 Linux seq_file 一致。
 
-**动态生成（ProcContentFn）**：每次 `read_at()` 都调用生成函数重新计算内容。适用于需要反映实时状态的文件：`/proc/meminfo`、`/proc/stat`、`/proc/uptime`、`/proc/mounts`、`/proc/[pid]/status`、`/proc/[pid]/maps`、`/proc/net/*`。
+**动态生成（ProcContentFn）**：每次 `read_at()` 都调用生成函数重新计算内容。适用于需要反映实时状态的文件：`/proc/meminfo`、`/proc/stat`、`/proc/uptime`、`/proc/mounts`、`/proc/version`、`/proc/cpuinfo`、`/proc/[pid]/status`、`/proc/[pid]/maps`、`/proc/net/*`。
 
 **符号链接**：普通符号链接的 target 存储在 `symlink_target` 字段中。`/proc/self` 使用 `new_dynamic_symlink_wired()` 构造，由 `content_fn` 在每次读取时调用 `current_task().pid()` 生成。
 
@@ -149,7 +149,7 @@ procfs 区分两种缓存模式：
 
 `LockedProcInode` 实现 `IndexNode` trait 时注意以下设计约束：
 
-- **read_at**：在锁外提取 `content_fn`/`text_fn`/`extra_data` 后调用生成函数，避免内容生成函数持有 procfs 内部锁导致死锁。`text_fn` 的文件走缓存路径，`content_fn` 的文件每次都生成。
+- **read_at**：在锁外提取 `content_fn`/`cursor_fn`/`extra_data` 后调用生成函数，避免内容生成函数持有 procfs 内部锁导致死锁。`cursor_fn` 的文件（如 smaps）走 per-open 有界游标路径，`content_fn` 的文件每次都生成。
 - **write_at**：仅当 `writable = true` 且注册了 `write_fn` 时才允许写入。写入后更新 mtime/ctime。
 - **find/list**：`find()` 在短锁内提取静态子项和钩子引用，释放锁后再调用钩子。`list()` 类似，先收集静态键再追加动态键。
 - **set_metadata**：只允许更新时间戳，拒绝 mode/uid/gid 变更（符合 Linux 的 procfs 只读语义）。
@@ -184,7 +184,7 @@ procfs 在 `mount_common_filesystems()` 流程中挂载到 `/proc`，通过 `Mou
    现有实现生成。性能分析工具可看到真实 CPU 数量，但 CPU 使用率仍不准确。
 3. **`/proc/meminfo` 部分字段占位**。Buffers、Cached、SwapTotal、SwapFree、Dirty、Writeback、Shmem 等字段固定为 0。当前内核未实现 swap 和块缓存统计。
 4. **`/proc/[pid]/io` 简化版**。I/O 统计仅计数读写的字节数，未区分 block I/O 和字符设备 I/O。不影响进程管理工具，但依赖于精细化 I/O 监控的场景可能受限。
-5. **`/proc/[pid]/smaps` 使用 ProcTextFn 缓存**。快照在首次 read 时生成，后续读取返回相同内容。对于跟踪内存变化的应用，需要在两次读取间隔中重新打开文件。
+5. **`/proc/[pid]/smaps` 为有界流式输出**。per-open 游标每次 read(2) 只生成一个 VMA 段，内核堆内存有界；但 VMA 列表在两个 read(2) 之间变化时，后续内容反映最新状态（与 Linux seq_file 的读取时快照行为一致）。
 6. **`/proc/sys/` 可写文件的持久性**。写入 `/proc/sys/` 下参数的修改仅影响运行时内核状态，重启后丢失。当前内核未实现 sysctl 配置持久化。
 7. **动态 PID 目录生命周期**。PID 目录由 `find_hook` 动态创建，没有明确的回收机制。进程退出后，PID 目录 inode 通过 `create_dead_ns_dir()` 退化为仅包含命名空间信息的 stub。长生命周期进程中频繁的 PID 分配和回收可能导致 inode 残留。
 8. **锁顺序**。`LockedProcInode` 使用内部 `Mutex`，生成回调运行时锁已释放。但 `ProcContentFn` 内部如果访问其他 procfs inode（如 `/proc/mounts` 遍历挂载点），仍需注意全局锁顺序，避免锁反转。

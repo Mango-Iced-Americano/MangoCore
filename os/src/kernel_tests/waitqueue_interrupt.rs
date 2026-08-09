@@ -27,6 +27,7 @@ fn result_code(result: WaitResult) -> usize {
 lazy_static! {
     static ref INTERRUPT_WQ: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
     static ref RACE_WQ: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
+    static ref MASKED_WQ: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
 }
 
 static INTERRUPT_ENTERED: AtomicBool = AtomicBool::new(false);
@@ -98,4 +99,50 @@ fn run_signal_wake_race(condition_ready: bool, expected: usize) -> Result<(), &'
 pub(super) fn test_signal_wake_race() -> Result<(), &'static str> {
     run_signal_wake_race(true, 1)?;
     run_signal_wake_race(false, 3)
+}
+
+static MASKED_ENTERED: AtomicBool = AtomicBool::new(false);
+static MASKED_WAKE: AtomicBool = AtomicBool::new(false);
+static MASKED_RESULT: AtomicUsize = AtomicUsize::new(0);
+
+fn masked_worker() {
+    let task = task::current_task().unwrap();
+    {
+        let mut inner = task.acquire_inner_lock();
+        inner.sigmask.insert(Signals::SIGUSR1);
+        task.recalculate_signal_pending_with_inner(&inner);
+    }
+    MASKED_ENTERED.store(true, Ordering::Release);
+    let result = WaitQueue::wait_until_interruptible(&MASKED_WQ, || {
+        MASKED_WAKE.load(Ordering::Acquire).then_some(55)
+    });
+    MASKED_RESULT.store(result_code(result), Ordering::Release);
+}
+
+pub(super) fn test_masked_signal_does_not_interrupt() -> Result<(), &'static str> {
+    MASKED_ENTERED.store(false, Ordering::Release);
+    MASKED_WAKE.store(false, Ordering::Release);
+    MASKED_RESULT.store(0, Ordering::Release);
+    task::spawn_ktest_task(masked_worker);
+    if !yield_until(|| MASKED_ENTERED.load(Ordering::Acquire)) {
+        return Err("masked worker did not register");
+    }
+    if !task::send_signal_to_interruptible(Signals::SIGUSR1) {
+        return Err("masked worker did not receive pending signal");
+    }
+    for _ in 0..8 {
+        task::suspend_current_and_run_next();
+    }
+    if MASKED_RESULT.load(Ordering::Acquire) != 0 {
+        return Err("masked signal interrupted waiter");
+    }
+    MASKED_WAKE.store(true, Ordering::Release);
+    MASKED_WQ.lock().wake_all();
+    if !yield_until(|| MASKED_RESULT.load(Ordering::Acquire) != 0) {
+        return Err("masked worker did not resume after normal wake");
+    }
+    if MASKED_RESULT.load(Ordering::Acquire) != 1 {
+        return Err("masked waiter did not return ready result");
+    }
+    Ok(())
 }

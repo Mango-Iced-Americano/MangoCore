@@ -6,6 +6,8 @@ pub mod ltp;
 pub mod process;
 pub mod shell;
 pub mod smoke;
+pub mod vf2;
+pub mod vf2_mounts;
 
 pub fn main(argc: usize, argv: &[&str]) -> i32 {
     use core::sync::atomic::Ordering;
@@ -42,11 +44,20 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
     HAS_BIN_BASH.store(process::run_bash_cmd("test -x /bin/bash\0", &environ) == 0, Ordering::Relaxed);
     if cfg.timer_smoke && !smoke::timerfd::run_timerfd_smoke() { shutdown(); return 1; }
     match cfg.mode {
-        config::RunMode::Shell => { shell::enter_shell("/bin/bash\0", &environ); }
+        // On a real VF2 board try_boot() chroots into the SD root and never
+        // returns; on QEMU it returns and the interactive shell starts as before.
+        config::RunMode::Shell => {
+            vf2::try_boot();
+            shell::enter_shell("/bin/bash\0", &environ);
+        }
         config::RunMode::DriftWindow => instrumentation::drift::run_drift_windows(&environ, &cfg),
-        config::RunMode::Run | config::RunMode::RunThenShell => {
+        config::RunMode::Run => {
             groups::execute::run_selected_groups(&environ, &cfg);
-            if cfg.mode == config::RunMode::RunThenShell { shell::enter_shell("/bin/bash\0", &environ); }
+        }
+        config::RunMode::RunThenShell => {
+            groups::execute::run_selected_groups(&environ, &cfg);
+            vf2::try_boot();
+            shell::enter_shell("/bin/bash\0", &environ);
         }
         config::RunMode::Regression => {}
     }

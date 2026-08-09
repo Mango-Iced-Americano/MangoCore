@@ -189,7 +189,10 @@ FDT 原始字节位于 `.bss.boot`，每个双架构 linker script 都显式把�
 MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame allocator、
 内核 RAM 映射、LA64 identity dirty 元数据以及用户可见内存统计。QEMU 的运行期 FDT
 因此是内存容量权威来源；2K1000 无合法 FDT 时仍通过同一接口读取静态 fallback。
-动态 early-MMIO 映射以及 FS/Net/Driver 的设备资源迁移仍属于后续共享子系统批次。
+预堆 early-MMIO 只采纳带 `compatible` 和非空 `reg` 的根设备或根总线（如 `/soc`）
+直接子设备：QEMU virt 的 PLIC、UART、VirtIO 和 PCI host 位于第二层，必须映射；
+更深层节点的 `reg` 可能是总线局部偏移，因此保持排除。FS/Net/Driver 的完整资源迁移仍属于
+后续共享子系统批次。
 
 ### 4.1 问题背景
 
@@ -199,8 +202,8 @@ MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame
 
 | 阶段 | 函数 | 调用时机 | 能力 | 行为 |
 |------|------|----------|------|------|
-| **Phase 1 — 预堆快照** | `populate_memory_regions()` | `bootstrap_init()` 后，`mem_clear()` 前 | 零分配，仅操作原始字节 | 验证 DTB magic，`ptr::copy` 到 `.data.boot` 段静态缓冲区；解析 `/memory` 节点填充 `MEMORY_BUF` |
-| **Phase 2 — 后堆解析** | `build_platform_info()` | `mm::init()` 后，通过 `init_platform_info()` | 可分配 (alloc) | 从 `.data.boot` 快照构造 `fdt::Fdt`，枚举全部设备节点，生成 `PlatformInfo` |
+| **Phase 1 — 预堆快照** | `populate_memory_regions()` | `bootstrap_init()` 后，`mem_clear()` 前 | 零分配，仅操作原始字节 | 验证 DTB magic，`ptr::copy` 到 `sbss` 前的 `.bss.boot` 静态缓冲区；收集根级 `/memory` 节点、排序并拒绝重叠区间 |
+| **Phase 2 — 后堆解析** | `build_platform_info()` | `mm::init()` 后，通过 `init_platform_info()` | 可分配 (alloc) | 从 `.bss.boot` 快照构造 `fdt::Fdt`，枚举全部设备节点，生成 `PlatformInfo` |
 
 ### 4.3 快照数据结构
 
@@ -208,9 +211,9 @@ MM 已将 `memory_regions` 和合并后的 firmware-reserved region 接入 frame
 /// 最大保留的 FDT 大小（2 MiB，当前已验证上限）。
 const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
 
-/// 固定容量的 FDT 字节缓冲区，标注在 .data.boot 段。
-/// .data.boot 位于 .data 段内，BSS clear (mem_clear) 不会触及。
-#[link_section = ".data.boot"]
+/// 固定容量的 FDT 字节缓冲区，标注在 sbss 前的 .bss.boot 段。
+/// .bss.boot 是 NOBITS，BSS clear (mem_clear) 不会触及。
+#[link_section = ".bss.boot"]
 static mut FDT_SNAPSHOT: FdtSnapshot = FdtSnapshot::new();
 
 struct FdtSnapshot {
@@ -225,7 +228,7 @@ struct FdtSnapshot {
 
 | 协议 | 来源 | 快照路径 | post-heap 数据来源 |
 |------|------|----------|-------------------|
-| `RiscvFdt` | QEMU RISC-V (a1 传 DTB paddr) | `capture_fdt_snapshot()` → `.data.boot` | `fdt_snapshot()` 返回的 `&[u8]` |
+| `RiscvFdt` | QEMU RISC-V (a1 传 DTB paddr) | `capture_fdt_snapshot()` → `.bss.boot` | `fdt_snapshot()` 返回的 `&[u8]` |
 | `UbootGo` | VF2 实板 (U-Boot `go` 命令) | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
 | `LoongArchLegacy` | LA64 QEMU | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
 | `Test` | ktest 单元测试 | 否，`has_valid_dtb()` 返回 `false` | 静态 fallback |
@@ -453,5 +456,5 @@ HAL 的核心价值是把“同一件内核语义”压缩成一组稳定契约�
 | `os/src/hal/arch/loongarch64/tlb.rs` | la64 ASID/TLB |
 | `os/src/hal/arch/loongarch64/trap/mod.rs` | la64 trap/syscall/page fault/timer/unaligned access |
 | `os/src/hal/platform/` | 板级常量 |
-| `os/src/hal/firmware/mod.rs` | 两阶段初始化编排、`FdtSnapshot` 结构体、`MAX_FDT_SNAPSHOT_SIZE`、`#[link_section = ".data.boot"]` 静态缓冲区 |
+| `os/src/hal/firmware/mod.rs` | 两阶段初始化编排、`FdtSnapshot` 结构体、`MAX_FDT_SNAPSHOT_SIZE`、`#[link_section = ".bss.boot"]` 静态缓冲区 |
 | `os/src/hal/firmware/fdt.rs` | `capture_fdt_snapshot()`（pre-BSS 快照）、PCI `ranges` early mapping、`build_platform_info()`（post-heap 从快照解构）、`read_totalsize()` 验证 DTB magic |

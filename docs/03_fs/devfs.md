@@ -4,7 +4,7 @@ module: fs/dev
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-07-29"
+last_updated: "2026-08-02"
 code_paths:
   - "os/src/fs/dev/mod.rs"
   - "os/src/fs/dev/null.rs"
@@ -136,11 +136,13 @@ misc_dir.add_dev("rtc", Arc::new(Rtc) as Arc<dyn IndexNode>)?;
 
 控制台终端。`/dev/console` 是 TTY 的别名。
 
-**输入生产与通知**：调度器从物理 UART 取字符，先经过 magic-key 识别，再放入 trace
-stash；`Teletype::receive_stashed()` 将字符送入 line discipline。只有生产侧在字符真正使
-TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，`poll()` 只
-查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁重查
-read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
+**输入生产与通知**：RV64 运行时控制台通过 PLIC UART RX 中断有界地清空硬件 FIFO，并将
+字节写入原子 SPSC 接收环；调度器在任务上下文取出这些字节，执行 magic-key 识别后调用
+TTY line discipline。环或 TTY 输入空间耗尽时会计数并暂时屏蔽 UART RX 中断，待调度器恢复
+空间后重新打开，避免 ISR 获取 TTY 锁或静默覆盖字节。LA64 保持既有轮询输入路径。只有生产
+侧在字符真正使 TTY 可读后才通知普通 read waiter 和 epoll listener；`read_at()` 只消费数据，
+`poll()` 只查询状态，两者都不会反向通知自己的读等待队列。这个约束避免 `WaitQueue` 在持锁
+重查 read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形成单核自锁。
 
 **输入变换与规范模式**：输入先应用 `IGNCR` / `ICRNL` / `INLCR`。默认 `ICRNL` 因而会
 把串口 Enter 的 `CR` 转为用户态 `NL`。`ICANON` 下使用固定 1024 字节环形队列保存完整
@@ -153,13 +155,11 @@ read 条件时，TTY 消费路径再次获取同一非重入 `spin::Mutex` 形�
 整个 `Teletype`，而不是每个 open/read；多个并发 reader 的完整 Linux N_TTY 语义尚未
 实现。
 
-**控制字符**：`ISIG` 下的 VINTR（默认 Ctrl-C）会按 `NOFLSH` 决定是否清空输入，并在
-释放 TTY 内部锁后向前台进程组投递 SIGINT，避免持 TTY 锁扫描全局 task/process 表。
-没有可用 foreground pgid 时仍保留调度器场景的 interruptible-task fallback。
+**控制字符与作业控制**：`ISIG` 下的 VINTR（默认 Ctrl-C）和 VQUIT（默认 Ctrl-\）分别向有效的 foreground pgrp 投递 SIGINT 和 SIGQUIT。TTY 必须有 controlling session，且 foreground pgrp 必须存在并属于该 session；不满足时字符只被 line discipline 消费，绝不广播给 current task 或全部 interruptible waiter。未设置 `NOFLSH` 时，处理控制字符会同时清空输入和有界输出队列；写路径在串口 drain 前先通过该队列串行化输出。
 
 **写**：将 UTF-8 字符串直接输出到串口（`print!`）。
 
-**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCGPGRP` 在 foreground_pgid 从未设置时返回调用者的 pgid（Linux 兼容）。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
+**ioctl**：支持 `TCGETS` / `TCSETS` / `TCGETA` / `TCSETA` 系列（termios 读写）、`TCXONC`（空操作）、`TIOCSCTTY`（session leader 将此 TTY 设为 controlling terminal，并以调用者的 session/pgrp 初始化终端状态）、`TIOCGPGRP` / `TIOCSPGRP`（前台进程组）、`TIOCGWINSZ` / `TIOCSWINSZ`（窗口大小）。`TIOCSCTTY` 拒绝非 session leader 或已归属其他 session 的 TTY；`TIOCSPGRP` 拒绝 0、不存在的 pgrp、跨 session 的 pgrp，且要求调用者处于 controlling session；`TIOCGPGRP` 只报告已设置的 foreground pgrp，不再伪造调用者 pgid。`TCSETSF` / `TCSETAF` 会清空输入；模式切换若让已缓冲数据从不可读变为可读，会在释放内部锁后通知 read/epoll waiter。
 
 ### Pipe（匿名管道）
 

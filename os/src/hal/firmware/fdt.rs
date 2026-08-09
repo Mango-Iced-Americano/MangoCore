@@ -128,15 +128,6 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         Ok(fdt) => fdt,
         Err(_) => return false,
     };
-    let memory = match fdt
-        .root()
-        .and_then(|root| root.memory())
-        .and_then(|memory| memory.reg())
-    {
-        Ok(memory) => memory,
-        Err(_) => return false,
-    };
-
     // SAFETY: [Categories 1 and 2 — aliasing and data races]
     // `populate_memory_regions()` runs once during single-threaded boot before
     // `mm::init()`; all later access to MEMORY_BUF is read-only.
@@ -144,27 +135,7 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
     buf.region_count = 0;
     buf.reserved_count = 0;
 
-    for region in memory.iter::<u64, usize>() {
-        if buf.region_count >= MAX_MEMORY_REGIONS {
-            break;
-        }
-        let region = match region {
-            Ok(region) => region,
-            Err(_) => return false,
-        };
-        let start = region.address as usize;
-        let size = region.len;
-        if size == 0 {
-            continue;
-        }
-        let Some(end) = start.checked_add(size) else {
-            return false;
-        };
-        buf.regions[buf.region_count] = (start, end);
-        buf.region_count += 1;
-    }
-
-    if buf.region_count == 0 {
+    if !collect_root_memory_regions(&fdt, buf) {
         return false;
     }
 
@@ -197,6 +168,86 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         // LA64 timer 频率由 CPUCFG 探测，不要求 FDT `/cpus/timebase-frequency`。
         parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf)
     }
+}
+
+/// Collect every root-level `/memory` node, regardless of whether its name
+/// carries a unit address.  FDT permits multiple DRAM banks, while
+/// `root.memory()` only exposes one matching node.
+fn collect_root_memory_regions(
+    fdt: &FallibleFdt<'_>,
+    buffer: &mut crate::hal::firmware::MemoryRegionBuf,
+) -> bool {
+    let Ok(nodes) = fdt.all_nodes() else {
+        return false;
+    };
+
+    for entry in nodes {
+        let Ok((depth, node)) = entry else {
+            return false;
+        };
+        if depth != 1 {
+            continue;
+        }
+        let Ok(node_name) = node.name() else {
+            return false;
+        };
+        if &*node_name.name != "memory" {
+            continue;
+        }
+        let Ok(Some(regions)) = node.reg() else {
+            return false;
+        };
+        for region in regions.iter::<u64, usize>() {
+            let Ok(region) = region else {
+                return false;
+            };
+            if region.len == 0 {
+                continue;
+            }
+            let Ok(start) = usize::try_from(region.address) else {
+                return false;
+            };
+            let Some(end) = start.checked_add(region.len) else {
+                return false;
+            };
+            if buffer.region_count == MAX_MEMORY_REGIONS {
+                return false;
+            }
+            buffer.regions[buffer.region_count] = (start, end);
+            buffer.region_count += 1;
+        }
+    }
+
+    sort_and_validate_memory_regions(buffer)
+}
+
+/// Order DRAM banks for the frame allocator and reject ambiguity before it can
+/// produce duplicate allocatable frames.
+fn sort_and_validate_memory_regions(buffer: &mut crate::hal::firmware::MemoryRegionBuf) -> bool {
+    if buffer.region_count == 0 {
+        return false;
+    }
+
+    let mut index = 1;
+    while index < buffer.region_count {
+        let region = buffer.regions[index];
+        let mut insertion = index;
+        while insertion > 0 && region.0 < buffer.regions[insertion - 1].0 {
+            buffer.regions[insertion] = buffer.regions[insertion - 1];
+            insertion -= 1;
+        }
+        buffer.regions[insertion] = region;
+        index += 1;
+    }
+
+    let mut previous_end = buffer.regions[0].1;
+    for &(start, end) in &buffer.regions[1..buffer.region_count] {
+        if start < previous_end {
+            return false;
+        }
+        previous_end = end;
+    }
+    true
 }
 
 fn push_range<const N: usize>(
@@ -318,38 +369,50 @@ fn parse_node_resources(
                 }
             }
         }
-        let Ok(Some(regions)) = node.reg() else {
-            continue;
-        };
-        for region in regions.iter::<usize, usize>() {
-            let Ok(region) = region else {
-                return false;
-            };
-            if region.len == 0 {
-                continue;
-            }
-            let Some(end) = region.address.checked_add(region.len) else {
-                return false;
-            };
-            let range = (region.address, end);
-            let page_range = (
-                range.0 & !0xfff,
-                match range.1.checked_add(0xfff) {
-                    Some(end) => end & !0xfff,
-                    None => return false,
-                },
-            );
-            if reserved_memory_depth.is_some() {
-                if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, range) {
+        // QEMU virt places physical devices directly below the root `/soc`
+        // bus, while some boards place them directly below `/`.  Descendants
+        // of those devices can use bus-local `reg` offsets, so the pre-heap
+        // identity mapper accepts only these two device layers and requires a
+        // real device binding instead of treating every `reg` as MMIO.
+        let is_early_mmio_device = depth <= 2
+            && node
+                .property::<fdt::properties::Compatible<'_>>()
+                .ok()
+                .flatten()
+                .is_some_and(|compatible| compatible.all().next().is_some());
+        if let Ok(Some(regions)) = node.reg() {
+            for region in regions.iter::<usize, usize>() {
+                let Ok(region) = region else {
                     return false;
+                };
+                if region.len == 0 {
+                    continue;
                 }
-            } else if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
-                && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, range)
-            {
-                return false;
+                let Some(end) = region.address.checked_add(region.len) else {
+                    return false;
+                };
+                let range = (region.address, end);
+                if reserved_memory_depth.is_some() {
+                    if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, range) {
+                        return false;
+                    }
+                } else if is_early_mmio_device {
+                    let page_range = (
+                        range.0 & !0xfff,
+                        match range.1.checked_add(0xfff) {
+                            Some(end) => end & !0xfff,
+                            None => return false,
+                        },
+                    );
+                    if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
+                        && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, range)
+                    {
+                        return false;
+                    }
+                }
             }
         }
-        let is_pci_host = node
+        let is_pci_host = is_early_mmio_device && node
             .property::<fdt::properties::Compatible<'_>>()
             .ok()
             .flatten()
@@ -585,12 +648,25 @@ fn resolve_console(devices: &[DeviceInfo]) -> Option<ConsoleInfo> {
         Ok(value) => usize::try_from(be_u32(value, 0)?).ok()?,
         Err(_) => 0,
     };
-    if register_shift > 3 || range.size <= (5usize << register_shift) {
+    let register_io_width = match serial.raw_property("reg-io-width") {
+        Ok(value) => usize::try_from(be_u32(value, 0)?).ok()?,
+        Err(_) => 1,
+    };
+    let irq = match serial.raw_property("interrupts") {
+        Ok(value) => usize::try_from(be_u32(value, 0)?).ok(),
+        Err(_) => None,
+    };
+    let Some(lsr_end) = (5usize << register_shift).checked_add(register_io_width) else {
+        return None;
+    };
+    if register_shift > 3 || !matches!(register_io_width, 1 | 4) || range.size < lsr_end {
         return None;
     }
     Some(ConsoleInfo {
         range,
         register_shift,
+        register_io_width,
+        irq,
     })
 }
 

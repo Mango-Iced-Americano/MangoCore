@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::convert::TryFrom;
 use log::info;
 
@@ -41,6 +42,19 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         Ok(s) => s,
         Err(e) => return -(e as isize),
     };
+
+    // socket_type 中不允许出现未声明的位（Linux 只识别纯类型位 +
+    // SOCK_NONBLOCK + SOCK_CLOEXEC）。`from_bits_truncate` 会静默丢弃未知
+    // 位，必须显式复核，否则 `SOCK_STREAM | 任意高位` 会被当作合法请求。
+    if socket_type
+        & !(crate::net::socket::SOCK_TYPE_MASK
+            | PosixArgsSocketType::NONBLOCK.bits()
+            | PosixArgsSocketType::CLOEXEC.bits())
+        != 0
+    {
+        return -(SyscallErr::EINVAL as isize);
+    }
+
     let is_nonblock = type_arg.is_nonblock();
     let is_cloexec = type_arg.is_cloexec();
 
@@ -85,17 +99,27 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
     let vf1 = vfs::File::new_without_open(socket_file1, vfs_flags, vfs::FileType::Socket);
     let vf2 = vfs::File::new_without_open(socket_file2, vfs_flags, vfs::FileType::Socket);
 
+    // 两个 fd 必须在同一个 fd_table 临界区提交：fd2 分配失败时回滚 fd1。
+    // 回滚产生的 Arc<File> 在锁外 drop，避免持锁触发 socket 析构。
     let files_ref = task.process.files();
-    let fd1 = files_ref
-        .lock()
-        .alloc_fd(vf1, is_cloexec)
-        .map_err(|e| -(e as isize))
-        .unwrap();
-    let fd2 = files_ref
-        .lock()
-        .alloc_fd(vf2, is_cloexec)
-        .map_err(|e| -(e as isize))
-        .unwrap();
+    let mut to_release: Vec<Arc<vfs::File>> = Vec::new();
+    let (fd1, fd2) = {
+        let mut fd_table = files_ref.lock();
+        let fd1 = match fd_table.alloc_fd(vf1, is_cloexec) {
+            Ok(fd) => fd,
+            Err(e) => return -(e as isize),
+        };
+        let fd2 = match fd_table.alloc_fd(vf2, is_cloexec) {
+            Ok(fd) => fd,
+            Err(e) => {
+                if let Ok(file) = fd_table.drop_fd(fd1) {
+                    to_release.push(file);
+                }
+                return -(e as isize);
+            }
+        };
+        (fd1, fd2)
+    };
 
     // 将两个 fd 写入用户空间的 sv 数组（sv[0] = fd1, sv[1] = fd2）
     let token = task.get_user_token();
@@ -104,6 +128,19 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
         .write_array_from(token, &fds)
         .is_err()
     {
+        // Linux 在 sv 写入失败时不泄漏已分配的 fd。先在 fd_table 锁内摘除
+        // 两个 socket fd，锁外再 drop Arc<File>，避免持锁隐式 drop 触发
+        // SocketFile/UnixStreamSocket 析构死锁。
+        {
+            let mut fd_table = files_ref.lock();
+            if let Ok(file) = fd_table.drop_fd(fd1) {
+                to_release.push(file);
+            }
+            if let Ok(file) = fd_table.drop_fd(fd2) {
+                to_release.push(file);
+            }
+        }
+        drop(to_release);
         return -(SyscallErr::EFAULT as isize);
     }
 

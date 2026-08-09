@@ -17,6 +17,8 @@ pub type AgeneralRet<'a, T> = SysFuture<'a, GeneralRet<T>>;
 #[allow(dead_code)]
 pub enum SyscallErr {
     EUNDEF = 0,
+    /// Internal restart marker consumed by signal delivery before returning to user mode.
+    ERESTART = 512,
     EPERM = 1,
     ENOENT = 2,
     ESRCH = 3,
@@ -101,7 +103,6 @@ pub enum SyscallErr {
     ELIBMAX = 82,
     ELIBEXEC = 83,
     EILSEQ = 84,
-    ERESTART = 85,
     ESTRPIPE = 86,
     EUSERS = 87,
     ENOTSOCK = 88,

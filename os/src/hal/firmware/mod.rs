@@ -38,6 +38,11 @@ pub const MAX_EARLY_MMIO_RANGES: usize = 128;
 /// Maximum validated FDT size retained across BSS clear.
 pub const MAX_FDT_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024;
 
+/// QEMU LoongArch virt publishes its generated DTB at this fixed physical
+/// address when direct ELF boot omits the EFI system-table register handoff.
+#[cfg(all(target_arch = "loongarch64", feature = "boot_la_qemu"))]
+const LA64_QEMU_FDT_PADDR: usize = 0x0010_0000;
+
 /// Static buffer for memory regions populated during early boot.
 ///
 /// `populate_memory_regions()` writes here before `mm::init()`; frame allocation
@@ -64,7 +69,7 @@ impl FdtSnapshot {
     }
 }
 
-#[link_section = ".data.boot"]
+#[link_section = ".bss.boot"]
 static mut FDT_SNAPSHOT: FdtSnapshot = FdtSnapshot::new();
 
 /// Fixed-capacity buffer holding the FDT resources needed before allocation.
@@ -139,6 +144,18 @@ pub fn populate_memory_regions() {
             }
         });
         if fdt_result.is_ok() {
+            return;
+        }
+
+        #[cfg(feature = "boot_la_qemu")]
+        if matches!(fdt_result, Err(efi::EfiFdtError::MissingSystemTable))
+            && fdt::capture_fdt_snapshot(LA64_QEMU_FDT_PADDR)
+            && fdt::parse_memory_regions(LA64_QEMU_FDT_PADDR)
+        {
+            crate::println!(
+                "[firmware] QEMU direct boot omitted EFI handoff; using validated FDT at {:#x}",
+                LA64_QEMU_FDT_PADDR
+            );
             return;
         }
 

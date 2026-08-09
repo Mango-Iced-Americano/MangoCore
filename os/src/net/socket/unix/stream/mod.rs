@@ -416,7 +416,7 @@ impl Socket for UnixStreamSocket {
 
     fn try_send(&self, buf: &[u8], _flags: MsgFlags) -> Result<isize, SyscallErr> {
         let inner = self.inner.lock();
-        match &*inner {
+        let result = match &*inner {
             Inner::Connected(conn) => match conn.try_send(buf) {
                 Some(n) => Ok(n as isize),
                 None => {
@@ -429,7 +429,24 @@ impl Socket for UnixStreamSocket {
                 }
             },
             _ => Err(SyscallErr::ENOTCONN),
+        };
+        drop(inner);
+
+        if result.is_ok() {
+            // socketpair 的对端可能已在 recv_waiters 中阻塞。数据入环后必须由
+            // 发送者发布可读事件；通用 I/O fallback 已删除，不能依赖调度时序让
+            // 对端碰巧在登记前观察到数据。通知在释放 socket state lock 后执行，
+            // 避免 waitqueue 唤醒路径反向重入 socket 锁。
+            if let Some(waiter) = self
+                .peer_recv_waiter
+                .lock()
+                .as_ref()
+                .and_then(Weak::upgrade)
+            {
+                waiter.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
+            }
         }
+        result
     }
 
     fn socket_r_ready(&self) -> bool {

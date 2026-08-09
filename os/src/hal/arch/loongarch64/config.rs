@@ -177,6 +177,12 @@ pub const ELF_DYN_BASE: usize = (((TASK_SIZE - LA_START) / 3 * 2) | LA_START) & 
 // 512G的虚拟内存？
 pub const MMAP_BASE: usize = 0xFFFF_FF80_0000_0000;
 pub const MMAP_END: usize = 0xFFFF_FFFF_FFFF_0000;
+/// 临时 ELF 载荷必须避开 PGDH 中低地址恒等映射的 39 位别名。
+///
+/// `MMAP_BASE` 的 VA[38:0] 为零；内核把 FDT 发现的低地址资源写入同一
+/// PGDH 页表后，该起点会和物理零页的 PTE 重合。保留低 4 GiB 作为所有
+/// 固件/PCI 恒等映射的别名保护带，临时 ELF 窗口从其上方开始。
+pub const KERNEL_PROGRAM_BASE: usize = MMAP_BASE + (1usize << 32);
 #[cfg(feature = "boot_la_qemu")]
 pub const KERNEL_STACK_TOP: usize = MMAP_BASE - PAGE_SIZE;
 // 当 VALEN=40 时，MMAP_BASE 是高半区第一个规范地址。若将栈放在它下方，会产生
@@ -202,6 +208,7 @@ const _: () = {
     assert!(VPPN_MASK == (1usize << (VALEN - PAGE_SIZE_BITS - 1)) - 1);
     assert!(is_canonical_vaddr(MMAP_BASE));
     assert!(is_canonical_vaddr(MMAP_END));
+    assert!(is_canonical_vaddr(KERNEL_PROGRAM_BASE));
     assert!(is_canonical_vaddr(KERNEL_STACK_BOTTOM));
     assert!(is_canonical_vaddr(KERNEL_STACK_TOP));
     assert!(
@@ -210,7 +217,8 @@ const _: () = {
     assert!(
         KERNEL_STACK_TOP - KERNEL_STACK_BOTTOM == KERNEL_STACK_SLOT_SIZE * KERNEL_STACK_MAX_SLOTS
     );
-    assert!(MMAP_BASE < KERNEL_PROGRAM_END);
+    assert!(MMAP_BASE < KERNEL_PROGRAM_BASE);
+    assert!(KERNEL_PROGRAM_BASE < KERNEL_PROGRAM_END);
     assert!(KERNEL_PROGRAM_END <= MMAP_END);
     assert!(KERNEL_PROGRAM_END & PAGE_TABLE_VA_MASK == KERNEL_STACK_BOTTOM & PAGE_TABLE_VA_MASK);
 };

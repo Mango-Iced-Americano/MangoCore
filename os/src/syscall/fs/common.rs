@@ -2015,7 +2015,7 @@ pub(crate) fn fcntl_setlk(file: &vfs::File, arg: usize, _owner_pid: usize, wait:
     let owner = LockOwner::Posix { owner_id, owner_pid };
     match posix_lock_set(file, owner, &flock, wait) {
         Ok(()) => SUCCESS,
-        Err(e) => -(e as isize),
+        Err(error) => error.syscall_result(),
     }
 }
 
@@ -2032,7 +2032,7 @@ pub(crate) fn fcntl_setlk_ofd(file: &vfs::File, arg: usize, wait: bool) -> isize
     let owner = LockOwner::Ofd { open_file_id: file.open_file_id() };
     match posix_lock_set(file, owner, &flock, wait) {
         Ok(()) => SUCCESS,
-        Err(e) => -(e as isize),
+        Err(error) => error.syscall_result(),
     }
 }
 

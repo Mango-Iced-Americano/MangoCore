@@ -16,8 +16,8 @@
 | 组件 | 文件 | 功能 |
 |------|------|------|
 | Boot protocol 检测 | `os/src/hal/boot/mod.rs` | 检测 `RiscvFdt`、`UbootGo`、`LoongArchLegacy`、`Test` 协议 |
-| FDT pre-heap 快照 + 内存解析 | `os/src/hal/firmware/{mod,fdt}.rs` | `RiscvFdt` 协议下：`capture_fdt_snapshot()` 验证 DTB magic 并将其完整复制到 `#[link_section = ".data.boot"]` 固定容量字节快照，`parse_memory_regions()` 解析 `/memory/reg` 填充 `MEMORY_BUF`；均在 `mem_clear()` 之前完成，零分配 |
-| FDT post-heap 设备枚举 | `os/src/hal/firmware/fdt.rs` | `build_platform_info()` 从 `.data.boot` 快照（`fdt_snapshot()`）构造 `fdt::Fdt`，遍历节点收集 node_path、compatible、status、MMIO ranges、raw properties；**不再从原始 firmware DTB 物理地址读取** |
+| FDT pre-heap 快照 + 内存解析 | `os/src/hal/firmware/{mod,fdt}.rs` | `RiscvFdt` 协议下：`capture_fdt_snapshot()` 验证 DTB magic 并将其完整复制到 `#[link_section = ".bss.boot"]` 的固定容量 NOBITS 字节快照；`parse_memory_regions()` 收集所有根级 `/memory` 节点、排序并拒绝重叠；均在 `mem_clear()` 之前完成，零分配 |
+| FDT post-heap 设备枚举 | `os/src/hal/firmware/fdt.rs` | `build_platform_info()` 从 `.bss.boot` 快照（`fdt_snapshot()`）构造 `fdt::Fdt`，遍历节点收集 node_path、compatible、status、MMIO ranges、raw properties；**不再从原始 firmware DTB 物理地址读取** |
 | DeviceInfo 数据模型 | `os/src/hal/platform/info.rs` | `DeviceInfo`、`DeviceKind`、`MmioRange`、`DeviceStatus`、`ResourceValidity` |
 | DeviceManager 查询层 | `os/src/hal/device/manager.rs` | 按 compatible、kind、MMIO 索引查询的只读视图 |
 | PlatformPolicy trait | `os/src/hal/platform/mod.rs` | 板级默认 root 设备、init 路径、平台名称 |

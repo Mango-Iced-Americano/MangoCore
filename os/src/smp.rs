@@ -1759,7 +1759,10 @@ pub fn bring_up_secondary_cpus() {
     extern "C" {
         fn _start();
     }
-    let secondary_entry = _start as usize;
+    // HSM 的 `start_addr` 是在 SATP=bare 时取指的物理地址；`_start` 的 Rust
+    // 符号则是高半区链接虚拟地址。入口汇编已在 BSP 单核阶段冻结 image_paddr，
+    // 所以在发布 AP 前用同一镜像基址反算物理入口，不能把高半区地址交给固件。
+    let secondary_entry = crate::hal::boot::kernel_linked_to_phys(_start as usize);
 
     for cpu_id in 1..CONFIGURED_CPU_COUNT {
         let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);

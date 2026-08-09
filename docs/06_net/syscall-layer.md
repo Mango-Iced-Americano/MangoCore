@@ -155,11 +155,11 @@ pub fn sys_socketpair(domain: u32, socket_type: u32, protocol: u32, sv: usize) -
 处理流程：
 
 1. 校验 `domain` 必须为 `AF_UNIX` 或 `AF_UNSPEC`（否则返回 `EPROTONOSUPPORT`）。
-2. 仅支持 `SOCK_STREAM` 和 `SOCK_DGRAM`（否则返回 `ESOCKTNOSUPPORT`）。
-3. 调用 `make_unix_socket_pair()` 生成一对已连接的 Socket 对象。
-4. 创建两个 `SocketFile` 和 `vfs::File` 包装，分配两个文件描述符。
-5. 将两个文件描述符写入用户空间的 `sv[0]` 和 `sv[1]`（通过 `UserSlice::write_array_from`）。
-6. 错误码：`EFAULT`（sv 地址无效）。
+2. 支持 `SOCK_STREAM`、`SOCK_DGRAM` 与 `SOCK_SEQPACKET`；当前 Unix `SOCK_SEQPACKET` 复用 stream 的双向字节流，不提供 `MSG_EOR`/记录边界。
+3. 严格接受纯类型低 4 位与 `SOCK_CLOEXEC`、`SOCK_NONBLOCK`；其他标志位返回 `EINVAL`。
+4. 预先验证并 fault-in `sv` 的完整两元素用户数组，再调用 `make_unix_socket_pair()` 生成一对已连接的 Socket 对象。
+5. 创建两个 `SocketFile` 和 `vfs::File` 包装，在同一 fd-table 锁内分配两个文件描述符；第二次分配失败或用户写回失败时释放已分配 fd。
+6. 两个 fd 均成功后才将其写入 `sv[0]` 和 `sv[1]`；错误码包括 `EINVAL`（类型/标志位）和 `EFAULT`（sv 地址无效）。
 
 ---
 

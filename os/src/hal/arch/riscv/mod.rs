@@ -6,6 +6,7 @@
 use core::arch::naked_asm;
 
 pub mod config;
+pub mod plic;
 pub mod kern_stack;
 pub mod reset;
 pub mod sbi;

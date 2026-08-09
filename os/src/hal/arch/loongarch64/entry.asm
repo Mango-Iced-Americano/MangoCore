@@ -1,12 +1,15 @@
     .section .text.entry
     .globl _start
 _start:
-    # Save U-Boot handoff registers BEFORE DMW window switch.
-    # LA64 convention: a0 = hartid, a1 = dtb_paddr (bootm) or unspecified (go).
+    # Save the firmware handoff before the DMW window switch.
+    # LoongArch QEMU direct boot follows the Linux ABI: a0 is the EFI flag,
+    # a1 is the command line and a2 is the EFI system table.  The firmware
+    # layer resolves the FDT from that table; keeping a1 here loses the table
+    # and makes every QEMU boot fail before console initialization.
     la.global   $t0,    RAW_HART_ID
     st.d        $a0,    $t0,    0
     la.global   $t0,    RAW_DTB_PADDR
-    st.d        $a1,    $t0,    0
+    st.d        $a2,    $t0,    0
     # Original DMW window switch dance.
 # 把默认0x8…和9的窗给关了，全开成0的窗，这样就相当于0的这个部分是地址恒等映射，直接继承原来的代码
     pcaddi      $t0,    0x0

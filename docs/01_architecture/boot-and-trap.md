@@ -86,10 +86,12 @@ BSP 在 `mem_clear()` 前完成两项不能延期的工作：`boot::init_bsp()` 
 寄存器基线。该顺序同时保证 RV64 直接复制 `a1` 中的 FDT，也允许 LA64 从 `a2`
 的 EFI system table 解析 FDT 后再复制。
 
-LA64 QEMU 和 2K1000 U-Boot 的入口都把 EFI system table 放在 `a2`。QEMU 入口保留
-该寄存器；2K1000 在退出 U-Boot DMW 环境后把其低 40 位物理地址交给 Rust。EFI 表内
-的嵌套指针仍由 Rust 逐项去除 DMW 段号。QEMU 必须提供 `EFI_FDT_GUID`；2K1000 可在
-合法 FDT 缺失时退回静态板级内存描述。
+LA64 QEMU 和 2K1000 U-Boot 的入口都按 ABI 从 `a2` 接收 EFI system table；入口先保存
+该寄存器，2K1000 再在退出 U-Boot DMW 环境后把低 40 位物理地址交给 Rust。EFI 表内的
+嵌套指针仍由 Rust 逐项去除 DMW 段号。某些 QEMU direct-ELF 运行未填充 `a2`，此时仅当
+EFI 查找精确返回 `MissingSystemTable`，内核才从 QEMU virt 规定的物理 `0x0010_0000` 捕获并
+完整校验 FDT；其他 EFI/FDT 错误仍 fail-closed。2K1000 可在合法 FDT 缺失时退回静态板级
+内存描述。
 
 堆就绪后，`platform::init_platform()` 才把早期快照转换为含 `String/Vec` 的 owned
 `PlatformInfo`。该对象在启动 AP 前通过 `spin::Once` 完整发布；AP 不解析固件数据、

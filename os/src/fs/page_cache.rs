@@ -696,8 +696,6 @@ pub struct PageCache {
     /// Producers use it to avoid taking the queue lock on uncontended writes.
     state_waiter_count: AtomicUsize,
     state_waiters: Mutex<WaitQueue>,
-    /// Write-balance suppression flag, set by `write_without_balance`.
-    suppress_balance: AtomicBool,
 }
 
 struct PageCacheFaultWait {
@@ -813,7 +811,6 @@ impl PageCache {
             state_wait_generation: AtomicUsize::new(0),
             state_waiter_count: AtomicUsize::new(0),
             state_waiters: Mutex::new(WaitQueue::new()),
-            suppress_balance: AtomicBool::new(false),
         });
         register_page_cache(&pc);
         pc
@@ -1865,20 +1862,6 @@ impl PageCache {
         self.write_with_copy_callbacks(offset, buf, old_file_size, before_copy, |_| {})
     }
 
-    /// Write data without triggering global dirty-page balancing.
-    pub fn write_without_balance(
-        &self,
-        offset: usize,
-        buf: &[u8],
-        old_file_size: Option<usize>,
-    ) -> Result<usize, SyscallErr> {
-        self.suppress_balance.store(true, Ordering::Relaxed);
-        let result =
-            self.write_with_copy_callbacks(offset, buf, old_file_size, |_| Ok(()), |_| {});
-        self.suppress_balance.store(false, Ordering::Relaxed);
-        result
-    }
-
     /// 写入口的统一外壳：持 `op_gate.read()` 调用 `write_kernel_body`，租约竞争时
     /// 通过 WaitQueue 睡眠重试（不自旋）。`before_copy` 在页面 populate/租约获取
     /// 之后、字节复制之前执行；`after_copy` 在所有租约 commit 之后执行。
@@ -1910,9 +1893,7 @@ impl PageCache {
                     if let Some(cb) = after_copy.take() {
                         cb(written);
                     }
-                    if !self.suppress_balance.load(Ordering::Relaxed) {
-                        balance_dirty_pages();
-                    }
+                    balance_dirty_pages();
                     return Ok(written);
                 }
                 Err(WriteAttemptError::Busy(entry)) => {
@@ -3470,6 +3451,19 @@ impl FatPageCacheBackend {
         let start_block = self.fs.first_sector_of_cluster(clus_list[cluster_id]) as usize;
         Some(start_block + offset)
     }
+
+    /// FAT32 内部扇区号（BPB_BytsPerSec 单位）→ 设备块号 + 块内字节偏移。
+    ///
+    /// cdc17728 之后 BlockDevice 一律以 BLOCK_SZ(4096) 编址，FAT32 自行换算扇区
+    /// （与 `bitmap.rs` 的 `Fat::sector_to_parent` 同一约定），不能再用 512 逻辑
+    /// 块号直接调用 `read_block`，否则会把扇区号当成设备块号读到错误位置。
+    #[inline(always)]
+    fn sector_to_parent(&self, sector: usize) -> (usize, usize) {
+        let sectors_per_block = crate::hal::BLOCK_SZ / self.block_size;
+        let block_id = sector / sectors_per_block;
+        let block_off = (sector % sectors_per_block) * self.block_size;
+        (block_id, block_off)
+    }
 }
 
 impl PageCacheBackend for FatPageCacheBackend {
@@ -3482,11 +3476,11 @@ impl PageCacheBackend for FatPageCacheBackend {
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             match self.block_id_for_offset(index, block_off) {
                 Some(sec_id) => {
-                    // The filesystem mount path wraps the device so block_id is expressed
-                    // in BPB_BytsPerSec units, independent of the platform BLOCK_SZ.
-                    self.fs
-                        .block_device
-                        .read_block(sec_id, &mut buf[start..start + self.block_size]);
+                    let (block_id, block_off_bytes) = self.sector_to_parent(sec_id);
+                    let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
+                    self.fs.block_device.read_block(block_id, &mut block);
+                    buf[start..start + self.block_size]
+                        .copy_from_slice(&block[block_off_bytes..block_off_bytes + self.block_size]);
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);
@@ -3504,9 +3498,13 @@ impl PageCacheBackend for FatPageCacheBackend {
             let start = block_off * self.block_size;
             assert!(start + self.block_size <= crate::config::PAGE_SIZE);
             if let Some(sec_id) = self.block_id_for_offset(index, block_off) {
-                self.fs
-                    .block_device
-                    .write_block(sec_id, &buf[start..start + self.block_size]);
+                let (block_id, block_off_bytes) = self.sector_to_parent(sec_id);
+                // 读-改-写：只修改目标扇区，保留同 4096 块内相邻扇区。
+                let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
+                self.fs.block_device.read_block(block_id, &mut block);
+                block[block_off_bytes..block_off_bytes + self.block_size]
+                    .copy_from_slice(&buf[start..start + self.block_size]);
+                self.fs.block_device.write_block(block_id, &block);
             }
         }
         Ok(crate::config::PAGE_SIZE)

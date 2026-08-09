@@ -638,6 +638,29 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// Compatibility fast path for develop-side signal producers.
+    ///
+    /// SMP keeps the authoritative pending state in `task.inner` plus the
+    /// process-owned `shared_pending_hint`; always entering the slow path is
+    /// conservative and avoids introducing a second stale per-thread hint.
+    #[inline(always)]
+    pub fn signal_pending_fast(&self) -> bool {
+        true
+    }
+
+    /// SMP signal delivery reads the authoritative queues under their existing
+    /// locks, so queue producers need not publish a second task-local bit.
+    #[inline(always)]
+    pub(crate) fn set_signal_pending(&self) {}
+
+    /// See [`Self::set_signal_pending`]: retain the develop API without adding
+    /// a second signal-pending ownership domain.
+    #[inline(always)]
+    pub(crate) fn recalculate_signal_pending_with_inner(&self, _inner: &TaskControlBlockInner) {}
+
+    #[inline(always)]
+    pub(crate) fn recalculate_signal_pending(&self) {}
+
     /// 返回本线程已结算的 user+system CPU 时间。
     pub(crate) fn cpu_time_us(&self) -> u64 {
         self.acquire_inner_lock().rusage.cpu_time_us()

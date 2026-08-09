@@ -13,7 +13,7 @@ pub enum LtpLibc { Musl, Glibc, Both }
 pub enum LtpRunner { Script, Inline, Suite }
 
 pub struct RuntimeConfig {
-    pub mode: RunMode, pub mask: u16, pub order: Vec<usize>, pub timeouts: [u64; 13],
+    pub mode: RunMode, pub mask: u16, pub order: Vec<usize>, pub timeouts: [u64; 15],
     pub ltp_exclude: Vec<String>, pub ltp_include: Vec<String>, pub ltp_from: Option<String>,
     pub ltp_libc: LtpLibc, pub ltp_runner: LtpRunner, pub ltp_suites: Vec<String>,
     pub conf_source: Option<Vec<u8>>, pub diag: bool, pub timer_smoke: bool,

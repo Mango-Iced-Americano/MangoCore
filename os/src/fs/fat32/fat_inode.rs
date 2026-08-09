@@ -1404,6 +1404,19 @@ impl IndexNode for FatInode {
             .map_err(|_| SyscallErr::EIO)
     }
 
+    fn create_with_attrs(
+        &self,
+        name: &str,
+        file_type: FileType,
+        attrs: crate::fs::vfs::CreateAttrs,
+    ) -> Result<Arc<dyn IndexNode>, SyscallErr> {
+        // FAT 目录项的属主/权限在 `fat_do_create` 的 `gen_dir_ent` 中一次性固化，
+        // 不维护可单独写的 metadata。默认 `create_with_attrs` 会先 `create` 再调
+        // `set_metadata`（FatInode 未实现，返回 ENOSYS），导致 `open(O_CREAT)` 在
+        // FAT 卷上整体失败；这里直接委托 `create`。
+        self.create(name, file_type, attrs.mode)
+    }
+
     fn rename(
         &self,
         old_name: &str,

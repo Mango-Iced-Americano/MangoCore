@@ -962,6 +962,12 @@ impl<'a> NetInterface<'a> {
         self.poll_each_stack_bounded();
     }
 
+    /// IRQ producers only publish a deferred poll request; smoltcp remains in
+    /// the CPU0 worker's task context and never runs from hard IRQ context.
+    pub fn notify_rx_interrupt(&self) {
+        let _ = self.try_poll_irq();
+    }
+
     /// CPU0 专属的网络轮询 worker。
     ///
     /// 创建方在 `TaskStatus::New` 时将 affinity 固定为 BOOT_CPU_ID；每次醒来最多

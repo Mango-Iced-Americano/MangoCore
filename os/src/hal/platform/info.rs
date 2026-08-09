@@ -36,6 +36,8 @@ pub struct MmioRange {
 pub struct ConsoleInfo {
     pub range: MmioRange,
     pub register_shift: usize,
+    pub register_io_width: usize,
+    pub irq: Option<usize>,
 }
 
 impl MmioRange {

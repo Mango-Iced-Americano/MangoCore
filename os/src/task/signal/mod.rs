@@ -151,6 +151,23 @@ bitflags! {
 const SYSCALL_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_RT_SIGSUSPEND: usize = 133;
 
+/// Linux-internal syscall restart outcomes. These values never cross the user ABI:
+/// signal delivery translates them to either a restarted syscall or `EINTR`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(isize)]
+pub enum RestartKind {
+    RestartSys = -512,
+    RestartNoIntr = -513,
+    RestartNoHand = -514,
+    RestartBlock = -516,
+}
+
+impl RestartKind {
+    pub const fn syscall_result(self) -> isize {
+        self as isize
+    }
+}
+
 impl Signals {
     // SIGKILL | SIGSTOP
     /// Signals that cannot be blocked by user sigprocmask.

@@ -15,7 +15,11 @@ pub const USER_STACK_INIT_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x2000;
+// The FAT32 SMP ktest constructs the minimum standards-compliant 67,000-cluster
+// in-memory volume (34,588,672 bytes) before it can exercise concurrent cluster
+// allocation. Keep room for the live kernel and fixture instead of making the
+// test depend on an impossible sub-32MiB contiguous allocation.
+pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x4000;
 pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;

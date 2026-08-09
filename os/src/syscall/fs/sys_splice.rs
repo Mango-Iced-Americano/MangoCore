@@ -325,7 +325,7 @@ fn splice_pipe_to_pipe(p1: &Pipe, p2: &Pipe, len: usize, nonblock: bool) -> isiz
                     // Non-terminal: no progress.  Check signals before waiting.
                     if let Some(task) = current_task() {
                         if crate::task::has_actionable_signal(&task) {
-                            return ERESTART;
+                            return crate::task::RestartKind::RestartSys.syscall_result();
                         }
                     }
                 }
@@ -351,14 +351,16 @@ fn splice_pipe_to_pipe(p1: &Pipe, p2: &Pipe, len: usize, nonblock: bool) -> isiz
                     }
                     return n;
                 }
-                WaitResult::Interrupted => return ERESTART,
+                WaitResult::Interrupted => {
+                    return crate::task::RestartKind::RestartSys.syscall_result()
+                }
                 WaitResult::TimedOut => { /* dst_wq timed out — try src_wq */ }
             }
 
             // Re-check signals between waits.
             if let Some(task) = current_task() {
                 if crate::task::has_actionable_signal(&task) {
-                    return ERESTART;
+                    return crate::task::RestartKind::RestartSys.syscall_result();
                 }
             }
 
@@ -380,7 +382,9 @@ fn splice_pipe_to_pipe(p1: &Pipe, p2: &Pipe, len: usize, nonblock: bool) -> isiz
                     }
                     return n;
                 }
-                WaitResult::Interrupted => return ERESTART,
+                WaitResult::Interrupted => {
+                    return crate::task::RestartKind::RestartSys.syscall_result()
+                }
                 WaitResult::TimedOut => { /* loop back */ }
             }
         }

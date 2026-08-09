@@ -5,7 +5,7 @@
 #   arch: rv64 | la64
 #   mode: release | debug
 #   output_path: 生成的 cpio 路径 (如 ../fs-img-dir/initramfs-rv.cpio)
-#   profile: (可选) "regression" 构建最小回归测试 initramfs
+#   profile: (可选) "regression" 构建最小回归测试 initramfs; 所有 profile 都嵌入 loop 测试磁盘
 
 set -eu
 
@@ -70,6 +70,7 @@ if [ "$PROFILE" = "regression" ]; then
     fi
 
 else
+    # normal 与 ktest 共享完整 initramfs 构建；loop 测试磁盘对所有 profile 生成（见 6a）
     echo "[initramfs] Building initramfs for $ARCH ($MODE)..."
 
     # 1. 复制 common skeleton
@@ -171,6 +172,24 @@ if [ -f "$REPO_ROOT/os_test.conf" ]; then
     echo "[initramfs] installed os_test.conf"
 else
     echo "[initramfs] WARNING: os_test.conf not found at repo root"
+fi
+
+# 6a. 生成 loop 测试用小型磁盘镜像（loop 块设备挂载测试）
+# 所有 profile 都嵌入：normal/regression QEMU 回归也使用这两个磁盘。
+# MANGO_NO_TEST_DISKS=1 时跳过磁盘生成，产出精简 Image 供 TFTP 部署（板端不挂载这些磁盘）。
+if [ -z "${MANGO_NO_TEST_DISKS:-}" ] && command -v mkfs.ext4 >/dev/null 2>&1 && command -v mkfs.fat >/dev/null 2>&1; then
+    # ext4 backend (os/src/fs/ext4_another/fs.rs) only supports 4096-byte blocks.
+    # Plain `1m` (without -b) uses the default 4096-byte block size, so 1MiB works;
+    # a 1MiB image forced with `-b 1024` is rejected by the backend (EIO).
+    mkfs.ext4 -q -F "$STAGE/test-ext.img" 1m
+    # Kernel FAT probe (os/src/fs/filesystem.rs) requires FAT32 (root_entry_count==0 &&
+    # fat_size_16==0 && fat_size_32 != 0 && root_cluster >= 2). 512KB (512 sectors) is
+    # the verified mkfs.fat minimum and passes the probe now that small totals stored in
+    # total_sectors_16 (BPB offset 19) are accepted instead of requiring total_sectors_32.
+    mkfs.fat -F 32 -C "$STAGE/test-fat.img" 512
+    echo "[initramfs] installed loop test disks test-ext.img / test-fat.img"
+else
+    echo "[initramfs] WARNING: mkfs.ext4/mkfs.fat not found; skipping loop test disk images"
 fi
 
 # 7. 生成 newc cpio 归档

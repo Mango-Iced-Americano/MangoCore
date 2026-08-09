@@ -341,25 +341,58 @@ impl BlockSizeAdapter {
 
 impl BlockDevice for BlockSizeAdapter {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
-        if buf.len() != self.child_size {
+        // `EasyFileSystem::open` 用 PAGE_SIZE 缓冲读取 BPB（覆盖 512/1024/2048/4096
+        // 扇区），而本适配器的逻辑块是 child_size。`buf` 可以是多个 child 的倍数，
+        // 必须跨 parent 块组装，而不是只接受单个 child 大小。
+        if buf.is_empty() || buf.len() % self.child_size != 0 {
             return Err(BlockDeviceError::InvalidBufferLength);
         }
-        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let nchildren = buf.len() / self.child_size;
         let mut tmp = alloc::vec![0u8; BLOCK_SZ];
-        self.parent.read_block(parent_block, &mut tmp)?;
-        buf.copy_from_slice(&tmp[offset_in_parent..offset_in_parent + self.child_size]);
+        let mut last_parent = usize::MAX;
+        for i in 0..nchildren {
+            let (parent_block, offset_in_parent) = self.parent_for_child(block_id + i);
+            if parent_block != last_parent {
+                self.parent.read_block(parent_block, &mut tmp)?;
+                last_parent = parent_block;
+            }
+            buf[i * self.child_size..(i + 1) * self.child_size]
+                .copy_from_slice(&tmp[offset_in_parent..offset_in_parent + self.child_size]);
+        }
         Ok(())
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
-        if buf.len() != self.child_size {
+        if buf.is_empty() || buf.len() % self.child_size != 0 {
             return Err(BlockDeviceError::InvalidBufferLength);
         }
-        let (parent_block, offset_in_parent) = self.parent_for_child(block_id);
+        let nchildren = buf.len() / self.child_size;
         let mut tmp = alloc::vec![0u8; BLOCK_SZ];
-        self.parent.read_block(parent_block, &mut tmp)?;
-        tmp[offset_in_parent..offset_in_parent + self.child_size].copy_from_slice(buf);
-        self.parent.write_block(parent_block, &tmp)
+        let mut last_parent = usize::MAX;
+        for i in 0..nchildren {
+            let (parent_block, offset_in_parent) = self.parent_for_child(block_id + i);
+            if parent_block != last_parent {
+                // 读-改-写：先取整个 parent，保留该 parent 内其它 child 的内容。
+                self.parent.read_block(parent_block, &mut tmp)?;
+                last_parent = parent_block;
+            }
+            tmp[offset_in_parent..offset_in_parent + self.child_size]
+                .copy_from_slice(&buf[i * self.child_size..(i + 1) * self.child_size]);
+            let next_child = block_id + i + 1;
+            let (next_parent, _) = self.parent_for_child(next_child);
+            if next_parent != parent_block {
+                self.parent.write_block(parent_block, &tmp)?;
+                last_parent = usize::MAX;
+            }
+        }
+        if nchildren > 0 {
+            let (last_pb, _) = self.parent_for_child(block_id + nchildren - 1);
+            // 最后一个 parent 若尚未写回（上一轮 next_parent 相同则已写），这里兜底。
+            if last_parent != usize::MAX {
+                self.parent.write_block(last_pb, &tmp)?;
+            }
+        }
+        Ok(())
     }
 
     fn flush(&self) -> BlockDeviceResult {

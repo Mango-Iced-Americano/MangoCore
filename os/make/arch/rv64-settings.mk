@@ -72,6 +72,7 @@ DISASM ?= -x
 # Initramfs cpio generation — parameterized for normal / regression profiles
 INITRAMFS_CPIO_RV := $(IMAGE_ROLE_RV64_BOOTSTRAP_ROOT)
 REGRESSION_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-regression-rv.cpio
+KTEST_CPIO_RV := $(PRODUCT_ROOT)/initramfs/initramfs-ktest-rv.cpio
 
 # INITRAMFS_PROFILE: "normal" (default) or "regression"
 INITRAMFS_PROFILE ?= normal

@@ -34,6 +34,11 @@ pub fn tests() -> Vec<KernelTest> {
         ),
         #[cfg(target_arch = "riscv64")]
         KernelTest::new(
+            "platform_fdt_snapshot::retains_qemu_soc_device_layer",
+            test_retains_qemu_soc_device_layer,
+        ),
+        #[cfg(target_arch = "riscv64")]
+        KernelTest::new(
             "platform_fdt_snapshot::discovers_qemu_pci_host",
             test_discovers_qemu_pci_host,
         ),
@@ -231,6 +236,27 @@ fn test_captures_qemu_boot_fdt_raw_properties() -> Result<(), &'static str> {
         FirmwareKind::Static => Err("RISC-V QEMU ktest selected a static platform fallback"),
         FirmwareKind::Acpi => Err("RISC-V QEMU ktest selected an unsupported ACPI platform"),
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn test_retains_qemu_soc_device_layer() -> Result<(), &'static str> {
+    // Given: QEMU virt places the early-mapped peripherals below `/soc`.
+    let platform = crate::hal::platform::platform_info();
+
+    // When: the post-heap snapshot exposes the FDT nodes used by early MMIO.
+    for compatible in ["riscv,plic0", "ns16550a", "virtio,mmio"] {
+        let device = platform
+            .devices
+            .iter()
+            .find(|device| device.compatible.iter().any(|value| value == compatible))
+            .ok_or("QEMU boot FDT omitted a required /soc device")?;
+
+        // Then: every required node remains a direct `/soc` child with MMIO.
+        if device.parent_path.as_deref() != Some("/soc") || device.mmio_range(0).is_none() {
+            return Err("QEMU /soc device lost its direct parent or MMIO range");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "riscv64")]

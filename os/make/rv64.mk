@@ -93,6 +93,10 @@ $(REGRESSION_CPIO_RV): user
 	@mkdir -p $(dir $(REGRESSION_CPIO_RV))
 	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh rv64 $(MODE) $(REGRESSION_CPIO_RV) regression
 
+$(KTEST_CPIO_RV): user
+	@mkdir -p $(dir $(KTEST_CPIO_RV))
+	USER_OUTPUT_ROOT="$(USER_OUTPUT_ROOT)" ../scripts/build_initramfs.sh rv64 $(MODE) $(KTEST_CPIO_RV) ktest
+
 kernel: $(LWEXT4_PREREQ)
     ifeq ($(MODE), debug)
 	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KERNEL_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_RV))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} cargo build --features "riscv $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
@@ -154,9 +158,9 @@ check: toolchain-preflight $(KERNEL_INITRAMFS_CPIO_RV)
 # Rebuilds kernel with MANGO_CMDLINE env var, then launches QEMU.
 # The kernel needs initramfs cpio (embedded via .S), so user
 # programs must be built first.
-ktest-build-only: toolchain-preflight user $(KERNEL_INITRAMFS_CPIO_RV) $(LWEXT4_PREREQ)
+ktest-build-only: toolchain-preflight user $(KTEST_CPIO_RV) $(LWEXT4_PREREQ)
 	@echo "[ktest] Rebuilding kernel with: $(KTEST_CMDLINE)"
-	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KERNEL_INITRAMFS_CPIO_RV))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
+	@CARGO_TARGET_DIR="$(KERNEL_OUTPUT_ROOT)" MANGO_CMDLINE="$(KTEST_CMDLINE)" MANGO_INITRAMFS_CPIO="$(abspath $(KTEST_CPIO_RV))" MANGO_USER_OUTPUT_ROOT="$(abspath $(USER_OUTPUT_ROOT))" MANGO_USER_OUTPUT_MODE="$(MODE)" LOG=${LOG} \
 		cargo build --release --features "riscv $(LOG_OPTION) block_$(BLK_MODE) oom_handler $(EXTRA_FEATURES)"
 	@mkdir -p $(dir $(KERNEL_IMAGE))
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_IMAGE)

@@ -125,6 +125,7 @@ pub fn shutdown() -> isize {
 pub const AF_UNIX: usize = 1;
 pub const SOCK_STREAM: usize = 1;
 pub const SOCK_DGRAM: usize = 2;
+pub const SOCK_SEQPACKET: usize = 5;
 pub const SOCK_CLOEXEC: usize = 0o2000000;
 pub const SOCK_NONBLOCK: usize = 0o4000;
 

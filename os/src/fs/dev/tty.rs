@@ -42,9 +42,11 @@ impl Default for WinSize {
 
 pub struct TeletypeInner {
     input: TtyInputBuffer,
+    output: TtyOutputBuffer,
     noncanonical_read_active: bool,
     noncanonical_deadline: Option<TimeSpec>,
     foreground_pgid: u32,
+    controlling_sid: usize,
     winsize: WinSize,
     termios: Termios,
 }
@@ -53,9 +55,11 @@ impl Default for TeletypeInner {
     fn default() -> Self {
         Self {
             input: TtyInputBuffer::new(),
+            output: TtyOutputBuffer::new(),
             noncanonical_read_active: false,
             noncanonical_deadline: None,
             foreground_pgid: Default::default(),
+            controlling_sid: 0,
             winsize: WinSize::default(),
             termios: Termios::default(),
         }
@@ -89,8 +93,10 @@ impl Teletype {
 }
 
 const TTY_INPUT_CAPACITY: usize = 1024;
+const TTY_OUTPUT_CAPACITY: usize = 1024;
 const VDISABLE: u8 = 0xff;
 const VINTR: usize = 0;
+const VQUIT: usize = 1;
 const VERASE: usize = 2;
 const VKILL: usize = 3;
 const VEOF: usize = 4;
@@ -114,6 +120,46 @@ struct TtyInputBuffer {
     eof_pending: bool,
 }
 
+struct TtyOutputBuffer {
+    bytes: [u8; TTY_OUTPUT_CAPACITY],
+    head: usize,
+    len: usize,
+}
+
+impl TtyOutputBuffer {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; TTY_OUTPUT_CAPACITY],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn write(&mut self, input: &[u8]) -> usize {
+        let count = input.len().min(self.bytes.len() - self.len);
+        for (offset, byte) in input[..count].iter().enumerate() {
+            self.bytes[(self.head + self.len + offset) % self.bytes.len()] = *byte;
+        }
+        self.len += count;
+        count
+    }
+
+    fn read(&mut self, output: &mut [u8]) -> usize {
+        let count = output.len().min(self.len);
+        for (offset, byte) in output[..count].iter_mut().enumerate() {
+            *byte = self.bytes[(self.head + offset) % self.bytes.len()];
+        }
+        self.head = (self.head + count) % self.bytes.len();
+        self.len -= count;
+        count
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+}
+
 impl TtyInputBuffer {
     const fn new() -> Self {
         Self {
@@ -134,6 +180,10 @@ impl TtyInputBuffer {
         self.bytes[tail] = byte;
         self.len += 1;
         true
+    }
+
+    fn has_space(&self) -> bool {
+        self.len < self.bytes.len()
     }
 
     fn pop(&mut self) -> Option<u8> {
@@ -325,42 +375,39 @@ impl TeletypeInner {
     }
 }
 
-fn is_vintr(inner: &TeletypeInner, ch: u8) -> bool {
-    if inner.termios.lflag & LocalModes::ISIG.bits() == 0
-        || inner.termios.cc[VINTR] == VDISABLE
-        || ch != inner.termios.cc[VINTR]
-    {
-        return false;
+fn signal_from_input(inner: &TeletypeInner, ch: u8) -> Option<Signals> {
+    if inner.termios.lflag & LocalModes::ISIG.bits() == 0 {
+        return None;
     }
-    true
+    if inner.termios.cc[VINTR] != VDISABLE && ch == inner.termios.cc[VINTR] {
+        return Some(Signals::SIGINT);
+    }
+    if inner.termios.cc[VQUIT] != VDISABLE && ch == inner.termios.cc[VQUIT] {
+        return Some(Signals::SIGQUIT);
+    }
+    None
 }
 
-/// Send SIGINT after the TTY lock has been released. Falls back to the current
-/// process, or to interruptible tasks when called from the scheduler loop.
-fn send_vintr_sigint(fg_pgid: u32) -> bool {
-    if fg_pgid != 0 {
-        let mut sent = false;
-        for process in crate::task::find_processes_by_pgid(fg_pgid as usize) {
-            crate::task::send_process_signal(&process, Signals::SIGINT);
+fn send_foreground_signal(fg_pgid: u32, controlling_sid: usize, signal: Signals) -> bool {
+    if fg_pgid == 0 || controlling_sid == 0 {
+        return false;
+    }
+    let mut sent = false;
+    for process in crate::task::find_processes_by_pgid(fg_pgid as usize) {
+        if process.getsid() == controlling_sid {
+            crate::task::send_process_signal(&process, signal);
             sent = true;
         }
-        sent
-    } else if let Some(task) = crate::task::current_task() {
-        crate::task::send_process_signal(&task.process, Signals::SIGINT);
-        true
-    } else if fg_pgid == 0 {
-        // Fallback: fg_pgid not set and no current task (scheduler loop).
-        // Send SIGINT to all interruptible tasks (the actual foreground job).
-        crate::task::send_signal_to_interruptible(Signals::SIGINT)
-    } else {
-        false
     }
+    sent
 }
 
 #[derive(Clone, Copy)]
-struct VintrEvent {
+struct SignalCharEvent {
     byte: u8,
+    signal: Signals,
     foreground_pgid: u32,
+    controlling_sid: usize,
     echo_control: bool,
 }
 
@@ -370,29 +417,69 @@ impl Teletype {
     /// the character has actually made input readable.
     pub fn receive_stashed() {
         while let Some(byte) = crate::trace::pop_stashed() {
-            Self::receive_char(byte);
+            let _ = Self::receive_char(byte);
         }
     }
 
-    fn receive_char(byte: u8) {
-        let (notify_readable, vintr_event) = {
+    /// Deliver one console transport byte in task context.
+    ///
+    /// Returns false only when the TTY input ring rejected the byte, so the
+    /// UART producer can apply transport-level backpressure.
+    pub fn receive_console_char(byte: u8) -> bool {
+        Self::receive_char(byte)
+    }
+
+    /// Return whether the TTY input ring can accept another transport byte.
+    pub fn input_has_space() -> bool {
+        TTY.inner.lock().input.has_space()
+    }
+
+    fn write_output(&self, bytes: &[u8]) {
+        let mut written = 0;
+        let mut chunk = [0u8; 64];
+        while written < bytes.len() {
+            let queued = {
+                let mut inner = self.inner.lock();
+                inner.output.write(&bytes[written..])
+            };
+            if queued != 0 {
+                written += queued;
+            }
+            loop {
+                let count = {
+                    let mut inner = self.inner.lock();
+                    inner.output.read(&mut chunk)
+                };
+                if count == 0 {
+                    break;
+                }
+                crate::console::write_bytes_atomic(&chunk[..count]);
+            }
+        }
+    }
+
+    fn receive_char(byte: u8) -> bool {
+        let (notify_readable, vintr_event, input_overflow) = {
             let mut inner = TTY.inner.lock();
             let Some(byte) = inner.map_input(byte) else {
-                return;
+                return true;
             };
-            if is_vintr(&inner, byte) {
-                let event = VintrEvent {
+            if let Some(signal) = signal_from_input(&inner, byte) {
+                let event = SignalCharEvent {
                     byte,
+                    signal,
                     foreground_pgid: inner.foreground_pgid,
+                    controlling_sid: inner.controlling_sid,
                     echo_control: inner.termios.lflag & LocalModes::ECHOCTL.bits() != 0,
                 };
                 if inner.termios.lflag & LocalModes::NOFLSH.bits() == 0 {
                     inner.input.clear();
+                    inner.output.clear();
                     inner.reset_noncanonical_read();
                 }
-                (false, Some(event))
+                (false, Some(event), false)
             } else {
-                let input_changed = if inner.is_canonical() {
+                let (input_changed, input_overflow) = if inner.is_canonical() {
                     if inner.termios.cc[VERASE] != VDISABLE && byte == inner.termios.cc[VERASE] {
                         if inner.input.erase_pending()
                             && inner.termios.lflag & LocalModes::ECHO.bits() != 0
@@ -403,7 +490,7 @@ impl Teletype {
                                 print!("{}", byte as char);
                             }
                         }
-                        false
+                        (false, false)
                     } else if inner.termios.cc[VKILL] != VDISABLE && byte == inner.termios.cc[VKILL]
                     {
                         let removed = inner.input.kill_pending();
@@ -416,11 +503,12 @@ impl Teletype {
                                 print!("\n");
                             }
                         }
-                        false
+                        (false, false)
                     } else if inner.termios.cc[VEOF] != VDISABLE && byte == inner.termios.cc[VEOF] {
                         inner.input.finish_eof();
-                        true
+                        (true, false)
                     } else if inner.is_delimiter(byte) {
+                        let input_was_full = !inner.input.has_space();
                         let accepted = inner.input.finish_line(byte);
                         if inner.termios.lflag & (LocalModes::ECHO | LocalModes::ECHONL).bits() != 0
                         {
@@ -430,13 +518,13 @@ impl Teletype {
                                 print!("{}", byte as char);
                             }
                         }
-                        accepted
+                        (accepted, input_was_full)
                     } else {
                         let accepted = inner.input.push_pending(byte);
                         if accepted && inner.termios.lflag & LocalModes::ECHO.bits() != 0 {
                             print!("{}", byte as char);
                         }
-                        false
+                        (false, !accepted)
                     }
                 } else {
                     let accepted = inner.input.push(byte);
@@ -455,30 +543,42 @@ impl Teletype {
                             );
                         }
                     }
-                    accepted
+                    (accepted, !accepted)
                 };
-                (input_changed, None)
+                (input_changed, None, input_overflow)
             }
         };
 
+        if input_overflow {
+            #[cfg(target_arch = "riscv64")]
+            crate::hal::arch::riscv::sbi::note_tty_input_overrun();
+        }
+
         if let Some(event) = vintr_event {
-            let sent = send_vintr_sigint(event.foreground_pgid);
+            let sent = send_foreground_signal(
+                event.foreground_pgid,
+                event.controlling_sid,
+                event.signal,
+            );
             if event.echo_control {
-                print!("^C\n");
+                let echo = if event.signal == Signals::SIGINT { "^C\n" } else { "^\\\n" };
+                TTY.write_output(echo.as_bytes());
             }
             log::info!(
-                "[vintr] ch={:#x} VINTR={:#x} ISIG=true fg_pgid={} sigint_sent={}",
+                "[tty-signal] ch={:#x} signal={:?} fg_pgid={} sid={} sent={}",
                 event.byte,
-                event.byte,
+                event.signal,
                 event.foreground_pgid,
+                event.controlling_sid,
                 sent,
             );
-            return;
+            return true;
         }
         if notify_readable {
             TTY.read_waiters
                 .notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
         }
+        !input_overflow
     }
 
     /// Read foreground_pgid for debugging.
@@ -526,17 +626,17 @@ impl IndexNode for Teletype {
             for (i, &b) in buf.iter().enumerate() {
                 if b == b'\n' {
                     if i > start {
-                        crate::console::write_bytes_atomic(&buf[start..i]);
+                        self.write_output(&buf[start..i]);
                     }
-                    crate::console::write_bytes_atomic(b"\r\n");
+                    self.write_output(b"\r\n");
                     start = i + 1;
                 }
             }
             if start < buf.len() {
-                crate::console::write_bytes_atomic(&buf[start..]);
+                self.write_output(&buf[start..]);
             }
         } else {
-            crate::console::write_bytes_atomic(buf);
+            self.write_output(buf);
         }
         Ok(buf.len())
     }
@@ -630,26 +730,53 @@ impl IndexNode for Teletype {
             },
             // TCXONC (0x540A) — software flow control. No-op for virtual terminal.
             TeletypeCommand::TCXONC => Ok(0),
-            TeletypeCommand::TIOCGPGRP => {
-                // If foreground_pgid has never been set, return the caller's
-                // pgid as the default without modifying foreground_pgid.
-                // This matches Linux semantics: tcgetpgrp is a pure read.
-                let pgid = inner.foreground_pgid;
-                let val = if pgid == 0 {
-                    crate::task::current_task()
-                        .map(|t| t.process.getpgid() as u32)
-                        .unwrap_or(0)
-                } else {
-                    pgid
+            TeletypeCommand::TIOCSCTTY => {
+                let Some(task) = crate::task::current_task() else {
+                    return Err(SyscallErr::EPERM);
                 };
-                match UserPtrMut::from_addr(argp).write(token, &val) {
+                let caller_sid = task.process.getsid();
+                if task.process.pid != caller_sid {
+                    return Err(SyscallErr::EPERM);
+                }
+                if inner.controlling_sid != 0 && inner.controlling_sid != caller_sid {
+                    return Err(SyscallErr::EPERM);
+                }
+                inner.controlling_sid = caller_sid;
+                inner.foreground_pgid = task.process.getpgid() as u32;
+                Ok(0)
+            }
+            TeletypeCommand::TIOCGPGRP => {
+                let caller_sid = crate::task::current_task()
+                    .map(|task| task.process.getsid())
+                    .unwrap_or(0);
+                if inner.controlling_sid != 0 && inner.controlling_sid != caller_sid {
+                    return Err(SyscallErr::ENOTTY);
+                }
+                match UserPtrMut::from_addr(argp).write(token, &inner.foreground_pgid) {
                     Ok(()) => Ok(0),
                     Err(_) => Err(SyscallErr::EFAULT),
                 }
             }
             TeletypeCommand::TIOCSPGRP => match UserPtr::<u32>::from_addr(argp).read(token) {
                 Ok(word) => {
-                    log::info!("[tty-ioctl] TIOCSPGRP: set foreground_pgid to {}", word);
+                    if word == 0 {
+                        return Err(SyscallErr::EINVAL);
+                    }
+                    let caller_sid = crate::task::current_task()
+                        .map(|task| task.process.getsid())
+                        .unwrap_or(0);
+                    let group = crate::task::find_processes_by_pgid(word as usize);
+                    if group.is_empty() {
+                        return Err(SyscallErr::ESRCH);
+                    }
+                    if caller_sid == 0 || group.iter().any(|process| process.getsid() != caller_sid)
+                    {
+                        return Err(SyscallErr::EPERM);
+                    }
+                    if inner.controlling_sid != 0 && inner.controlling_sid != caller_sid {
+                        return Err(SyscallErr::ENOTTY);
+                    }
+                    inner.controlling_sid = caller_sid;
                     inner.foreground_pgid = word;
                     Ok(0)
                 }
@@ -722,6 +849,9 @@ pub enum TeletypeCommand {
 
     /// Software flow control (tcflow).
     TCXONC = 0x540A,
+
+    /// Set this terminal as the calling session leader's controlling terminal.
+    TIOCSCTTY = 0x540E,
 
     /// Get the process group ID of the foreground process group on this terminal.
     TIOCGPGRP = 0x540F,

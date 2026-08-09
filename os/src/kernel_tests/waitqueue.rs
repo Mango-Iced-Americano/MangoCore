@@ -83,6 +83,10 @@ pub fn tests() -> Vec<KernelTest> {
             "waitqueue::signal_wake_race",
             interrupt::test_signal_wake_race,
         ),
+        KernelTest::new(
+            "waitqueue::masked_signal_does_not_interrupt",
+            interrupt::test_masked_signal_does_not_interrupt,
+        ),
     ]
 }
 

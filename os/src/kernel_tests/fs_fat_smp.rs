@@ -19,16 +19,13 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 
 use crate::{
-    drivers::block::partition::BlockSizeAdapter,
-    drivers::block::BlockDevice,
     fs::{
         fat32::{EasyFileSystem, FatInode},
         vfs::{
-            BackendLifecycle, FileSystem as _, FileType, IndexNode, InodeMode, MountFS,
-            MountFSInode, MountFlags,
+            BackendLifecycle, FileSystem as _, FileType, InodeMode, MountFS, MountFSInode,
+            MountFlags,
         },
     },
-    hal::BLOCK_SZ,
     kernel_tests::{
         mem_block::MemBlockDevice,
         probe::{
@@ -114,44 +111,28 @@ fn wait_status_exit_code(status: u32) -> isize {
     (status >> 8) as isize
 }
 
-/// 从裸块设备 block 0 读 BPB 的 BytsPerSec（FAT 原生扇区大小）。
-fn read_bpb_bytes_per_sector(dev: &Arc<MemBlockDevice>) -> usize {
-    let mut buf = [0u8; BLOCK_SZ];
-    dev.read_block(0, &mut buf);
-    u16::from_le_bytes([buf[11], buf[12]]) as usize
-}
-
-/// 把 `MemBlockDevice`（平台块大小）适配为 FAT 原生扇区大小后 `open()`。
+/// 打开 `MemBlockDevice` 上的 FAT32 卷。
 ///
-/// FAT32 的 BPB 通常声明 512B 扇区；平台块设备是 `BLOCK_SZ`（RV64/LA64 QEMU 均为
-/// 4096）。`BlockSizeAdapter` 把以 BytsPerSec 为单位的逻辑块号映射到物理字节偏移，
-/// 与生产 `sys_mount` 挂载路径使用同一适配层。
+/// FAT32 的 BPB 声明 512B 扇区；`bitmap.rs` 的 `Fat::sector_to_parent()` 已把
+/// 扇区号换算为 `BLOCK_SZ`(4096) 设备块（`block_id = sector / (BLOCK_SZ/512)`，
+/// 然后按块内偏移切片），因此 `EasyFileSystem::open` 必须直接接收以 4096 为单位的
+/// 裸设备。若在此处再包一层 `BlockSizeAdapter`（把 512 逻辑块映射回 4096 父块），
+/// 会与 `sector_to_parent` 叠加两次映射，读到错误的 FAT 扇区。
 fn open_fat(raw: Arc<MemBlockDevice>) -> Arc<EasyFileSystem> {
-    let bps = read_bpb_bytes_per_sector(&raw);
-    let adapted: Arc<dyn BlockDevice> = if bps == BLOCK_SZ {
-        raw
-    } else {
-        Arc::new(BlockSizeAdapter::new(raw, bps))
-    };
-    EasyFileSystem::open(adapted)
+    EasyFileSystem::open(raw)
 }
 
-/// 已挂载的 FAT32 ktest fixture：持有 mount / fs / 适配器，Drop 时 detach。
+/// 已挂载的 FAT32 ktest fixture：持有 mount / fs，Drop 时 detach。
 struct MountedFatFixture {
     mount: Arc<MountFS>,
     fs: Arc<EasyFileSystem>,
-    _adapted: Arc<dyn BlockDevice>,
 }
 
 impl MountedFatFixture {
     fn mount(raw: Arc<MemBlockDevice>) -> Result<Self, &'static str> {
-        let bps = read_bpb_bytes_per_sector(&raw);
-        let adapted: Arc<dyn BlockDevice> = if bps == BLOCK_SZ {
-            raw
-        } else {
-            Arc::new(BlockSizeAdapter::new(raw, bps))
-        };
-        let fs = EasyFileSystem::open(adapted.clone());
+        // 与 `open_fat` 相同的原因：FAT32 位图已自行做扇区→父块换算，设备必须是
+        // 4096 单位编址的裸设备，不能再用 BlockSizeAdapter 二次映射。
+        let fs = EasyFileSystem::open(raw);
 
         // 在 /mnt 下创建（或复用）挂载点并挂载 FAT 卷；探针通过绝对路径 syscall 触达。
         let mnt_dir =
@@ -174,11 +155,7 @@ impl MountedFatFixture {
                 Some("/mnt/fat-smp".into()),
             )
             .map_err(|_| "failed to mount ktest FAT32")?;
-        Ok(Self {
-            mount,
-            fs,
-            _adapted: adapted,
-        })
+        Ok(Self { mount, fs })
     }
 
     /// 把 FAT 根目录的目录项页缓存写回块设备；probe 已 quiesce，无并发写者。
@@ -242,8 +219,16 @@ fn verify_cluster_table(fs: &EasyFileSystem) -> Result<(), &'static str> {
     let max = FAT_ENTRY_COUNT;
     let mut fat_entries = Vec::with_capacity(FAT_SECTORS * FAT_BYTES_PER_SECTOR / 4);
     let mut sector = [0u8; FAT_BYTES_PER_SECTOR];
+    // FAT32 内部扇区号是 512 单位，而 `block_device` 以 BLOCK_SZ(4096) 编址；
+    // 与 `bitmap.rs` 的 `sector_to_parent` 同一约定，这里必须自行换算。
+    let sectors_per_block = crate::hal::BLOCK_SZ / FAT_BYTES_PER_SECTOR;
     for sector_offset in 0..FAT_SECTORS {
-        dev.read_block(FAT_RESERVED_SECTORS + sector_offset, &mut sector);
+        let sec_id = FAT_RESERVED_SECTORS + sector_offset;
+        let parent = sec_id / sectors_per_block;
+        let off = (sec_id % sectors_per_block) * FAT_BYTES_PER_SECTOR;
+        let mut block = [0u8; crate::hal::BLOCK_SZ];
+        dev.read_block(parent, &mut block);
+        sector.copy_from_slice(&block[off..off + FAT_BYTES_PER_SECTOR]);
         fat_entries.extend(
             sector
                 .chunks_exact(4)

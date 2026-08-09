@@ -202,6 +202,7 @@ socket/epoll 通知与用户 copy 都在相应业务锁释放后执行。同一 
 | RAW 套接字 | 已完成 | IPPROTO_RAW，SOCK_RAW |
 | Unix 流套接字 | 已完成 | SOCK_STREAM，抽象 + 文件系统命名空间 |
 | Unix 数据报套接字 | 已完成 | SOCK_DGRAM |
+| Unix SEQPACKET socketpair | 兼容模式 | SOCK_SEQPACKET 复用 Unix stream 双向字节流；尚无 MSG_EOR/记录边界 |
 | Netlink 套接字 | 部分完成 | NETLINK_ROUTE：GETLINK、GETADDR、GETROUTE |
 | Packet 套接字（AF_PACKET） | 已完成 | SOCK_RAW + SOCK_DGRAM 模式 |
 | DHCP | 已完成 | 常驻 smoltcp 状态机，由 CPU0 poll worker 推进 |

@@ -11,7 +11,7 @@ use core::arch::asm;
 use super::board::UART_BASE;
 use super::register::CrMd;
 
-static UART: Mutex<Ns16550a> = Mutex::new(Ns16550a { base: UART_BASE });
+static UART: Mutex<Ns16550a> = Mutex::new(Ns16550a::new(UART_BASE, 0x100, 0, 1));
 
 fn write_byte(uart: &mut Ns16550a, byte: u8) {
     // NS16550 `write()` 在 THR 未就绪时返回 WouldBlock；丢弃这个结果会静默丢字符。
@@ -76,7 +76,7 @@ pub fn console_write_bytes(data: &[u8]) {
 /// panic 时绕过全局 UART 锁。局部句柄只保存 MMIO base，不拥有可别名的内存状态；
 /// 即使另一个 CPU 停在普通输出区，也能尽力打印首个 panic 现场。
 pub fn panic_console_write(data: &[u8]) {
-    let mut uart = Ns16550a { base: UART_BASE };
+    let mut uart = Ns16550a::new(UART_BASE, 0x100, 0, 1);
     for &b in data {
         write_byte(&mut uart, b);
     }

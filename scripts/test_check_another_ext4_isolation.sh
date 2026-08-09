@@ -4,7 +4,7 @@ set -eu
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 gate_script="$root_dir/scripts/check_another_ext4_isolation.sh"
 submodule_path='dependency/another_ext4'
-submodule_commit='6887c41ef212b483a6841c87cb4d4b025b8d2c1b'
+submodule_commit='ab3b4dbd444c0bf78cf96669c4f9969d97647770'
 source_submodule="$root_dir/$submodule_path"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/another-ext4-isolation.XXXXXX")
 fixture_root="$tmp_dir/repo"
@@ -27,7 +27,7 @@ git -C "$source_submodule" cat-file -e "$submodule_commit^{commit}" || \
 
 write_fixture_sources() {
     scenario=$1
-    default_features='default = ["ext4_lwext4_backend"]'
+    default_features='default = ["ext4_another_backend"]'
     extra_feature=''
     boot_route='let root = self::ext4_backend::open(crate::drivers::BLOCK_DEVICE.clone());'
     block_route='let mounted = self::ext4_backend::open(block_device.clone());'
@@ -39,7 +39,7 @@ write_fixture_sources() {
             ;;
         mixed)
             extra_feature='ext4_legacy_backend = []'
-            default_features='default = ["ext4_lwext4_backend", "ext4_legacy_backend"]'
+            default_features='default = ["ext4_another_backend", "ext4_legacy_backend"]'
             ;;
         bypass)
             syscall_route='let mounted = crate::fs::ext4::ext4fs::Ext4FileSystem::open_ext4rs(blk_dev.clone());'
@@ -55,8 +55,7 @@ write_fixture_sources() {
     printf '%s\n' \
         '[submodule "dependency/another_ext4"]' \
         '    path = dependency/another_ext4' \
-        '    url = git@github.com:Mango-Iced-Americano/another_ext4.git' \
-        '    branch = mango' > "$fixture_root/.gitmodules"
+        '    url = https://github.com/Mango-Iced-Americano/another_ext4.git' > "$fixture_root/.gitmodules"
     printf '%s\n' \
         '[dependencies]' \
         'lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }' \
@@ -68,7 +67,7 @@ write_fixture_sources() {
         'ext4_another_backend = ["dep:another_ext4"]' \
         "$extra_feature" > "$fixture_root/os/Cargo.toml"
     printf '%s\n' \
-        'EXT4_BACKEND ?= lwext4' \
+        'EXT4_BACKEND ?= another' \
         'ifeq ($(EXT4_BACKEND),lwext4)' \
         'EXT4_BACKEND_FEATURE := ext4_lwext4_backend' \
         'else ifeq ($(EXT4_BACKEND),legacy)' \
@@ -94,19 +93,12 @@ write_fixture_sources() {
 
 setup_fixture() {
     scenario=$1
-    nested_repo="$fixture_root/$submodule_path"
-
     rm -rf "$fixture_root"
     mkdir -p "$fixture_root"
     git init -q "$fixture_root"
     git -C "$fixture_root" config user.email fixture@example.invalid
     git -C "$fixture_root" config user.name fixture
     write_fixture_sources "$scenario"
-
-    mkdir -p "$(dirname -- "$nested_repo")"
-    git init -q "$nested_repo"
-    git -C "$nested_repo" -c protocol.file.allow=always fetch -q "$source_submodule" "$submodule_commit"
-    git -C "$nested_repo" checkout -q --detach "$submodule_commit"
 
     git -C "$fixture_root" add .gitmodules os scripts
     git -C "$fixture_root" update-index --add --cacheinfo "160000,$submodule_commit,$submodule_path"

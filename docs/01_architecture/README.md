@@ -22,7 +22,7 @@ QEMU → OpenSBI/firmware → arch entry → rust_main()
   → add_initproc → /init (fallback: boot-profile init path) → /sbin/init (PID1) → test-runner → run_tasks
 ```
 
-`populate_memory_regions()` 在 `bootstrap_init()` 之后、`mem_clear()` 之前执行。对 `BootProtocol::RiscvFdt`（RV64 QEMU ktest 已验证），它将验证过的 DTB 字节复制到 `#[link_section = ".data.boot"]` 标注的 2 MiB 静态缓冲区内，确保 BSS 清零不会擦除 DTB 数据。LA64（`LoongArchLegacy`）和 VF2（`UbootGo`）不走快照路径，使用编译期静态回退。post-heap `build_platform_info()` 始终从持久化快照解构设备信息，绝不回头读原始 firmware DTB 物理地址。
+`populate_memory_regions()` 在 `bootstrap_init()` 之后、`mem_clear()` 之前执行。对 `BootProtocol::RiscvFdt`（RV64 QEMU ktest 已验证），它将验证过的 DTB 字节复制到 `#[link_section = ".bss.boot"]` 标注、位于 `sbss` 之前的 2 MiB NOBITS 静态缓冲区内，确保 BSS 清零不会擦除 DTB 数据且不膨胀镜像文件。LA64（`LoongArchLegacy`）和 VF2（`UbootGo`）不走快照路径，使用编译期静态回退。post-heap `build_platform_info()` 始终从持久化快照解构设备信息，绝不回头读原始 firmware DTB 物理地址。
 
 `initramfs` 是唯一生产启动根。内核解包 CPIO、建立 `VFS_ROOT` 并只准备 devfs/tty 与挂载点；它不会选择或挂载外部磁盘。normal 模式随后仅发现并注册块设备，PID1 决定挂载策略。regression 与 ktest 不附加外部磁盘；ktest 直接建立内核测试任务而不加载用户态 PID1。
 
@@ -34,8 +34,8 @@ QEMU → OpenSBI/firmware → arch entry → rust_main()
 |---|---|---|
 | Rust 启动入口 | `os/src/main.rs`（唯一的共享启动编排，读取 boot ABI profile） |
 | 平台配置 | `os/src/hal/platform/{mod.rs,info.rs}`（共享 `PlatformInfo`、init 回退路径与默认 root 设备；静态 boot contract 不生成设备） |
-| FDT 预堆快照 | `os/src/hal/firmware/{mod.rs,fdt.rs}`（`capture_fdt_snapshot()`、`.data.boot` 段快照缓冲区、`has_valid_dtb()` 协议门禁） |
-| FDT 后堆枚举 | `os/src/hal/firmware/fdt.rs`（`build_platform_info()` 从 `.data.boot` 快照构建设备列表） |
+| FDT 预堆快照 | `os/src/hal/firmware/{mod.rs,fdt.rs}`（`capture_fdt_snapshot()`、`.bss.boot` 段快照缓冲区、`has_valid_dtb()` 协议门禁） |
+| FDT 后堆枚举 | `os/src/hal/firmware/fdt.rs`（`build_platform_info()` 从 `.bss.boot` 快照构建设备列表） |
 | initramfs/VFS bootstrap | `os/src/fs/{mod.rs,initramfs.rs,boot_block.rs}` |
 | PID1 与 runner | `user/src/bin/{init.rs,initd.rs,test_runner.rs}` |
 | 调度入口 | `os/src/task/{mod.rs,processor.rs}` |

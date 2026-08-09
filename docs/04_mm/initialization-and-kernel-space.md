@@ -195,6 +195,11 @@ RV64 为每个动态 RAM 页建立真实叶子 PTE；LA64 的低地址恒等访�
 
 这些接口共同依赖 `KernelMappingArea` 保存 `vpn_range`、权限和物理页帧。删除映射时，`FrameTracker` drop 会归还页帧。
 
+LA64 的临时 ELF 窗口不能直接使用 `MMAP_BASE`：PGDH 下三级页表只索引
+VA[38:12]，而 `MMAP_BASE` 的低 39 位为零，会与低地址固件/PCI 恒等资源的 PTE
+别名。`KERNEL_PROGRAM_BASE` 因此从 `MMAP_BASE + 4 GiB` 开始；该保护带覆盖平台
+低地址资源别名，`KERNEL_PROGRAM_END` 仍限制窗口不得碰撞内核栈的低 39 位别名。
+
 ## 9. 回滚语义
 
 动态映射在多页插入时可能中途失败。`kernel_space.rs` 的插入路径会记录已经映射的页，并在后续失败时反向 unmap，避免出现 VMA 元数据未插入但页表已部分生效的状态。

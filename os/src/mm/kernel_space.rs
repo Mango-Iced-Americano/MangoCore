@@ -54,7 +54,7 @@ pub const fn kernel_program_base() -> usize {
 
 #[cfg(not(target_arch = "riscv64"))]
 pub const fn kernel_program_base() -> usize {
-    MMAP_BASE
+    crate::config::KERNEL_PROGRAM_BASE
 }
 
 pub struct KernelSpace<T: PageTable> {
@@ -371,9 +371,8 @@ impl<T: PageTable> KernelSpace<T> {
         start_va: VirtAddr,
         permission: MapPermission,
         frames: Vec<Arc<FrameTracker>>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), MemoryError> {
         self.try_insert_program_area(start_va, permission, frames)
-            .map_err(|_| ())
     }
 
     fn try_insert_program_area(

@@ -1411,3 +1411,81 @@
 - **修复**: 对外暴露且需要以 `clock_freq_hz` 换算的诊断计时，统一从 `timer::raw_ticks()`（RV64 `time` CSR）取样；保留 `rdcycle` 的计数器必须单独标注为 CPU cycle，不能混用单位。
 - **教训**: 首次分析任何 tick 指标前，先用独立 wall-time benchmark 做量纲 sanity check。若 `ticks / clock_freq_hz` 与 workload wall time 矛盾，先验证时钟源，再讨论热点占比；否则所有 µs、百分比和优化优先级都不可信。
 - **相关文件**: `os/src/task/perf.rs`, `os/src/timer.rs`, `os/src/hal/arch/riscv/time.rs`
+
+## LA64 临时 ELF 高半区窗口与低地址资源 PTE 别名
+
+- **现象**：FDT/PCI 资源发现完成后，PID1 在 `File::map_to_kernel_space()` 的
+  `insert_program_area(...).unwrap()` panic；若保留 `MemoryError`，失败值为
+  `AlreadyMapped`，且普通 ktest 可因不加载 PID1 而不触发。
+- **根因**：LA64 PGDH 后的三级页表只使用 VA[38:12]。把临时窗口放在
+  `MMAP_BASE`（低 39 位为零）会与同一 kernel page table 中低地址恒等资源的 PTE
+  别名；FDT 新发现资源会把此前未暴露的冲突变成启动 panic。
+- **修复**：在 LA64 config 中定义独立的 `KERNEL_PROGRAM_BASE`，保留覆盖低地址
+  固件/PCI 资源的别名保护带，并用编译期 canonical/窗口上界断言保证它仍在
+  `KERNEL_PROGRAM_END` 以下；临时映射入口不得退回直接使用 `MMAP_BASE`。
+- **验证**：先用 derived normal QEMU 捕获 PID1 的 `AlreadyMapped` RED；修复后必须
+  运行实际 PID1 路径的 basic+busybox，ktest 不能替代该验证。
+- **相关文件**：`os/src/hal/arch/loongarch64/config.rs`,
+  `os/src/mm/kernel_space.rs`, `os/src/fs/vfs/file.rs`
+
+## buddy 大请求取整到整个 heap 造成的"看似渐进泄漏"OOM
+
+- **现象**: 完整 ktest 在某测试报 `HEAP ALLOCATION FAILED (FATAL) size=N`，N 随运行
+  漂移（曾见 49152、34588672）。heap 用量统计只显示几 MB used，free 仍有几十 MB，但
+  大分配仍失败。
+- **根因**: buddy allocator 把 `layout.size().next_power_of_two()` 作为分配块。34 MiB
+  的单个 `Vec` 请求取整到 64 MiB（order-24）——正好等于 64 MiB heap 总量，要求整堆
+  空闲；任何残留分配都会让该请求失败。`size=N` 只是"最后一个撞墙的分配"，不是泄漏
+  的大小；先量 heap used/free，再核对失败 size 取整后的 order 是否接近 heap 总量。
+- **修复**: 大 fixture 改为按 `BLOCK_SZ` 分块分配（`Vec<Vec<u8>>`），不再依赖单个
+  大连续块；或把 heap 撑大到"失败 size 取整后仍有大量空闲"。
+- **教训**: 排查 heap OOM 先算 `next_power_of_two(size)` 与 heap 总量的关系。若
+  `size.round_up_to_pow2() >= heap`，这是 fixture 布局问题（即使 free 充足也必然失败），
+  不是泄漏；若远小于 heap，才是渐进泄漏。
+- **相关文件**: `os/src/kernel_tests/mem_block.rs`,
+  `dependency/buddy_system_allocator/src/lib.rs`
+
+## FAT32 512 扇区 vs 4096 设备块：mount 适配层与 FS 内部换算只能二选一
+
+- **现象**: 修好 FAT32 fixture 分配后，`fs_fat_smp` ktest 在 BPB 读（divide-by-zero）、
+  `open(O_CREAT)`（ENOSYS）、簇表校验（chain out of range）逐层失败；零盘回归的
+  `net_udp`/`net_tcp_accept` 也因无 smoltcp 栈失败。
+- **根因**: FAT32 的 `bitmap.rs`（cdc17728 之后）与 `FatPageCacheBackend` 都必须与
+  BlockDevice 的 4096 单位编址一致：要么 mount 用 `BlockSizeAdapter` 适配 512 逻辑块
+  且 FS 内部不换算，要么 FS 内部 `sector_to_parent` 且设备保持裸 4096。两处叠加换算会
+  读到错误 FAT/数据扇区；`FatPageCacheBackend` 漏改是 cdc17728 只改 bitmap 的残留。
+  另：`FatInode` 未实现 `create_with_attrs`/`set_metadata`，默认 `set_metadata` 返回
+  ENOSYS 使 `open(O_CREAT)` 在 FAT 卷上整体失败。
+- **修复**: 统一约定"FAT32 内部自行换算，设备保持 4096 裸编址"：`FatPageCacheBackend`
+  加 `sector_to_parent`，`adapt_filesystem_device` 对 FAT32 不再包适配层，ktest 直接传
+  裸设备，`verify_cluster_table` 自行换算；`FatInode` 实现 `create_with_attrs` 委托
+  `create`（跳过 set_metadata）。
+- **教训**: 挂载适配（`BlockSizeAdapter`）与 FS 内部块换算只允许存在一种。改一方时
+  用 `grep -n "read_block"` 全 FS 目录核对是否所有访问路径同单位；测试失败逐层暴露时
+  按"分配→BPB→create→数据校验"的顺序归因。
+- **相关文件**: `os/src/fs/fat32/{bitmap.rs,fat_inode.rs}`,
+  `os/src/fs/page_cache.rs`, `os/src/fs/mod.rs`, `os/src/drivers/block/partition.rs`
+
+## syscall 分配 fd 后对用户缓冲区写失败必须回滚
+
+- **现象**: `socketpair(AF_UNIX, SOCK_STREAM, 0, NULL)` 在 Linux 返回 EFAULT 且不泄漏
+  fd；本项目原实现在 `sv` 写失败时直接返回 EFAULT，已分配的 fd1/fd2 永久残留 fd 表，
+  每次非法调用泄漏 2 个 fd 及各自 socket 的 64 KiB ring buffer。
+- **修复**: 在 fd_table 锁内 `drop_fd` 摘除两个 fd，锁外再 drop 返回的 `Arc<File>`
+  （避免持锁隐式 drop 触发 socket 析构死锁）。
+- **教训**: 任何"先分配 fd / 资源、后写用户缓冲区"的 syscall，写失败都必须回滚已分配
+  资源。分配两个及以上 fd 时，第二个 `alloc_fd` 失败也要回滚第一个。
+- **相关文件**: `os/src/net/syscall/socketpair.rs`
+
+## 零盘回归缺少 net 初始化导致 net 用例失败/panic
+
+- **现象**: `make test ARCH=rv64 PROFILE=regression`（零盘）在 `net_tcp_accept` 失败、
+  `net_udp` 于 `add_routed_socket().unwrap()` panic；同一套 net 用例在 normal/ktest 正常。
+- **根因**: Regression 模式跳过 `net::config::init()` 与 net-poll worker。无 smoltcp 栈时
+  TCP/UDP socket 创建返回 None；且关闭 socket 的 128 KiB smoltcp 缓冲只有 worker 的
+  `drain_pending_socket_removals` 会回收，worker 缺失导致 socket 渐进泄漏。
+- **修复**: 零盘回归也调用 `net::config::init()`（无 NIC 时退化为 loopback + null eth，
+  不触发 DHCP）并常驻 net-poll worker。
+- **教训**: "零盘"不等于"零网络"。loopback TCP/UDP 不需要外部 NIC；跳过 net init 的
+  profile 若套件含 net 用例，会得到难定位的失败/panic。
+- **相关文件**: `os/src/main.rs`

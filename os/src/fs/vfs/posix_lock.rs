@@ -17,9 +17,33 @@ use spin::Mutex;
 
 use super::fcntl::{PosixFlock, F_RDLCK, F_UNLCK, F_WRLCK};
 use super::File;
-use crate::task::WaitQueue;
-use crate::task::WaitResult;
+use crate::task::{RestartKind, WaitQueue, WaitResult};
 use crate::utils::error::SyscallErr;
+
+/// POSIX record-lock syscall outcomes that cannot be represented by `SyscallErr`.
+///
+/// `RestartSys` is an internal signal-delivery marker, not a userspace errno.
+/// It must reach the syscall return path unchanged so `do_signal` can apply
+/// `SA_RESTART` or translate it to `EINTR`.
+pub enum PosixLockSetError {
+    Syscall(SyscallErr),
+    Restart(RestartKind),
+}
+
+impl From<SyscallErr> for PosixLockSetError {
+    fn from(error: SyscallErr) -> Self {
+        Self::Syscall(error)
+    }
+}
+
+impl PosixLockSetError {
+    pub const fn syscall_result(self) -> isize {
+        match self {
+            Self::Syscall(error) => -(error as isize),
+            Self::Restart(kind) => kind.syscall_result(),
+        }
+    }
+}
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -375,7 +399,7 @@ pub fn posix_lock_set(
     owner: LockOwner,
     flock: &PosixFlock,
     blocking: bool,
-) -> Result<(), SyscallErr> {
+) -> Result<(), PosixLockSetError> {
     if flock.l_type != F_UNLCK {
         validate_access(file, flock.l_type)?;
     }
@@ -418,7 +442,7 @@ pub fn posix_lock_set(
             }
             return Ok(());
         }
-        return Err(SyscallErr::EAGAIN);
+        return Err(SyscallErr::EAGAIN.into());
     }
 
     // ── Blocking F_SETLKW — retry loop with deadlock detection ───────
@@ -494,10 +518,10 @@ pub fn posix_lock_set(
         match result {
             WaitResult::Interrupted => {
                 mgr().wait_graph.lock().remove(&waiter_id);
-                return Err(SyscallErr::EINTR);
+                return Err(PosixLockSetError::Restart(RestartKind::RestartSys));
             }
             WaitResult::Ready(v) if v == edeadlk_sentinel => {
-                return Err(SyscallErr::EDEADLK);
+                return Err(SyscallErr::EDEADLK.into());
             }
             WaitResult::Ready(_) => {
                 mgr().wait_graph.lock().remove(&waiter_id);

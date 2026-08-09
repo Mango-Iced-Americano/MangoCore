@@ -3,9 +3,8 @@ set -eu
 
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 submodule_path='dependency/another_ext4'
-submodule_url='git@github.com:Mango-Iced-Americano/another_ext4.git'
-submodule_branch='mango'
-submodule_commit='6887c41ef212b483a6841c87cb4d4b025b8d2c1b'
+submodule_url='https://github.com/Mango-Iced-Americano/another_ext4.git'
+submodule_commit='ab3b4dbd444c0bf78cf96669c4f9969d97647770'
 cargo_toml="$root_dir/os/Cargo.toml"
 make_backend="$root_dir/os/make/ext4_backend.mk"
 fs_mod="$root_dir/os/src/fs/mod.rs"
@@ -36,8 +35,8 @@ require_exactly_one_default_backend() {
     selected=$(printf '%s\n' "$default_features" | grep -o 'ext4_\(lwext4\|legacy\|another\)_backend' || true)
     count=$(printf '%s\n' "$selected" | awk 'NF { count += 1 } END { print count + 0 }')
     test "$count" = 1 || fail "Cargo default features must select exactly one ext4 backend; found $count"
-    test "$selected" = ext4_lwext4_backend || \
-        fail "Cargo default must select ext4_lwext4_backend; got ${selected:-none}"
+    test "$selected" = ext4_another_backend || \
+        fail "Cargo default must select ext4_another_backend; got ${selected:-none}"
 }
 
 require_feature_contract() {
@@ -56,7 +55,7 @@ require_feature_contract() {
 
 require_make_mapping() {
     test -f "$make_backend" || fail 'missing EXT4_BACKEND Make mapping'
-    grep -Fq 'EXT4_BACKEND ?= lwext4' "$make_backend" || fail 'Make default must be lwext4'
+    grep -Fq 'EXT4_BACKEND ?= another' "$make_backend" || fail 'Make default must be another'
     grep -Fq 'EXT4_BACKEND_FEATURE := ext4_lwext4_backend' "$make_backend" || fail 'Make lacks lwext4 mapping'
     grep -Fq 'EXT4_BACKEND_FEATURE := ext4_legacy_backend' "$make_backend" || fail 'Make lacks legacy mapping'
     grep -Fq 'EXT4_BACKEND_FEATURE := ext4_another_backend' "$make_backend" || fail 'Make lacks another mapping'
@@ -86,10 +85,6 @@ git -C "$root_dir" diff --quiet -- .gitmodules || \
 configured_url=$(git -C "$root_dir" config --file .gitmodules --get "submodule.$submodule_path.url" || true)
 test "$configured_url" = "$submodule_url" || \
     fail "expected .gitmodules URL for $submodule_path to be $submodule_url; got ${configured_url:-unset}"
-
-configured_branch=$(git -C "$root_dir" config --file .gitmodules --get "submodule.$submodule_path.branch" || true)
-test "$configured_branch" = "$submodule_branch" || \
-    fail "expected .gitmodules branch for $submodule_path to be $submodule_branch; got ${configured_branch:-unset}"
 
 gitlink_entry=$(git -C "$root_dir" ls-files --stage -- "$submodule_path")
 test -n "$gitlink_entry" || fail "staged index has no gitlink for $submodule_path; add the pinned submodule before wiring it"

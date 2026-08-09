@@ -90,6 +90,7 @@ endif
 # Initramfs cpio generation — parameterized for normal / regression profiles
 INITRAMFS_CPIO_LA := $(IMAGE_ROLE_LA64_BOOTSTRAP_ROOT)
 REGRESSION_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-regression-la.cpio
+KTEST_CPIO_LA := $(PRODUCT_ROOT)/initramfs/initramfs-ktest-la.cpio
 
 INITRAMFS_PROFILE ?= normal
 ifeq ($(INITRAMFS_PROFILE),regression)

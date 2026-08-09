@@ -14,7 +14,6 @@ use user_lib::{
 #[path = "init/mounts.rs"]
 mod mounts;
 #[path = "init/vf2.rs"]
-mod vf2;
 
 const PID1: isize = 1;
 const MS_BIND: usize = 4096;
@@ -278,7 +277,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::prepare_pseudo_fs_framework();
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
-    vf2::try_boot();
     if profile == "buildstorm" {
         let disk_ok = mount_disk("/dev/vda\0", "/sdcard\0");
         // BuildStorm owns the complete x0 userspace.  Give it a fresh tmpfs

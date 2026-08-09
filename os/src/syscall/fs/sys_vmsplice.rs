@@ -60,7 +60,7 @@ pub fn sys_vmsplice(fd: usize, iov: usize, iovcnt: usize, flags: u32) -> isize {
             }
         }) {
             WaitResult::Ready(n) => n,
-            WaitResult::Interrupted => -(SyscallErr::ERESTART as isize),
+            WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
             WaitResult::TimedOut => -(SyscallErr::EAGAIN as isize),
         }
     } else {

@@ -27,6 +27,11 @@ pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
                 "ext4_another::persists_non_aligned_eof_extension_across_early_writeback_and_cold_lookup",
                 test_persists_non_aligned_eof_extension_across_early_writeback_and_cold_lookup,
             ),
+            KernelTest::with_timeout(
+                "ext4_another::large_miss_run_read_does_not_oom",
+                test_large_miss_run_read_does_not_oom,
+                120_000,
+            ),
             KernelTest::new(
                 "ext4_another::partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error",
                 sync::test_partial_reclaim_still_runs_final_barrier_and_keeps_scoped_error,
@@ -146,7 +151,14 @@ fn test_rename_replacement_preserves_replaced_open_inode() -> Result<(), &'stati
         let replacement = root
             .find(TARGET)
             .map_err(|_| "replacement target disappeared")?;
-        read_file(&replacement, SOURCE_DATA)
+        read_file(&replacement, SOURCE_DATA)?;
+        // The target is unlinked during cleanup. Persist its dirty page cache
+        // while its directory entry still names the replacement inode, so this
+        // fixture cannot leave an unwritebackable deleted cache in the global
+        // registry for the following PageCache test.
+        replacement
+            .sync()
+            .map_err(|_| "sync renamed replacement before cleanup failed")
     })();
     let cleanup = root
         .unlink(TARGET)
@@ -199,6 +211,111 @@ fn test_persists_non_aligned_eof_extension_across_early_writeback_and_cold_looku
         .unlink(NAME)
         .and_then(|_| root.sync())
         .map_err(|_| "cleanup after EOF extension persistence test failed");
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+/// Reproduces the unbounded page-cache miss-run staging allocation.
+///
+/// A single read spanning 26 MiB of a fully uncached file coalesces into one
+/// 6656-page miss run; `fill_miss_runs` passed the whole run to the ext4
+/// backend's `read_pages`, which allocated ONE `Vec<u8>` of
+/// `pages.len() * PAGE_SIZE` = 26 MiB as a staging buffer. The buddy
+/// allocator rounds 26 MiB up to a 32 MiB (order-25) block, which is
+/// impossible on the 32 MiB rv64 kernel heap → `HEAP ALLOCATION FAILED`
+/// with `layout: size=27262976`. The fix chunks each miss run into 256-page
+/// sub-batches (1 MiB staging cap). This test writes 27 MiB in bounded 64 KiB
+/// chunks (the write path must not OOM), syncs, evicts the whole range, then
+/// issues ONE 26 MiB read and round-trips a per-page byte pattern.
+#[cfg(feature = "ext4_another_backend")]
+fn test_large_miss_run_read_does_not_oom() -> Result<(), &'static str> {
+    const NAME: &str = "another-wave1-missrun-oom";
+    const FILE_SIZE: usize = 27 * 1024 * 1024; // 6912 pages
+    const READ_LEN: usize = 26 * 1024 * 1024; // 6656 pages → one miss run
+    const WRITE_CHUNK: usize = 64 * 1024; // bounded writes: 16 pages each
+
+    // The destination must NOT be heap-allocated: a 26 MiB heap request also
+    // rounds to order 25 and fails on rv64, masking the backend staging OOM.
+    static mut READ_BUF: [u8; READ_LEN] = [0u8; READ_LEN];
+
+    fn fill_pattern(dst: &mut [u8], base_offset: usize) {
+        for (i, b) in dst.iter_mut().enumerate() {
+            let page = (base_offset + i) >> crate::config::PAGE_SIZE_BITS;
+            *b = (0x41 + (page % 26)) as u8;
+        }
+    }
+
+    fn verify_pattern(src: &[u8], base_offset: usize) -> Result<(), &'static str> {
+        for (i, &b) in src.iter().enumerate() {
+            let page = (base_offset + i) >> crate::config::PAGE_SIZE_BITS;
+            let expected = (0x41 + (page % 26)) as u8;
+            if b != expected {
+                return Err("read-back data does not match fill pattern");
+            }
+        }
+        Ok(())
+    }
+
+    let fs = open_clean_media()?;
+    let root = fs.root_inode();
+    let result = (|| -> Result<(), &'static str> {
+        let inode = root
+            .create(NAME, FileType::File, InodeMode::S_IRWXUGO)
+            .map_err(|_| "create large miss-run file failed")?;
+        let private = spin::Mutex::new(FilePrivateData::Unused);
+        inode
+            .open(private.lock(), &FileFlags::O_WRONLY)
+            .map_err(|_| "open large miss-run file failed")?;
+
+        // Bounded writes (64 KiB each): the write path must not OOM.
+        let mut chunk = alloc::vec![0u8; WRITE_CHUNK];
+        let mut off = 0usize;
+        while off < FILE_SIZE {
+            let len = (FILE_SIZE - off).min(WRITE_CHUNK);
+            fill_pattern(&mut chunk[..len], off);
+            let private = spin::Mutex::new(FilePrivateData::Unused);
+            let written = inode
+                .write_at(off, len, &chunk[..len], private.lock())
+                .map_err(|_| "large miss-run write failed")?;
+            if written != len {
+                return Err("large miss-run write was short");
+            }
+            off += written;
+        }
+        inode
+            .sync()
+            .map_err(|_| "large miss-run sync failed")?;
+
+        // Evict the whole range so the read below is one full miss run.
+        let cache = inode
+            .page_cache()
+            .ok_or("large miss-run file has no page cache")?;
+        let npages = (FILE_SIZE + crate::config::PAGE_SIZE - 1) >> crate::config::PAGE_SIZE_BITS;
+        cache
+            .invalidate_range(0, npages)
+            .map_err(|_| "invalidate_range failed on large miss-run file")?;
+
+        // ONE read spanning 26 MiB: lookup_read_range_fast coalesces a single
+        // 6656-page miss run. Unfixed, backend.read_pages allocates one
+        // 26 MiB staging Vec → kernel-heap OOM on the 32 MiB rv64 heap.
+        let private = spin::Mutex::new(FilePrivateData::Unused);
+        let n = unsafe {
+            inode
+                .read_at(0, READ_LEN, &mut READ_BUF[..READ_LEN], private.lock())
+                .map_err(|_| "large miss-run read failed")?
+        };
+        if n != READ_LEN {
+            return Err("large miss-run read was short");
+        }
+        verify_pattern(unsafe { &READ_BUF[..n] }, 0)
+    })();
+    let cleanup = root
+        .unlink(NAME)
+        .and_then(|_| root.sync())
+        .map_err(|_| "cleanup after large miss-run test failed");
     match (result, cleanup) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),

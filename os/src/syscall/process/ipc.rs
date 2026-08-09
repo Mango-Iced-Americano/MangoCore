@@ -2943,7 +2943,7 @@ fn mq_wait_send_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
     };
     match result {
         WaitResult::Ready(_) => SUCCESS,
-        WaitResult::Interrupted => EINTR,
+        WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
         WaitResult::TimedOut => ETIMEDOUT,
     }
 }
@@ -2978,7 +2978,7 @@ fn mq_wait_receive_ready(queue: &MqQueue, abs_timeout: usize) -> isize {
     };
     match result {
         WaitResult::Ready(_) => SUCCESS,
-        WaitResult::Interrupted => EINTR,
+        WaitResult::Interrupted => crate::task::RestartKind::RestartSys.syscall_result(),
         WaitResult::TimedOut => ETIMEDOUT,
     }
 }

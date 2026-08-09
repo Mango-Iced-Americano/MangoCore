@@ -70,6 +70,13 @@ P2 FAT32 从“能挂载、能读”推进到“可作为实板 scratch”时，
 当前 HEAD 的前进未改变这里分析的 FAT32 持久化与 inode identity 代码。本文
 不会用“同一内核启动中 lookup 成功”替代持久化证明。
 
+> **现状注记（2026-08-08）**：VFS Phase 5 重构后挂载路径不再套
+> `BlockSizeAdapter`，`EasyFileSystem::open` 直接保存原始 BLOCK_SZ(4096) 设备；
+> FAT 数据路径（`page_cache.rs::FatPageCacheBackend`）与 FAT 表路径
+> （`bitmap.rs::sector_to_parent`）各自做扇区→块换算。本节描述的是 2026-07
+> 批次引入适配器时的历史设计与“双换算”bug，用于理解其成因；当前寻址契约以
+> 源码注释为准。
+
 ## 3. 第一阶段：FAT sector 被重复按平台块换算
 
 ### 3.1 旧代码为什么在适配器存在时反而出错

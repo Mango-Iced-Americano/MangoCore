@@ -8,6 +8,7 @@ mod sd;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::drivers::block::{
@@ -18,8 +19,10 @@ use crate::hal::device::DeviceManager;
 use crate::hal::BLOCK_SZ;
 
 use jh7110::Jh7110MshcConfig;
-use mmio::DwMshcHost;
+use mmio::{idmac_chunk_bytes, transfer_command, DwMshcHost, DwMshcTransferRegisters};
 use sd::SdCardInfo;
+
+static FIRST_TRANSFER_FAILURE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DwMshcError {
@@ -36,6 +39,8 @@ pub(crate) enum DwMshcError {
     StartBit,
     EndBit,
     HardwareLocked,
+    DmaFault,
+    DmaDirectionMismatch,
     ShortTransfer,
     UnsupportedCard,
     OutOfRange,
@@ -52,6 +57,34 @@ struct DwMshcInner {
 struct DwMshcInitFailure {
     host: DwMshcHost,
     error: DwMshcError,
+}
+
+struct TransferFailure {
+    write: bool,
+    command: u8,
+    sector: u64,
+    bytes: usize,
+    dma: bool,
+    error: DwMshcError,
+    registers: DwMshcTransferRegisters,
+}
+
+fn report_transfer_failure(failure: TransferFailure) {
+    if FIRST_TRANSFER_FAILURE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    crate::println!(
+        "[dw_mshc] transfer failed: op={} cmd=CMD{} sector={} bytes={} path={} error={:?} IDSTS={:#010x} RINTSTS={:#010x} STATUS={:#010x}",
+        if failure.write { "write" } else { "read" },
+        failure.command,
+        failure.sector,
+        failure.bytes,
+        if failure.dma { "DMA" } else { "PIO" },
+        failure.error,
+        failure.registers.idsts,
+        failure.registers.rintsts,
+        failure.registers.status,
+    );
 }
 
 impl DwMshc {
@@ -157,11 +190,24 @@ impl BlockDevice for DwMshc {
             return Err(BlockDeviceError::OutOfBounds);
         }
         let card = inner.card;
-        for (offset, sector) in (first_sector..end_sector).enumerate() {
-            inner
-                .host
-                .read_sector(&card, sector as u64, &mut buf[offset * 512..(offset + 1) * 512])
-                .map_err(|_| BlockDeviceError::DeviceError)?;
+        let mut sector = u64::try_from(first_sector).map_err(|_| BlockDeviceError::OutOfBounds)?;
+        for chunk in buf.chunks_mut(idmac_chunk_bytes(buf.len())) {
+            let dma = inner.host.dma_supported(chunk.len());
+            if let Err(error) = inner.host.read_blocks(&card, sector, chunk) {
+                report_transfer_failure(TransferFailure {
+                    write: false,
+                    command: transfer_command(chunk.len() / 512, false),
+                    sector,
+                    bytes: chunk.len(),
+                    dma,
+                    error,
+                    registers: inner.host.transfer_failure_registers(),
+                });
+                return Err(BlockDeviceError::DeviceError);
+            }
+            sector = sector
+                .checked_add((chunk.len() / 512) as u64)
+                .ok_or(BlockDeviceError::OutOfBounds)?;
         }
         Ok(())
     }
@@ -176,11 +222,39 @@ impl BlockDevice for DwMshc {
             return Err(BlockDeviceError::OutOfBounds);
         }
         let card = inner.card;
-        for (offset, sector) in (first_sector..end_sector).enumerate() {
-            inner
-                .host
-                .write_sector(&card, sector as u64, &buf[offset * 512..(offset + 1) * 512])
-                .map_err(|_| BlockDeviceError::DeviceError)?;
+        let mut sector = u64::try_from(first_sector).map_err(|_| BlockDeviceError::OutOfBounds)?;
+        let mut last_chunk = None;
+        for chunk in buf.chunks(idmac_chunk_bytes(buf.len())) {
+            let dma = inner.host.dma_supported(chunk.len());
+            if let Err(error) = inner.host.write_blocks_no_ready(&card, sector, chunk) {
+                report_transfer_failure(TransferFailure {
+                    write: true,
+                    command: transfer_command(chunk.len() / 512, true),
+                    sector,
+                    bytes: chunk.len(),
+                    dma,
+                    error,
+                    registers: inner.host.transfer_failure_registers(),
+                });
+                return Err(BlockDeviceError::DeviceError);
+            }
+            last_chunk = Some((sector, chunk.len(), dma));
+            sector = sector
+                .checked_add((chunk.len() / 512) as u64)
+                .ok_or(BlockDeviceError::OutOfBounds)?;
+        }
+        if let Err(error) = inner.host.wait_card_ready(&card) {
+            let (sector, bytes, dma) = last_chunk.ok_or(BlockDeviceError::InvalidBufferLength)?;
+            report_transfer_failure(TransferFailure {
+                write: true,
+                command: transfer_command(bytes / 512, true),
+                sector,
+                bytes,
+                dma,
+                error,
+                registers: inner.host.transfer_failure_registers(),
+            });
+            return Err(BlockDeviceError::DeviceError);
         }
         Ok(())
     }

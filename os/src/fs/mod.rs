@@ -95,14 +95,21 @@ pub fn adapt_filesystem_device(
     detected: DetectedFs,
     read_only: bool,
 ) -> Arc<dyn BlockDevice> {
-    let device: Arc<dyn BlockDevice> = if detected.block_size == crate::config::PAGE_SIZE {
-        device
-    } else {
-        Arc::new(crate::drivers::block::partition::BlockSizeAdapter::new(
-            device,
-            detected.block_size,
-        ))
-    };
+    // FAT32 内部（bitmap.rs / FatPageCacheBackend）已自行把 BPB_BytsPerSec(512)
+    // 扇区号换算为 BLOCK_SZ(4096) 设备块，设备必须保持 4096 单位编址；再包一层
+    // BlockSizeAdapter 会把同一个换算叠加两次，读到错误的 FAT/数据扇区。ext4 仍
+    // 按自身块大小通过适配层访问，保持原行为。
+    let device: Arc<dyn BlockDevice> =
+        if detected.block_size == crate::config::PAGE_SIZE
+            || detected.fs_type == crate::fs::FS_Type::Fat32
+        {
+            device
+        } else {
+            Arc::new(crate::drivers::block::partition::BlockSizeAdapter::new(
+                device,
+                detected.block_size,
+            ))
+        };
     if read_only {
         Arc::new(crate::drivers::block::partition::ReadOnlyBlockDevice::new(device))
     } else {
@@ -376,6 +383,10 @@ pub fn mount_block_fs(
         .metadata()
         .expect("mount_inode metadata failed")
         .inode_id;
+    println!(
+        "[kernel] mount_block_fs {} at {} inode_id={}",
+        label, mount_point, inode_id
+    );
 
     let mount_path = if mount_point.starts_with('/') {
         alloc::string::String::from(mount_point)
@@ -410,6 +421,41 @@ pub fn mount_block_fs(
 /// 返回新的 VFS 根（MountFS 实例）的共享引用。
 pub fn vfs_root() -> Arc<self::vfs::MountFS> {
     VFS_ROOT.clone()
+}
+
+/// 挂载 initramfs 内嵌的单个 ktest 测试磁盘。
+///
+/// 把 initramfs 中的磁盘镜像文件（如 `test-ext.img`）包装为
+/// [`crate::drivers::block::LoopBlockDevice`]，挂载到 VFS_ROOT 下的
+/// `mount_point`。不注册到全局 BLOCK_DEVICES，仅作为挂载文件系统。
+///
+/// 由 ktest 用例自行调用（mount → run → unmount），不再在启动时批量挂载。
+/// 失败时返回 `&'static str` 错误，磁盘未嵌入或挂载失败时调用方应当把
+/// 用例标记为 SKIP 而不是 FAIL。
+pub fn mount_test_disk(
+    disk_file: &str,
+    mount_point: &str,
+) -> Result<Arc<self::vfs::MountFS>, &'static str> {
+    let root = vfs_root();
+    let root_inode = root.mountpoint_root_inode();
+    let inode = root_inode
+        .find(disk_file)
+        .map_err(|_| "ktest test disk file not found in initramfs")?;
+    let device: Arc<dyn BlockDevice> =
+        Arc::new(crate::drivers::block::LoopBlockDevice::new(inode));
+    let mfs = mount_block_fs(&root, &device, mount_point, "loop")
+        .ok_or("ktest mount of test disk failed")?;
+    println!("[ktest] mounted /{} (loop)", mount_point);
+    Ok(mfs)
+}
+
+/// 卸载 ktest 用例挂载的测试磁盘（`umount_force` 包装）。
+///
+/// 测试盘的文件系统后端由 ramfs inode 提供，卸载仅从挂载树摘除并释放
+/// 后端引用；ramfs 文件本身驻留内存，不受影响。
+pub fn unmount_test_disk(mfs: &Arc<self::vfs::MountFS>) -> Result<(), &'static str> {
+    mfs.umount_force()
+        .map_err(|_| "ktest unmount of test disk failed")
 }
 
 /// 主动初始化 initramfs VFS_ROOT（触发 lazy_static）。

@@ -56,10 +56,13 @@ pub fn sys_chroot(path: *const u8) -> isize {
     }
 
     let target_inode = target.inode.clone();
+    // vfs_lookup 已穿透挂载点（do_find 内部 overlaid_inode），target_inode 即
+    // 被挂载文件系统的根；overlay_if_mountpoint 幂等兜底非挂载点场景。
+    let root_inode = vfs::MountFSInode::overlay_if_mountpoint(&target_inode);
     let fs_ref = task.process.fs();
     let mut lock = fs_ref.lock();
     lock.working_inode = target;
     lock.working_path = alloc::string::String::from("/");
-    lock.root_inode = Some(target_inode);
+    lock.root_inode = Some(root_inode);
     SUCCESS
 }
