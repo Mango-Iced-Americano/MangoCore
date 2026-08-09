@@ -220,6 +220,8 @@ pub struct RaState {
 pub const MIN_RA_PAGES: usize = 4;
 /// 最大预取页数（= IO_CHUNK_SIZE / PAGE_SIZE = 64）
 pub const MAX_RA_PAGES: usize = 128;
+/// Backend staging has one MiB maximum, including explicit ELF prefetches.
+pub const MAX_BATCH_READ_PAGES: usize = 256;
 
 impl RaState {
     pub fn new() -> Self {
@@ -2510,6 +2512,17 @@ impl PageCache {
     ) -> Result<usize, SyscallErr> {
         if count == 0 {
             return Ok(0);
+        }
+        if count > MAX_BATCH_READ_PAGES {
+            let end_page = start_page.checked_add(count).ok_or(SyscallErr::EFBIG)?;
+            let mut cursor = start_page;
+            let mut read = 0;
+            while cursor < end_page {
+                let batch = (end_page - cursor).min(MAX_BATCH_READ_PAGES);
+                read += self.sync_batch_read_pages(cursor, batch)?;
+                cursor += batch;
+            }
+            return Ok(read);
         }
 
         // Readahead uses the same lock-free backend phase as batch misses so

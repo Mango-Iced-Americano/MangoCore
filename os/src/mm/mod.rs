@@ -52,7 +52,7 @@ pub use frame_allocator::{
 };
 pub use frame_store::Frame;
 pub use heap_allocator::{
-    heap_free_histogram, heap_stats, try_heap_stats, KERNEL_HEAP_CURRENT_BYTES,
+    heap_free_histogram, heap_stats, kernel_heap_size, try_heap_stats, KERNEL_HEAP_CURRENT_BYTES,
     KERNEL_HEAP_MAX_BYTES,
 };
 pub(crate) use kernel_space::remove_kernel_mapping_synchronized;
@@ -98,6 +98,7 @@ pub fn init() {
     // 元数据；RV64 在真实 PTE 中记录 dirty，此架构钩子为空操作。
     crate::hal::init_kernel_mapping_metadata();
     frame_allocator::init_frame_allocator();
+    heap_allocator::init_runtime_heap();
     activate_kernel_page_table();
 }
 

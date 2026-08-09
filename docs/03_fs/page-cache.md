@@ -4,7 +4,7 @@ module: "fs/page_cache"
 category: fs
 status: current
 owner: "MangoCore Team"
-last_updated: "2026-08-08"
+last_updated: "2026-08-09"
 code_paths:
   - "os/src/fs/page_cache.rs"
   - "os/src/fs/reclaim.rs"
@@ -114,7 +114,7 @@ pub trait PageCacheBackend: Send + Sync {
 }
 ```
 
-默认 `write_pages` / `read_pages` 回退为逐页调用，支持合并 I/O 的后端（如 ext4）可覆盖实现批量读写。当前生产路径分别由 `Ext4PageCacheBackend`、`LwExt4PageCacheBackend`、`AnotherExt4PageCacheBackend`、`FatPageCacheBackend` 以及 tmpfs/ramfs 的内部后端承接；`BlockPageCacheBackend` 是尚未接入具体文件系统的通用块设备实现。
+默认 `write_pages` / `read_pages` 回退为逐页调用，支持合并 I/O 的后端（如 ext4）可覆盖实现批量读写。`sync_batch_read_pages()` 将每次 backend `read_pages` 调用限制为最多 256 个 4 KiB 页（1 MiB staging）；较大的显式 ELF 预取递归拆批，another_ext4 backend 同时以 `E2BIG` 防御超限调用。当前生产路径分别由 `Ext4PageCacheBackend`、`LwExt4PageCacheBackend`、`AnotherExt4PageCacheBackend`、`FatPageCacheBackend` 以及 tmpfs/ramfs 的内部后端承接；`BlockPageCacheBackend` 是尚未接入具体文件系统的通用块设备实现。
 
 ## SMP 锁与 I/O API
 

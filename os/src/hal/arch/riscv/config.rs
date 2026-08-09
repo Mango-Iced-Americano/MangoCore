@@ -19,7 +19,8 @@ pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
 // in-memory volume (34,588,672 bytes) before it can exercise concurrent cluster
 // allocation. Keep room for the live kernel and fixture instead of making the
 // test depend on an impossible sub-32MiB contiguous allocation.
-pub const KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 0x4000;
+/// Bootstrap-only heap used before FRAME_ALLOCATOR can reserve runtime backing.
+pub const KERNEL_BOOTSTRAP_HEAP_SIZE: usize = 8 * 1024 * 1024;
 pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;

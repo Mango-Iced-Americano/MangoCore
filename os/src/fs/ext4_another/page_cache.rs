@@ -125,6 +125,9 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         if pages.is_empty() {
             return Ok(0);
         }
+        if pages.len() > crate::fs::page_cache::MAX_BATCH_READ_PAGES {
+            return Err(SyscallErr::E2BIG);
+        }
         if pages.iter().any(|page| page.len() < PAGE_SIZE) {
             return Err(SyscallErr::ENOBUFS);
         }

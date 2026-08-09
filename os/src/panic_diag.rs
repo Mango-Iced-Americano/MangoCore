@@ -36,7 +36,7 @@ fn print_kernel_memory() {
             "heap: <locked>; charged={} peak={} capacity={}",
             crate::mm::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed),
             crate::mm::KERNEL_HEAP_MAX_BYTES.load(Ordering::Relaxed),
-            crate::hal::KERNEL_HEAP_SIZE
+            crate::mm::kernel_heap_size()
         );
     }
 

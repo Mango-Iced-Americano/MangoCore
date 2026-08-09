@@ -32,7 +32,7 @@ pub fn config_content(
     let _ = writeln!(
         s,
         "CONFIG_KERNEL_HEAP_SIZE={}",
-        crate::config::KERNEL_HEAP_SIZE
+        crate::mm::kernel_heap_size()
     );
     let _ = writeln!(
         s,

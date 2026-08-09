@@ -20,6 +20,7 @@ fn frame_first_byte(frame: &crate::mm::Frame) -> u8 {
 }
 
 const REENTRY_PAGE: usize = 1;
+const MAX_BATCH_PAGES: usize = 256;
 
 struct ReentrantReadBackend {
     cache: Mutex<Option<Weak<PageCache>>>,
@@ -65,6 +66,33 @@ struct BatchReentrantBackend {
     reentered: AtomicBool,
     writes: AtomicUsize,
     written_byte: AtomicUsize,
+}
+
+struct BatchLimitBackend {
+    largest_batch: AtomicUsize,
+}
+
+impl PageCacheBackend for BatchLimitBackend {
+    fn read_page(&self, _index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        buf.fill(0);
+        Ok(buf.len())
+    }
+
+    fn read_pages(&self, _start: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
+        self.largest_batch.fetch_max(pages.len(), Ordering::SeqCst);
+        for page in pages.iter_mut() {
+            (*page).fill(0);
+        }
+        Ok(pages.len() * PAGE_SIZE)
+    }
+
+    fn write_page(&self, _index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+        Ok(buf.len())
+    }
+
+    fn npages(&self) -> usize {
+        MAX_BATCH_PAGES + 1
+    }
 }
 
 impl BatchReentrantBackend {
@@ -174,6 +202,10 @@ pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
         KernelTest::new(
             "page_cache::batch_prefetch_preserves_reentrant_dirty_winner",
             test_batch_prefetch_preserves_reentrant_dirty_winner,
+        ),
+        KernelTest::new(
+            "page_cache::batch_prefetch_limits_backend_staging",
+            test_batch_prefetch_limits_backend_staging,
         ),
     ]
 }
@@ -327,6 +359,21 @@ fn test_batch_prefetch_preserves_reentrant_dirty_winner() -> Result<(), &'static
         || backend.written_byte.load(Ordering::SeqCst) != 0x5a
     {
         return Err("batch prefetch discarded the re-entrant dirty payload");
+    }
+    Ok(())
+}
+
+fn test_batch_prefetch_limits_backend_staging() -> Result<(), &'static str> {
+    let cache = PageCache::new();
+    let backend = Arc::new(BatchLimitBackend {
+        largest_batch: AtomicUsize::new(0),
+    });
+    cache.set_backend(backend.clone());
+    cache
+        .sync_batch_read_pages(0, MAX_BATCH_PAGES + 1)
+        .map_err(|_| "PageCache batch prefetch failed")?;
+    if backend.largest_batch.load(Ordering::SeqCst) > MAX_BATCH_PAGES {
+        return Err("PageCache passed an oversized staging batch to its backend");
     }
     Ok(())
 }

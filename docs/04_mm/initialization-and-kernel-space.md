@@ -3,11 +3,12 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-04
+last_update: 2026-08-09
 tags: [mm, init, kernel-space, mapping, smp]
 code_paths:
   - "os/src/mm/mod.rs"
   - "os/src/mm/frame_allocator.rs"
+  - "os/src/mm/heap_allocator.rs"
   - "os/src/mm/kernel_space.rs"
   - "os/src/hal/firmware/"
 ---
@@ -36,6 +37,7 @@ pub fn init() {
     #[cfg(feature = "heap_trace")]
     heap_trace::enable();
     frame_allocator::init_frame_allocator();
+    heap_allocator::init_runtime_heap();
     KERNEL_SPACE.lock().activate();
 }
 ```
@@ -44,7 +46,8 @@ pub fn init() {
 
 1. 堆分配器先建立，后续 `Arc`、`Vec`、`BTreeMap` 等内核对象才能创建。
 2. 物理页分配器随后建立，用于页表页、用户页、内核栈和文件页缓存。
-3. `KERNEL_SPACE` 最后激活，使处理器使用内核页表运行后续初始化。
+3. 帧分配器建立后，从 fresh pool 永久保留一段连续 DRAM 作为运行时堆 backing；该步骤不创建 `FrameTracker` 或 `Vec`，避免扩容时递归消耗 bootstrap heap。
+4. `KERNEL_SPACE` 最后激活，使处理器使用内核页表运行后续初始化。
 
 ## 2. 模块边界
 
@@ -74,8 +77,9 @@ rust_main()
   ├── mm::init()
   │     ├── heap_allocator::init_heap()
   │     ├── heap_trace::enable()            [feature = heap_trace]
-  │     ├── frame_allocator::init_frame_allocator()
-  │     └── KERNEL_SPACE.lock().activate()
+   │     ├── frame_allocator::init_frame_allocator()
+   │     ├── heap_allocator::init_runtime_heap()
+   │     └── KERNEL_SPACE.lock().activate()
   ├── machine_init()
   ├── task::timer_cpu_init()
   ├── drivers / fs / net
@@ -87,21 +91,21 @@ rust_main()
 
 ## 4. 内核堆初始化
 
-内核堆位于 `os/src/mm/heap_allocator.rs`，静态数组 `HEAP_SPACE` 的大小由 `hal::KERNEL_HEAP_SIZE` 决定：
+内核堆位于 `os/src/mm/heap_allocator.rs`。启动初期的静态 `HEAP_SPACE` 固定为 8 MiB，仅用于在帧分配器可用前创建其长期元数据：
 
 ```rust
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+static mut HEAP_SPACE: [u8; KERNEL_BOOTSTRAP_HEAP_SIZE] =
+    [0; KERNEL_BOOTSTRAP_HEAP_SIZE];
 ```
 
-`init_heap()` 将该数组交给 `KernelAllocator` 的内部 buddy heap（`MetadataHeap<32, 12>`）和 slab 分配器：
+`init_heap()` 将该数组交给 bootstrap `MetadataHeap<32, 12>` 和 slab 分配器。随后 `init_runtime_heap()` 在帧分配器初始化后，按 `clamp(usable_memory / 10, 64 MiB, 1 GiB)` 的目标容量从 fresh pool 取得不经 RAII 管理的连续页，并建立第二个、地址不重叠的 runtime `MetadataHeap`：
 
 ```rust
-HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE);
-KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
-KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
+HEAP_ALLOCATOR.init(HEAP_SPACE.as_ptr() as usize, KERNEL_BOOTSTRAP_HEAP_SIZE);
+HEAP_ALLOCATOR.add_runtime(direct_map_backing, runtime_size);
 ```
 
-`KernelAllocator` 组合了 slab 分配器（9 个 size class: 8~2048 bytes）和 `MetadataHeap<32, 12>` buddy allocator。小对象走 slab，大对象直接走 buddy。分配失败时仍支持 OOM recovery 路径。
+`KernelAllocator` 组合了 slab 分配器（9 个 size class: 8~2048 bytes）和由 bootstrap/runtime 两个不重叠区域组成的 `MetadataHeap<32, 12>` buddy allocator。分配优先使用 runtime 区，释放时按 backing 地址路由回原区域；小对象走 slab，大对象直接走 buddy。`kernel_heap_size()` 与 heap 统计合并两个区域的容量，分配失败时仍支持 OOM recovery 路径。
 
 SMP 下仍只有一个全局堆，但并发访问由 `KernelAllocator.inner` 的 `Mutex` 串行化。
 `KernelHeapInner` 独占 buddy 与 `SlabAllocator`，所有 slab 操作都要求 `&mut self`；因此

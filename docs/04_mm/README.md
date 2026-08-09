@@ -64,12 +64,13 @@ MangoCore 的内存管理由物理页分配器、架构页表实现、进程地�
 `mm::init()` 的当前顺序是：
 
 ```
-heap_allocator::init_heap()
+heap_allocator::init_heap()              # 8 MiB bootstrap backing
 frame_allocator::init_frame_allocator()
+heap_allocator::init_runtime_heap()      # fresh DRAM, 64 MiB..1 GiB policy
 KERNEL_SPACE.lock().activate()
 ```
 
-如果启用堆追踪特性，`heap_trace::enable()` 会在堆初始化后执行。物理页分配器遍历 `MEMORY_REGIONS`，扣除第 0 页、内核镜像和固件 carveout 后建立多个可分配区间；内核地址空间激活后，后续文件系统、驱动和任务初始化运行在内核页表之上。
+如果启用堆追踪特性，`heap_trace::enable()` 会在 bootstrap 堆初始化后执行。物理页分配器遍历 `MEMORY_REGIONS`，扣除第 0 页、内核镜像和固件 carveout 后建立多个可分配区间；随后运行时堆从 fresh pool 永久保留一段连续 DRAM，不经 `FrameTracker` 回收。内核地址空间激活后，后续文件系统、驱动和任务初始化运行在内核页表之上。
 
 ## 核心数据结构
 

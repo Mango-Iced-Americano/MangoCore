@@ -11,7 +11,7 @@ pub use loongarch64::{
     board::MMIO,
     boot_cpu_park, bootstrap_init, config,
     config::BUFFER_CACHE_NUM,
-    config::KERNEL_HEAP_SIZE,
+    config::KERNEL_BOOTSTRAP_HEAP_SIZE,
     config::MEMORY_END,
     console_flush, console_getchar, console_putchar, console_write_bytes, cpu_local_ptr,
     enable_local_timer_interrupt, enter_secondary_idle, init_kernel_mapping_metadata,
@@ -37,7 +37,7 @@ pub mod riscv;
 #[cfg(target_arch = "riscv64")]
 pub use riscv::{
     boot_cpu_park, bootstrap_init, config,
-    config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_HEAP_SIZE, MEMORY_END},
+    config::{BLOCK_SZ, BUFFER_CACHE_NUM, KERNEL_BOOTSTRAP_HEAP_SIZE, MEMORY_END},
     cpu_local_ptr, enable_local_timer_interrupt, enter_secondary_idle,
     init_kernel_mapping_metadata, install_cpu_local,
     kern_stack::kstack_alloc,

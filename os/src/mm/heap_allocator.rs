@@ -14,7 +14,7 @@
 //! `alloc` 最多重试三次；仍失败时返回 null，由 Rust 分配路径触发
 //! `handle_alloc_error`。
 
-use crate::{config::PAGE_SIZE, hal::KERNEL_HEAP_SIZE};
+use crate::{config::PAGE_SIZE, hal::KERNEL_BOOTSTRAP_HEAP_SIZE};
 use buddy_system_allocator::{AllocError as PageAllocError, MetadataHeap, PageOrder, PageRun};
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -27,21 +27,140 @@ fn memory_perf_time_now() -> usize {
     crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
 }
 
-/// Thin adapter that implements our PageAllocator trait on MetadataHeap<32, 12>.
-struct HeapPageAlloc<'a>(&'a mut MetadataHeap<32, 12>);
+/// Bootstrap storage is retained because frame allocator metadata outlives boot.
+/// The runtime heap is a second, disjoint MetadataHeap because MetadataHeap owns
+/// metadata inside one contiguous backing range and has no add-memory API.
+struct KernelHeap {
+    bootstrap: MetadataHeap<32, 12>,
+    runtime: Option<MetadataHeap<32, 12>>,
+    runtime_backing: Option<core::ops::Range<usize>>,
+}
+
+impl KernelHeap {
+    const fn empty() -> Self {
+        Self {
+            bootstrap: MetadataHeap::empty(),
+            runtime: None,
+            runtime_backing: None,
+        }
+    }
+
+    unsafe fn init_bootstrap(&mut self, start: usize, size: usize) {
+        self.bootstrap
+            .try_init(start, size)
+            .expect("kernel bootstrap heap init failed");
+    }
+
+    unsafe fn add_runtime(&mut self, start: usize, size: usize) {
+        assert!(self.runtime.is_none(), "runtime heap initialized twice");
+        let mut runtime = MetadataHeap::empty();
+        runtime
+            .try_init(start, size)
+            .expect("kernel runtime heap init failed");
+        self.runtime_backing = Some(start..start + size);
+        self.runtime = Some(runtime);
+    }
+
+    fn runtime_owns(&self, address: usize) -> bool {
+        self.runtime_backing
+            .as_ref()
+            .is_some_and(|range| range.contains(&address))
+    }
+
+    fn alloc(&mut self, layout: Layout) -> Result<core::ptr::NonNull<u8>, ()> {
+        if let Some(runtime) = self.runtime.as_mut() {
+            if let Ok(ptr) = runtime.alloc(layout) {
+                return Ok(ptr);
+            }
+        }
+        self.bootstrap.alloc(layout)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: core::ptr::NonNull<u8>, layout: Layout) {
+        if self.runtime_owns(ptr.as_ptr() as usize) {
+            unsafe {
+                self.runtime
+                    .as_mut()
+                    .expect("runtime heap backing without heap metadata")
+                    .dealloc(ptr, layout);
+            }
+        } else {
+            unsafe { self.bootstrap.dealloc(ptr, layout) };
+        }
+    }
+
+    fn alloc_pages(&mut self, order: PageOrder) -> Result<PageRun, PageAllocError> {
+        if let Some(runtime) = self.runtime.as_mut() {
+            if let Ok(run) = runtime.alloc_pages(order) {
+                return Ok(run);
+            }
+        }
+        self.bootstrap.alloc_pages(order)
+    }
+
+    unsafe fn dealloc_pages(&mut self, run: PageRun) {
+        if self.runtime_owns(run.base.as_ptr() as usize) {
+            unsafe {
+                self.runtime
+                    .as_mut()
+                    .expect("runtime heap backing without heap metadata")
+                    .dealloc_pages(run);
+            }
+        } else {
+            unsafe { self.bootstrap.dealloc_pages(run) };
+        }
+    }
+
+    fn stats_total_bytes(&self) -> usize {
+        self.bootstrap.stats_total_bytes()
+            + self
+                .runtime
+                .as_ref()
+                .map_or(0, MetadataHeap::stats_total_bytes)
+    }
+
+    fn stats_alloc_actual(&self) -> usize {
+        self.bootstrap.stats_alloc_actual()
+            + self
+                .runtime
+                .as_ref()
+                .map_or(0, MetadataHeap::stats_alloc_actual)
+    }
+
+    fn stats_alloc_user(&self) -> usize {
+        self.bootstrap.stats_alloc_user()
+            + self
+                .runtime
+                .as_ref()
+                .map_or(0, MetadataHeap::stats_alloc_user)
+    }
+
+    fn free_block_counts(&self) -> [usize; 32] {
+        let mut counts = self.bootstrap.free_block_counts();
+        if let Some(runtime) = self.runtime.as_ref() {
+            for (total, count) in counts.iter_mut().zip(runtime.free_block_counts()) {
+                *total += count;
+            }
+        }
+        counts
+    }
+}
+
+/// Thin adapter that implements our PageAllocator trait on the composite heap.
+struct HeapPageAlloc<'a>(&'a mut KernelHeap);
 
 impl PageAllocator for HeapPageAlloc<'_> {
     fn alloc_pages(&mut self, order: PageOrder) -> Result<PageRun, PageAllocError> {
         self.0.alloc_pages(order)
     }
     unsafe fn dealloc_pages(&mut self, run: PageRun) {
-        self.0.dealloc_pages(run)
+        unsafe { self.0.dealloc_pages(run) }
     }
 }
 
 /// Inner state protected by the per-allocator mutex.
 struct KernelHeapInner {
-    heap: MetadataHeap<32, 12>,
+    heap: KernelHeap,
     slab: SlabAllocator,
 }
 
@@ -60,13 +179,13 @@ impl KernelAllocator {
     pub const fn empty() -> Self {
         Self {
             inner: Mutex::new(KernelHeapInner {
-                heap: MetadataHeap::empty(),
+                heap: KernelHeap::empty(),
                 slab: SlabAllocator::empty(),
             }),
         }
     }
 
-    /// Initialise the underlying buddy heap.
+    /// Initialise bootstrap buddy storage before frame allocator metadata exists.
     ///
     /// # Safety
     ///
@@ -74,11 +193,14 @@ impl KernelAllocator {
     /// used by any other allocator or static object for the kernel's lifetime.
     pub unsafe fn init(&self, start: usize, size: usize) {
         let mut inner = self.inner.lock();
-        inner
-            .heap
-            .try_init(start, size)
-            .expect("kernel heap init failed");
+        unsafe { inner.heap.init_bootstrap(start, size) };
         inner.slab.init();
+    }
+
+    /// Add runtime backing after the frame allocator can permanently reserve it.
+    unsafe fn add_runtime(&self, start: usize, size: usize) {
+        let mut inner = self.inner.lock();
+        unsafe { inner.heap.add_runtime(start, size) };
     }
 
     fn recover_for(&self, layout: Layout) -> bool {
@@ -276,7 +398,7 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     let syscall_name = crate::task::current_syscall_name();
     println!("triggered by syscall: {}", syscall_name);
     println!("layout: size={}, align={}", layout.size(), layout.align());
-    println!("KERNEL_HEAP_SIZE: {} bytes", KERNEL_HEAP_SIZE);
+    println!("KERNEL_HEAP_SIZE: {} bytes", kernel_heap_size());
     #[cfg(feature = "heap_trace")]
     crate::mm::heap_trace::dump_oom(layout);
     println!("======================================");
@@ -314,8 +436,9 @@ pub fn heap_free_histogram() -> [usize; 32] {
     HEAP_ALLOCATOR.inner.lock().heap.free_block_counts()
 }
 
-/// 全局堆内存空间。
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+/// Early boot fallback storage, retained for frame allocator metadata allocated
+/// before runtime DRAM backing can be reserved.
+static mut HEAP_SPACE: [u8; KERNEL_BOOTSTRAP_HEAP_SIZE] = [0; KERNEL_BOOTSTRAP_HEAP_SIZE];
 
 /// 初始化内核堆。
 pub fn init_heap() {
@@ -326,11 +449,50 @@ pub fn init_heap() {
     unsafe {
         HEAP_ALLOCATOR.init(
             core::ptr::addr_of_mut!(HEAP_SPACE).cast::<u8>() as usize,
-            KERNEL_HEAP_SIZE,
+            KERNEL_BOOTSTRAP_HEAP_SIZE,
         );
     }
     KERNEL_HEAP_CURRENT_BYTES.store(0, Ordering::Relaxed);
     KERNEL_HEAP_MAX_BYTES.store(0, Ordering::Relaxed);
+}
+
+/// Return the runtime target after clamping usable RAM to the kernel heap policy.
+const fn runtime_heap_target(usable_memory: usize) -> usize {
+    const MIN_HEAP: usize = 64 * 1024 * 1024;
+    const MAX_HEAP: usize = 1024 * 1024 * 1024;
+    let requested = usable_memory / 10;
+    if requested < MIN_HEAP {
+        MIN_HEAP
+    } else if requested > MAX_HEAP {
+        MAX_HEAP
+    } else {
+        requested
+    }
+}
+
+/// Expand the bootstrap allocator with DRAM after frame allocator setup.
+pub fn init_runtime_heap() {
+    let target = runtime_heap_target(crate::hal::firmware::usable_memory_size());
+    let extension = target.saturating_sub(KERNEL_BOOTSTRAP_HEAP_SIZE);
+    if extension == 0 {
+        return;
+    }
+    let pages = extension.div_ceil(PAGE_SIZE);
+    let start = crate::mm::frame_allocator::reserve_fresh_contiguous(pages)
+        .expect("runtime heap backing reservation failed");
+    let size = pages * PAGE_SIZE;
+    // SAFETY: reserve_fresh_contiguous permanently removes this disjoint extent
+    // from FRAME_ALLOCATOR; direct_map_ptr makes it accessible before activation.
+    unsafe {
+        HEAP_ALLOCATOR.add_runtime(start.start_addr().direct_map_ptr() as usize, size);
+    }
+    let (_, total, _, _, _) = heap_stats();
+    println!("[memory] kernel heap: target={} usable={} bytes", total, crate::hal::firmware::usable_memory_size());
+}
+
+/// Return usable buddy capacity, including bootstrap and runtime backing.
+pub fn kernel_heap_size() -> usize {
+    heap_stats().1
 }
 
 #[expect(

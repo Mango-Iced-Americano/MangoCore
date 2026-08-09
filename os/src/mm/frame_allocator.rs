@@ -573,6 +573,26 @@ impl StackFrameAllocator {
         Some(frames)
     }
 
+    /// 从 fresh pool 永久摘取一个连续 extent，不创建 `FrameTracker`。
+    ///
+    /// 该接口仅供内核堆扩容使用：返回的页会成为 buddy heap 的长期 backing，
+    /// 因而不能由 RAII 回收，也不能进入普通 frame free-list。
+    fn reserve_fresh_contiguous(&mut self, num: usize) -> Option<PhysPageNum> {
+        if num == 0 {
+            return None;
+        }
+        let region_index = self
+            .regions
+            .iter()
+            .enumerate()
+            .skip(self.fresh_region)
+            .find(|(_, region)| region.end.saturating_sub(region.current) >= num)
+            .map(|(index, _)| index)?;
+        let start = self.regions[region_index].current;
+        self.regions[region_index].current += num;
+        Some(start.into())
+    }
+
     fn take_recycled_ppn(&mut self) -> Option<usize> {
         let ppn = self.recycled.pop()?;
         if let Some(region) = self
@@ -1088,6 +1108,19 @@ pub fn frames_alloc_any(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
 pub fn frames_alloc_fresh_contiguous(num: usize) -> Option<Vec<Arc<FrameTracker>>> {
     let was_enabled = local_irq_save();
     let result = with_frame_contig_lock(|allocator| allocator.alloc_fresh_contiguous(num));
+    local_irq_restore(was_enabled);
+    result
+}
+
+/// Reserve one fresh physically contiguous extent as permanent kernel-owned memory.
+///
+/// Unlike [`frames_alloc_fresh_contiguous`], this creates no `FrameTracker` or
+/// `Vec`, so bootstrap heap expansion cannot consume the heap it is creating.
+/// The caller must retain the range for the kernel lifetime and never pass it to
+/// `frame_dealloc`.
+pub(crate) fn reserve_fresh_contiguous(num: usize) -> Option<PhysPageNum> {
+    let was_enabled = local_irq_save();
+    let result = with_frame_contig_lock(|allocator| allocator.reserve_fresh_contiguous(num));
     local_irq_restore(was_enabled);
     result
 }

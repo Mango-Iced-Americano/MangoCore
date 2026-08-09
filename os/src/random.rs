@@ -237,7 +237,7 @@ fn bootstrap_seed() -> [u8; SEED_BYTES] {
     let stack_marker = 0u8;
     let mut state = (crate::hal::get_time() as u64)
         ^ ((&stack_marker as *const u8 as usize) as u64).rotate_left(17)
-        ^ (crate::hal::KERNEL_HEAP_SIZE as u64).rotate_left(31)
+        ^ (crate::hal::firmware::usable_memory_size() as u64).rotate_left(31)
         ^ 0x4d41_4e47_4f52_4e47;
     let mut seed = [0u8; SEED_BYTES];
     for chunk in seed.chunks_exact_mut(8) {
