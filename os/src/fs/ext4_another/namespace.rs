@@ -340,16 +340,6 @@ macro_rules! writable_namespace_inode_mutations {
             if fs.fs_id() != target_fs.fs_id() {
                 return Err(crate::utils::error::SyscallErr::EXDEV);
             }
-            let replaced = fs
-                .inner()
-                .lookup(
-                    u32::try_from(target_parent.key.inode_id())
-                        .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?,
-                    new_name,
-                )
-                .ok()
-                .map(|inode_id| fs.inode_key(inode_id))
-                .transpose()?;
             let old_parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let new_parent = u32::try_from(target_parent.key.inode_id())
@@ -362,8 +352,8 @@ macro_rules! writable_namespace_inode_mutations {
                     new_name,
                 )
             })?;
-            if let (Some(key), Some(handle)) = (replaced, reclaim) {
-                fs.attach_reclaim(key, handle)?;
+            if let Some(handle) = reclaim {
+                fs.attach_reclaim_handle(handle)?;
             }
             Ok(())
         }
@@ -378,11 +368,9 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let child = fs.inner().lookup(parent, name).ok()
-                .map(|inode_id| fs.inode_key(inode_id)).transpose()?;
             let reclaim = fs.run_metadata_operation(|| fs.inner().unlink(parent, name))?;
-            if let (Some(key), Some(handle)) = (child, reclaim) {
-                fs.attach_reclaim(key, handle)?;
+            if let Some(handle) = reclaim {
+                fs.attach_reclaim_handle(handle)?;
             }
             Ok(())
         }
@@ -397,11 +385,9 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let child = fs.inner().lookup(parent, name).ok()
-                .map(|inode_id| fs.inode_key(inode_id)).transpose()?;
             let reclaim = fs.run_metadata_operation(|| fs.inner().rmdir(parent, name))?;
-            if let (Some(key), Some(handle)) = (child, reclaim) {
-                fs.attach_reclaim(key, handle)?;
+            if let Some(handle) = reclaim {
+                fs.attach_reclaim_handle(handle)?;
             }
             Ok(())
         }

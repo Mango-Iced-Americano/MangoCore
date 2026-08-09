@@ -8,7 +8,6 @@ use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
-use super::errno::from_another;
 use super::fs::Ext4FileSystem;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -34,6 +33,10 @@ impl InodeKey {
 
 pub(crate) struct InodeLifetime {
     pub(crate) logical_size: Arc<AtomicUsize>,
+    /// High-water mark published before PageCache accepts an extending write.
+    /// Writeback can run from inside a cache write before `logical_size` is
+    /// advanced, so the backend must treat this range as visible meanwhile.
+    pub(crate) pending_write_end: Arc<AtomicUsize>,
     /// Packed seconds/nanoseconds published atomically by the write path.
     /// Dirty flags remain the publication guard for metadata readers.
     pub(crate) cached_mtime: AtomicU64,
@@ -82,6 +85,7 @@ impl InodeLifetime {
     fn new(size: usize, mtime: TimeSpec, ctime: TimeSpec) -> Self {
         Self {
             logical_size: Arc::new(AtomicUsize::new(size)),
+            pending_write_end: Arc::new(AtomicUsize::new(0)),
             cached_mtime: AtomicU64::new(pack_timestamp(mtime)),
             cached_ctime: AtomicU64::new(pack_timestamp(ctime)),
             mtime_dirty: AtomicBool::new(false),
@@ -154,6 +158,16 @@ impl InodeLifetime {
 
     pub(crate) fn set_inode_flags(&self, flags: InodeFlags) {
         *self.inode_flags.lock() = flags;
+    }
+
+    pub(crate) fn publish_pending_write_end(&self, end: usize) {
+        self.pending_write_end.fetch_max(end, Ordering::AcqRel);
+    }
+
+    pub(crate) fn clear_pending_write_end(&self, end: usize) {
+        let _ =
+            self.pending_write_end
+                .compare_exchange(end, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 
     pub(crate) fn page_cache(&self) -> Option<Arc<PageCache>> {
@@ -250,15 +264,6 @@ fn unpack_timestamp(timestamp: u64) -> TimeSpec {
 }
 
 impl Ext4FileSystem {
-    pub(crate) fn inode_key(&self, inode_id: u32) -> Result<InodeKey, SyscallErr> {
-        let attr = self
-            .inner()
-            .getattr(inode_id)
-            .map_err(|error| from_another(error.code()))?;
-        let inode_id = usize::try_from(inode_id).map_err(|_| SyscallErr::EFBIG)?;
-        Ok(InodeKey::new(self.fs_id(), inode_id, attr.generation))
-    }
-
     pub(crate) fn lifetime(
         &self,
         key: InodeKey,
@@ -292,6 +297,19 @@ impl Ext4FileSystem {
             .clone();
         *lifetime.reclaim.lock() = Some(handle);
         Ok(())
+    }
+
+    /// Attach the exact generation selected by the namespace transaction.
+    /// Looking up the replaced entry before rename/unlink races with another
+    /// namespace mutation and can associate the one-shot handle with the
+    /// wrong inode generation.
+    pub(crate) fn attach_reclaim_handle(
+        &self,
+        handle: another_ext4::InodeReclaimHandle,
+    ) -> Result<(), SyscallErr> {
+        let inode_id = usize::try_from(handle.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
+        let key = InodeKey::new(self.fs_id(), inode_id, handle.generation());
+        self.attach_reclaim(key, handle)
     }
 
     pub(crate) fn sync_lifetimes(&self) -> Result<(), SyscallErr> {

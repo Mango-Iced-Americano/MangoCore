@@ -90,6 +90,20 @@ Loading ──→ UpToDate ←──→ Dirty ──→ Writeback ──→ UpTo
 
 another_ext4 的 `truncate_inode()` 会在缩容时按 extent 尾部释放新 EOF 之后的数据块和空的 extent-tree 元数据块。bridge 先回写已有脏页、截断缓存并回写保留末页的零尾，再调用该后端 API；因此不会再对将被释放的范围执行逐页零填充。
 
+another_ext4 的扩展写入必须先把本次请求末端发布到 lifetime 的
+`pending_write_end`，再向 PageCache 复制数据。PageCache 在写入尚未返回时可能因内存压力
+重入写回；backend 因而以 `max(logical_size, pending_write_end)` 作为可见 EOF，避免把已
+复制的页误判为旧 EOF 之外并以零字节“成功”写回。写入结束后才提交实际写入末端并清除
+pending high-water；失败路径也必须清除它。
+
+页面首次转为 Dirty 时，`PageCacheBackend::on_page_dirty()` 立即通知 another_ext4
+lifetime 保留该 cache，不能等 inode 写路径返回后再 pin，否则中途写回或临时 inode
+析构会留下只有 size、没有 extent 的稀疏零文件。backend 只弱持有 lifetime、cache 与
+filesystem，脏页通知时短暂升级，保持 `fs -> lifetime -> dirty cache` 的持久化所有权，
+同时避免 `dirty cache -> backend -> fs/lifetime` 强引用环。namespace mutation 返回的
+reclaim handle 及 generation 必须原样交给 lifetime，禁止在事务外预查 inode 后猜测
+generation。
+
 ### PageEntry 内核对象引用
 
 ```rust

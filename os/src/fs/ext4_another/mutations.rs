@@ -28,10 +28,25 @@ macro_rules! writable_data_inode_mutations {
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
             let cache = self.regular_page_cache(&fs)?;
-            let written = cache.write_kernel(offset, &buffer[..actual], old_size)?;
+            self.lifetime.publish_pending_write_end(end);
+            let written = match cache.write_kernel(offset, &buffer[..actual], old_size) {
+                Ok(written) => written,
+                Err(error) => {
+                    self.lifetime.clear_pending_write_end(end);
+                    return Err(error);
+                }
+            };
+            let written_end = match offset.checked_add(written) {
+                Some(end) => end,
+                None => {
+                    self.lifetime.clear_pending_write_end(end);
+                    return Err(crate::utils::error::SyscallErr::EFBIG);
+                }
+            };
             self.lifetime
                 .logical_size
-                .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
+                .fetch_max(written_end, core::sync::atomic::Ordering::AcqRel);
+            self.lifetime.clear_pending_write_end(end);
             self.lifetime
                 .size_generation
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
@@ -64,13 +79,28 @@ macro_rules! writable_data_inode_mutations {
                 .lifetime
                 .logical_size
                 .load(core::sync::atomic::Ordering::Acquire);
-            let written = cache.write_at_user(offset, len, source, old_size)?;
-            let end = offset
-                .checked_add(written)
+            let requested_end = offset
+                .checked_add(len)
                 .ok_or(crate::utils::error::SyscallErr::EFBIG)?;
+            self.lifetime.publish_pending_write_end(requested_end);
+            let written = match cache.write_at_user(offset, len, source, old_size) {
+                Ok(written) => written,
+                Err(error) => {
+                    self.lifetime.clear_pending_write_end(requested_end);
+                    return Err(error);
+                }
+            };
+            let written_end = match offset.checked_add(written) {
+                Some(end) => end,
+                None => {
+                    self.lifetime.clear_pending_write_end(requested_end);
+                    return Err(crate::utils::error::SyscallErr::EFBIG);
+                }
+            };
             self.lifetime
                 .logical_size
-                .fetch_max(end, core::sync::atomic::Ordering::AcqRel);
+                .fetch_max(written_end, core::sync::atomic::Ordering::AcqRel);
+            self.lifetime.clear_pending_write_end(requested_end);
             self.lifetime
                 .size_generation
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
@@ -136,6 +166,9 @@ macro_rules! writable_data_inode_mutations {
             self.lifetime
                 .logical_size
                 .store(len, core::sync::atomic::Ordering::Release);
+            self.lifetime
+                .pending_write_end
+                .store(0, core::sync::atomic::Ordering::Release);
             self.lifetime
                 .size_generation
                 .fetch_add(1, core::sync::atomic::Ordering::AcqRel);

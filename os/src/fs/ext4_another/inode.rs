@@ -128,6 +128,7 @@ impl Ext4Inode {
                 fs.clone(),
                 self.key,
                 self.lifetime.clone(),
+                Arc::downgrade(&cache),
             )));
             Ok(self.lifetime.install_page_cache(cache))
         }) {

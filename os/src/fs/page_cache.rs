@@ -271,6 +271,12 @@ pub trait PageCacheBackend: Send + Sync {
 
     /// 返回后端的页数
     fn npages(&self) -> usize;
+
+    /// Publish backend-specific lifetime state as soon as a page becomes
+    /// dirty. This must run after the payload copy but before the caller can
+    /// drop the last VFS inode reference; mmap dirtying has no inode mutation
+    /// wrapper in which to retain the cache.
+    fn on_page_dirty(&self) {}
 }
 
 // ── PageEntry flags ──────────────────────────────────────────────────────
@@ -1322,6 +1328,9 @@ impl PageCache {
                 }
                 _ => break,
             }
+        }
+        if let Some(backend) = self.backend() {
+            backend.on_page_dirty();
         }
     }
 

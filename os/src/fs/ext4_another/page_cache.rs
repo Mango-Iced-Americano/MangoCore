@@ -23,6 +23,9 @@ pub(crate) struct AnotherExt4PageCacheBackend {
     /// dirty cache 能在临时 VFS inode 销毁后完成 sync，也不形成
     /// `lifetime -> dirty cache -> backend -> lifetime` 引用环。
     logical_size: Arc<AtomicUsize>,
+    pending_write_end: Arc<AtomicUsize>,
+    lifetime: Weak<InodeLifetime>,
+    cache: Weak<crate::fs::page_cache::PageCache>,
     writeback_staging: Mutex<Vec<u8>>,
 }
 
@@ -31,11 +34,15 @@ impl AnotherExt4PageCacheBackend {
         fs: Arc<Ext4FileSystem>,
         key: InodeKey,
         lifetime: Arc<InodeLifetime>,
+        cache: Weak<crate::fs::page_cache::PageCache>,
     ) -> Self {
         Self {
             fs: Arc::downgrade(&fs),
             key,
             logical_size: lifetime.logical_size.clone(),
+            pending_write_end: lifetime.pending_write_end.clone(),
+            lifetime: Arc::downgrade(&lifetime),
+            cache,
             writeback_staging: Mutex::new(Vec::new()),
         }
     }
@@ -48,6 +55,12 @@ impl AnotherExt4PageCacheBackend {
         index.checked_mul(PAGE_SIZE).ok_or(SyscallErr::EFBIG)
     }
 
+    fn visible_size(&self) -> usize {
+        self.logical_size
+            .load(Ordering::Acquire)
+            .max(self.pending_write_end.load(Ordering::Acquire))
+    }
+
     /// Prepare and commit one contiguous writeback range.  A large dirty-page
     /// batch may exceed the journal credit/ring reservation even though each
     /// smaller range is valid.  Split only on the reservation-specific E2BIG
@@ -57,6 +70,7 @@ impl AnotherExt4PageCacheBackend {
         inode_id: u32,
         start_offset: usize,
         data: &[u8],
+        retry_budget: u8,
     ) -> Result<bool, SyscallErr> {
         let fs = self.fs()?;
         let batch_end = start_offset
@@ -82,12 +96,25 @@ impl AnotherExt4PageCacheBackend {
                 }
                 Ok(data_written)
             }
+            Err(SyscallErr::E2BIG) if retry_budget != 0 => {
+                // A full deferred-journal ring also reports E2BIG. Splitting
+                // cannot make progress in that case, so drain once and retry
+                // the original range before reducing its transaction size.
+                fs.run_metadata_operation(|| fs.inner().flush_deferred_journal())?;
+                self.write_staged_range(inode_id, start_offset, data, retry_budget - 1)
+            }
             Err(SyscallErr::E2BIG) if data.len() > PAGE_SIZE => {
                 let page_count = data.len() / PAGE_SIZE;
                 let split_pages = (page_count / 2).max(1);
                 let split = split_pages * PAGE_SIZE;
-                let left = self.write_staged_range(inode_id, start_offset, &data[..split])?;
-                let right = self.write_staged_range(inode_id, start_offset + split, &data[split..])?;
+                let left =
+                    self.write_staged_range(inode_id, start_offset, &data[..split], retry_budget)?;
+                let right = self.write_staged_range(
+                    inode_id,
+                    start_offset + split,
+                    &data[split..],
+                    retry_budget,
+                )?;
                 Ok(left && right)
             }
             Err(error) => Err(error),
@@ -96,6 +123,12 @@ impl AnotherExt4PageCacheBackend {
 }
 
 impl PageCacheBackend for AnotherExt4PageCacheBackend {
+    fn on_page_dirty(&self) {
+        if let (Some(lifetime), Some(cache)) = (self.lifetime.upgrade(), self.cache.upgrade()) {
+            lifetime.retain_dirty_page_cache(&cache);
+        }
+    }
+
     fn read_page(&self, index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
         crate::task::perf::record_ext4_pc_readpages_calls();
         crate::task::perf::record_ext4_pc_readpages_pages(1);
@@ -103,7 +136,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             return Err(SyscallErr::ENOBUFS);
         }
         let offset = Self::page_offset(index)?;
-        let size = self.logical_size.load(Ordering::Acquire);
+        let size = self.visible_size();
         let fs = self.fs()?;
         buffer[..PAGE_SIZE].fill(0);
         if offset >= size {
@@ -139,7 +172,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             .len()
             .checked_mul(PAGE_SIZE)
             .ok_or(SyscallErr::EFBIG)?;
-        let size = self.logical_size.load(Ordering::Acquire);
+        let size = self.visible_size();
         let fs = self.fs()?;
         let mut staging = Vec::new();
         staging
@@ -169,7 +202,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
     }
 
     fn write_pages(&self, start_index: usize, pages: &[&[u8]]) -> Result<usize, SyscallErr> {
-        let size = self.logical_size.load(Ordering::Acquire);
+        let size = self.visible_size();
         let inode_id = u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?;
         let start_offset = Self::page_offset(start_index)?;
         if start_offset >= size {
@@ -201,7 +234,8 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         }
         let _t0 = perf::perf_time_now();
         let result = (|| -> Result<usize, SyscallErr> {
-            let _data_written = self.write_staged_range(inode_id, start_offset, &staging[..total_bytes])?;
+            let _data_written =
+                self.write_staged_range(inode_id, start_offset, &staging[..total_bytes], 1)?;
             let _t1 = perf::perf_time_now();
             perf::record_ext4_alloc_ensure(
                 (total_bytes / crate::config::PAGE_SIZE) as usize,
@@ -209,7 +243,7 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 _t1.wrapping_sub(_t0),
             );
             let _t2 = perf::perf_time_now();
-#[cfg(feature = "perf_diag")]
+            #[cfg(feature = "perf_diag")]
             crate::println!(
                 "[ext4_another] write_pages ino={} pages={} total_bytes={} prepare_cycles={} commit_cycles={} direct={}",
                 inode_id,
@@ -221,11 +255,14 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
             );
             Ok(total_bytes)
         })();
-        *self.writeback_staging.lock() = staging;
+        // BuildStorm creates many short-lived inodes. Retaining each batch's
+        // peak allocation in its backend turns staging reuse into unbounded
+        // kernel-heap retention, so release it after this writeback.
+        drop(staging);
         result
     }
 
     fn npages(&self) -> usize {
-        self.logical_size.load(Ordering::Acquire).div_ceil(PAGE_SIZE)
+        self.visible_size().div_ceil(PAGE_SIZE)
     }
 }
