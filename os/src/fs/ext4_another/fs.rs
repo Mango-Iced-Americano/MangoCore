@@ -190,6 +190,14 @@ impl Ext4FileSystem {
         if self.read_only {
             return Ok(());
         }
+        // A page cache can outlive the VFS inode that first installed its
+        // lifetime record (for example, a compiler closes the file between
+        // its final write and sync(2)).  Drain the global cache registry
+        // before committing inode sizes/timestamps so such a cache cannot be
+        // omitted from the instance-local lifetime snapshot.  The subsequent
+        // lifetime pass still performs the authoritative metadata commit and
+        // device barrier.
+        crate::fs::page_cache::flush_all_page_caches()?;
         self.sync_lifetimes()
     }
 
