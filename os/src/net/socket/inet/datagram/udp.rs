@@ -30,7 +30,7 @@ use crate::net::socket::inet::common::port::{
     AddressFamily, AutoBindPurpose, BindIntent, PortReservation, TransportProtocol,
 };
 use crate::net::socket::inet::common::BoundInner;
-use crate::net::{UDP_SOCKETS, UDP_SOCKETS_TO_REMOVE};
+use crate::net::UDP_SOCKETS;
 use crate::task::WaitQueue;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
@@ -766,7 +766,10 @@ impl Drop for UdpSocket {
         //     }
         // });
         // NET_INTERFACE.remove(self.socket_handler);
-        UDP_SOCKETS_TO_REMOVE.lock().push(self.socket_handler);
+        if crate::net::config::enqueue_udp_socket_removal(self.socket_handler) {
+            // 队列锁已释放；只发布 worker 请求，不在析构路径进入 DeviceStack/smoltcp。
+            NET_INTERFACE.request_poll();
+        }
     }
 }
 

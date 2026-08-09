@@ -6,9 +6,8 @@
 
 use crate::net::routing::RouteSocketHandle;
 use crate::net::{
-    config::{lookup_source_ip, NET_INTERFACE},
+    config::{enqueue_tcp_socket_removal, lookup_source_ip, NET_INTERFACE},
     routing::InetProtocol,
-    TCP_SOCKETS_TO_REMOVE,
 };
 use crate::trace_event;
 use alloc::boxed::Box;
@@ -293,7 +292,7 @@ impl Connecting {
                     "[Connecting::into_result] push handle {} to TCP_SOCKETS_TO_REMOVE (refused)",
                     self.handle
                 );
-                TCP_SOCKETS_TO_REMOVE.lock().push(self.handle);
+                let _ = enqueue_tcp_socket_removal(self.handle, false);
                 let ver = match self.local.addr {
                     IpAddress::Ipv4(_) => IpVersion::Ipv4,
                     IpAddress::Ipv6(_) => IpVersion::Ipv6,
@@ -532,31 +531,6 @@ impl Listening {
         }
     }
 
-    pub fn close(&self) {
-        log::info!(
-            "[Listening::close] closing {} listen sockets",
-            self.handles.len()
-        );
-        for &h in &self.handles {
-            with_tcp_mut(h, |socket| {
-                if socket.is_active() {
-                    log::info!(
-                        "[Listening::close] aborting pending handle {} (state={:?})",
-                        h,
-                        socket.state()
-                    );
-                    socket.abort();
-                } else {
-                    socket.close();
-                }
-            });
-            log::info!(
-                "[Listening::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
-                h
-            );
-            TCP_SOCKETS_TO_REMOVE.lock().push(h);
-        }
-    }
 }
 
 // ── Established ──────────────────────────────────────────────────────
@@ -673,15 +647,6 @@ impl Established {
         });
     }
 
-    pub fn close(&self) {
-        log::info!("[Established::close] closing handle {}", self.handle);
-        let _ = with_tcp_mut(self.handle, |socket| socket.close());
-        log::info!(
-            "[Established::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
-            self.handle
-        );
-        TCP_SOCKETS_TO_REMOVE.lock().push(self.handle);
-    }
 }
 
 // ── SelfConnected ────────────────────────────────────────────────────
@@ -792,13 +757,6 @@ impl SelfConnected {
         }
     }
 
-    pub fn close(&self) {
-        log::info!(
-            "[SelfConnected::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
-            self.handle
-        );
-        TCP_SOCKETS_TO_REMOVE.lock().push(self.handle);
-    }
 }
 
 // ── Inner 枚举 ───────────────────────────────────────────────────────
@@ -861,41 +819,57 @@ impl Inner {
         }
     }
 
-    pub fn close(&self) {
+    /// 只发布本 TCP state 所拥有的 route 回收请求。
+    ///
+    /// 调用者持有 `TcpSocket::inner` 时只能接触移除队列；真正的 smoltcp close/abort
+    /// 由 CPU0 poll worker 在无 socket-local 锁的上下文完成，避免析构路径反向取得
+    /// DeviceStack 锁。
+    pub fn queue_removal(&self) -> bool {
         match self {
             Inner::Init(init) => match init {
                 Init::Unbound(_, _) => {
-                    log::info!("[Inner::close] Init::Unbound — no handle to close");
+                    log::info!("[Inner::queue_removal] Init::Unbound — no handle to retire");
+                    false
                 }
                 Init::Bound { .. } => {
                     log::info!(
-                        "[Inner::close] Init::Bound — dropping boxed socket (not yet attached)"
+                        "[Inner::queue_removal] Init::Bound — dropping boxed socket (not attached)"
                     );
+                    false
                 }
             },
             Inner::Connecting(c) => {
-                log::info!("[Inner::close] Connecting — closing handle {}", c.handle);
-                with_tcp_mut(c.handle, |socket| socket.close());
                 log::info!(
-                    "[Inner::close] push handle {} to TCP_SOCKETS_TO_REMOVE",
+                    "[Inner::queue_removal] push handle {} to TCP_SOCKETS_TO_REMOVE",
                     c.handle
                 );
-                TCP_SOCKETS_TO_REMOVE.lock().push(c.handle);
+                enqueue_tcp_socket_removal(c.handle, false)
             }
             Inner::Listening(l) => {
-                log::info!("[Inner::close] Listening — delegating to Listening::close()");
-                l.close();
+                log::info!("[Inner::queue_removal] Listening — queueing listener handles");
+                let mut queued = false;
+                for &handle in &l.handles {
+                    queued |= enqueue_tcp_socket_removal(handle, true);
+                }
+                queued
             }
             Inner::Established(e) => {
-                log::info!("[Inner::close] Established — delegating to Established::close()");
-                e.close();
+                log::info!(
+                    "[Inner::queue_removal] push established handle {} to TCP_SOCKETS_TO_REMOVE",
+                    e.handle
+                );
+                enqueue_tcp_socket_removal(e.handle, false)
             }
             Inner::SelfConnected(s) => {
-                log::info!("[Inner::close] SelfConnected — delegating to SelfConnected::close()");
-                s.close();
+                log::info!(
+                    "[Inner::queue_removal] push self-connected handle {} to TCP_SOCKETS_TO_REMOVE",
+                    s.handle
+                );
+                enqueue_tcp_socket_removal(s.handle, false)
             }
             Inner::Closed(_) => {
-                log::info!("[Inner::close] Closed — already closed, nothing to do");
+                log::info!("[Inner::queue_removal] Closed — already closed, nothing to do");
+                false
             }
         }
     }

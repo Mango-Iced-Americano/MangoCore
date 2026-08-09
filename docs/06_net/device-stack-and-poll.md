@@ -4,7 +4,7 @@ module: "config.rs"
 category: net
 status: current
 owner: "MangoCore Team"
-last_updated: "2026-08-06"
+last_updated: "2026-08-09"
 code_paths:
   - "os/src/net/config.rs"
   - "os/src/net/socket/inet/stream/mod.rs"
@@ -163,6 +163,24 @@ DeviceStack Arc，逐栈只 `try_lock()` 一次。第一轮扫描期间的新请
 由于 kernel worker 从 IRQ-off 的调度边界进入，每轮真实扫描使用
 `with_local_interrupts_enabled()` 临时开中断，避免同步 VirtIO TX 轮询 used ring
 期间长时间屏蔽 timer/IPI；窗口关闭且网络锁释放后才调用任务安全点处理调度请求。
+
+### 最后引用释放后的 SocketSet 回收
+
+UDP/TCP 的最后一个 `SocketFile`/epoll 强引用释放时，`Drop` 只在移除队列中按
+`RouteSocketHandle` 去重并在**释放 socket-local 与队列锁后**调用 `request_poll()`；
+析构路径不取得 `DeviceStack` 锁，也不等待 TCP handshake。worker 在任务上下文中完成
+实际回收：UDP 直接 `remove_routed()`；TCP 首轮按原状态发起 graceful close，listener 的
+active handle 则 abort，只有 smoltcp `Closed` 后才从 `SocketSet` 移除。
+
+仍处于 FIN_WAIT/TIME_WAIT 的 TCP route 会保留唯一队列项。worker 释放所有网络锁后读取
+`Interface::poll_at()`，以 generation-gated kernel timer 在下一个协议 deadline 重新发布
+worker poll；没有协议 deadline 时仍由每个 route 的 15 秒硬 deadline 兜底，超时会显式
+abort 后移除。timer callback 从不触碰 smoltcp。route、弱 `DeviceStack` 或 stack binding
+已在 veth teardown 中消失时会记录 warning；栈本身析构仍释放其完整 `SocketSet`。
+
+`net_smp::dropped_udp_buffers_reclaim_without_traffic` 先消费创建时的 poll 请求，再在无
+IRQ/网络 syscall 窗口连续关闭 8 个 RX/TX 各 64 KiB 的 UDP socket；每轮必须看到
+SocketSet UDP 数和 pending removal 恢复基线。
 
 ### `poll_now()` 与 `try_poll_stack()`
 

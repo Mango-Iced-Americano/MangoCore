@@ -1602,6 +1602,11 @@ pub enum TimerAction {
     TimerFdSweep {
         generation: usize,
     },
+    /// TCP socket 最后一个用户 owner 消失后，由 smoltcp poll deadline 驱动的回收。
+    /// route/SocketSet 所有权仍在网络 worker；timer 只发布下一次 worker 请求。
+    NetPoll {
+        generation: usize,
+    },
 }
 
 /// 内核定时器堆节点。
@@ -1668,6 +1673,9 @@ impl KernelTimer {
             },
             TimerAction::TimerFdSweep { generation } => {
                 crate::fs::timerfd::timerfd_sweep_is_current(*generation)
+            }
+            TimerAction::NetPoll { generation } => {
+                crate::net::config::NET_INTERFACE.tcp_cleanup_timer_is_current(*generation)
             }
         }
     }
@@ -1932,6 +1940,9 @@ impl KernelTimerQueue {
                 let woke = crate::fs::timerfd::wake_expired_timerfds(now) > 0;
                 crate::fs::timerfd::rearm_timerfd_sweep();
                 woke
+            }
+            TimerAction::NetPoll { generation } => {
+                crate::net::config::NET_INTERFACE.run_tcp_cleanup_timer(generation)
             }
         }
     }

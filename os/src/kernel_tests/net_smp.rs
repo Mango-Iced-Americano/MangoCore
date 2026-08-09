@@ -29,6 +29,7 @@ const PORT_RACE: u16 = 61_105;
 const PORT_REUSE: u16 = 61_102;
 const PORT_PROTO: u16 = 61_103;
 const PORT_NETNS: u16 = 61_104;
+const SOCKET_RETIRE_CYCLES: usize = 8;
 
 /// 返回 WP1 的九个独立测试。注册由 Wave 2 协调方完成。
 pub fn tests() -> Vec<KernelTest> {
@@ -61,6 +62,10 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "net_smp::poll_worker_no_lost_wake",
             poll_worker_no_lost_wake,
+        ),
+        KernelTest::new(
+            "net_smp::dropped_udp_buffers_reclaim_without_traffic",
+            dropped_udp_buffers_reclaim_without_traffic,
         ),
         KernelTest::new("net_smp::epollet_concurrent_edge", epollet_concurrent_edge),
     ]
@@ -207,6 +212,43 @@ fn poll_worker_no_lost_wake() -> Result<(), &'static str> {
     crate::net::net_core::remove_device(left as usize);
     crate::net::net_core::remove_device(right as usize);
     result
+}
+
+/// 先让创建 socket 时的 poll 请求被消费，再在无后续 IRQ/syscall 的窗口释放最后
+/// Arc。每轮都要求 SocketSet UDP 数回到基线，覆盖“大缓冲连续 close 不累积”。
+fn dropped_udp_buffers_reclaim_without_traffic() -> Result<(), &'static str> {
+    let (_, baseline_udp, _, _) = NET_INTERFACE.socket_stats();
+    let timeout = crate::hal::get_time()
+        .saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+
+    crate::hal::with_local_interrupts_enabled(|| {
+        for _ in 0..SOCKET_RETIRE_CYCLES {
+            let socket = Arc::new(UdpSocket::new(IpVersion::Ipv4));
+            UdpSocket::register_udp_socket(&socket);
+
+            while NET_INTERFACE.poll_request_pending() {
+                if crate::hal::get_time() >= timeout {
+                    return Err("UDP create poll request was not consumed by worker");
+                }
+                crate::task::run_task_safe_point();
+                core::hint::spin_loop();
+            }
+
+            drop(socket);
+            loop {
+                let (_, udp_count, _, pending_removals) = NET_INTERFACE.socket_stats();
+                if udp_count == baseline_udp && pending_removals == 0 {
+                    break;
+                }
+                if crate::hal::get_time() >= timeout {
+                    return Err("dropped UDP SocketSet payloads were not reclaimed without traffic");
+                }
+                crate::task::run_task_safe_point();
+                core::hint::spin_loop();
+            }
+        }
+        Ok(())
+    })
 }
 
 /// reservation 的 token 与 socket Weak 身份必须共同决定释放目标。

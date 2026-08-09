@@ -1288,7 +1288,7 @@ impl Drop for TcpSocket {
         self.invalidate_fast();
         // 唯一 reservation 离开 socket 后由其 Drop 按 token + Weak 身份精确释放。
         drop(self.port_reservation.lock().take());
-        {
+        let queued_removal = {
             let inner = self.inner.lock();
             let state_name = match &*inner {
                 Inner::Init(_) => "Init",
@@ -1299,7 +1299,12 @@ impl Drop for TcpSocket {
                 Inner::Closed(_) => "Closed",
             };
             log::info!("[TcpSocket::drop] state={}", state_name);
-            inner.close();
+            inner.queue_removal()
+        };
+        if queued_removal {
+            // `queue_removal()` 已释放 TcpSocket::inner 与移除队列锁；Drop 只发布
+            // CPU0 worker，不取得 DeviceStack/smoltcp 锁，也不等待 close handshake。
+            NET_INTERFACE.request_poll();
         }
         // 设置 pollee 为对端关闭/错误事件，让 epoll/select 立即可读并报 HUP
         self.pollee.store(

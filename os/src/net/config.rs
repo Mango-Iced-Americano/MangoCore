@@ -7,8 +7,11 @@ use crate::net::net_core::{self, NetDeviceEntry};
 use crate::net::routing::{InetProtocol, RouteSocketHandle};
 use crate::net::socket::inet::datagram::udp::{dispatch_udp_packets, drain_udp_packets};
 use crate::net::socket::inet::stream::inner::tcp_state_code;
-use crate::net::{TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE};
-use crate::timer::current_time_duration;
+use crate::net::{
+    TCP_SOCKETS, TCP_SOCKETS_TO_REMOVE, UDP_SOCKETS_TO_REMOVE,
+};
+use crate::net::socket::TcpSocketRemoval;
+use crate::timer::{current_time_duration, TimeSpec};
 use crate::trace_event;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -39,6 +42,43 @@ use spin::Once;
 /// `DeviceStackCell` 仅存储在 `NetDirectory::stacks` 中。`add_veth_stack()`
 /// / `remove_veth_stack()` 管理 veth 设备的全局注册，调用者负责传入正确的 `Arc<dyn Iface>`。
 pub static NET_INTERFACE: NetInterface = NetInterface::new();
+
+/// smoltcp 在 graceful close 后最多保留 10 秒的 Close timer；额外留出 5 秒给
+/// 一次重传/worker 调度。超时后 worker 明确 abort 并从 SocketSet 移除，不能让
+/// 已无用户 owner 的大缓冲无限驻留。
+const TCP_REMOVAL_GRACE_SECS: usize = 15;
+
+/// 在短移除队列临界区内去重 UDP route。调用者必须在锁外决定是否唤醒 worker。
+pub(crate) fn enqueue_udp_socket_removal(route: RouteSocketHandle) -> bool {
+    let mut removals = UDP_SOCKETS_TO_REMOVE.lock();
+    if removals.contains(&route) {
+        return false;
+    }
+    removals.push(route);
+    true
+}
+
+/// 发布 TCP route 的延迟回收请求。相同 route 只保留最早的强制回收 deadline；
+/// listener 的 abort 要求可以覆盖普通 graceful close，避免并发 close 重复积压。
+pub(crate) fn enqueue_tcp_socket_removal(
+    route: RouteSocketHandle,
+    abort_if_active: bool,
+) -> bool {
+    let deadline = TimeSpec::now() + TimeSpec::from_s(TCP_REMOVAL_GRACE_SECS);
+    let mut removals = TCP_SOCKETS_TO_REMOVE.lock();
+    if let Some(existing) = removals.iter_mut().find(|pending| pending.route == route) {
+        existing.deadline = existing.deadline.min(deadline);
+        existing.abort_if_active |= abort_if_active;
+        return false;
+    }
+    removals.push(TcpSocketRemoval {
+        route,
+        deadline,
+        close_started: false,
+        abort_if_active,
+    });
+    true
+}
 
 #[cfg(feature = "net_perf_diag")]
 const NET_PERF_REPORT_INTERVAL_SECS: usize = 2;
@@ -176,6 +216,9 @@ struct NetPollControl {
     deferred_wake: AtomicBool,
     /// DeviceStack try_lock 失败只置位；CPU0 下一 scheduler tick 才重新提交。
     retry_armed: AtomicBool,
+    /// 每次重新计算 TCP 回收 deadline 都递增；旧的 kernel timer 到期后不会为已
+    /// 回收 route 误唤醒 worker。该序号只发布 timer entry，不承担 route 所有权。
+    tcp_cleanup_generation: AtomicUsize,
     /// WaitQueue 需要堆分配，因此在 worker 首次运行时构造；`pending` 自身会
     /// 保存早于初始化到达的请求，不需要为静态对象开启 `const_heap`。
     worker_wait: Once<Mutex<crate::task::WaitQueue>>,
@@ -187,6 +230,7 @@ impl NetPollControl {
             pending: AtomicBool::new(false),
             deferred_wake: AtomicBool::new(false),
             retry_armed: AtomicBool::new(false),
+            tcp_cleanup_generation: AtomicUsize::new(0),
             worker_wait: Once::new(),
         }
     }
@@ -595,6 +639,29 @@ impl<'a> NetInterface<'a> {
         }
     }
 
+    /// ktest 用于确认此前的网络请求已被 worker 消费；这是纯原子观察，不触碰
+    /// DeviceStack，因此可以在“关闭后没有网络流量”的 regression 中精确构造睡眠窗口。
+    pub(crate) fn poll_request_pending(&self) -> bool {
+        self.poll.pending.load(Ordering::Acquire)
+    }
+
+    /// 供全局 deadline queue 复核的 generation。只比较原子序号，绝不在 timer
+    /// queue 锁域内取得网络目录或 DeviceStack 锁。
+    pub(crate) fn tcp_cleanup_timer_is_current(&self, generation: usize) -> bool {
+        self.poll.tcp_cleanup_generation.load(Ordering::Acquire) == generation
+    }
+
+    /// TCP 回收 deadline 到期后由 CPU0 timer callback 调用。队列已经被 worker
+    /// 清空时这是陈旧事件；否则只发布一次 poll，不在 timer callback 触碰 smoltcp。
+    pub(crate) fn run_tcp_cleanup_timer(&self, generation: usize) -> bool {
+        if !self.tcp_cleanup_timer_is_current(generation) || TCP_SOCKETS_TO_REMOVE.lock().is_empty()
+        {
+            return false;
+        }
+        self.request_poll();
+        true
+    }
+
     /// 从 hard IRQ 发布一次网络推进请求。
     ///
     /// 此路径不得轮询、拿 WaitQueue、分配或输出；安全点随后把 deferred 标志转换为唤醒。
@@ -920,23 +987,94 @@ impl<'a> NetInterface<'a> {
     }
 
     /// 在 worker 的 task context 收集待删除 route。该步骤不持有任何 DeviceStack 锁。
-    fn drain_pending_socket_removals(&self) {
+    /// 返回值表示是否仍有 TCP close 需要定时推进。
+    fn drain_pending_socket_removals(&self) -> bool {
         let udp_removes: Vec<_> = UDP_SOCKETS_TO_REMOVE.lock().drain(..).collect();
         for route in udp_removes {
             self.remove_routed(route);
         }
 
         let tcp_removes: Vec<_> = TCP_SOCKETS_TO_REMOVE.lock().drain(..).collect();
-        for route in tcp_removes {
+        for mut removal in tcp_removes {
             let closed = self
-                .tcp_routed_socket(route, |socket| socket.state() == tcp::State::Closed)
+                .tcp_routed_socket(removal.route, |socket| {
+                    if !removal.close_started {
+                        if removal.abort_if_active && socket.is_active() {
+                            socket.abort();
+                        } else {
+                            socket.close();
+                        }
+                        removal.close_started = true;
+                    }
+                    socket.state() == tcp::State::Closed
+                })
                 .unwrap_or(true);
             if closed {
-                self.remove_routed(route);
+                self.remove_routed(removal.route);
+            } else if TimeSpec::now() >= removal.deadline {
+                let aborted = self
+                    .tcp_routed_socket(removal.route, |socket| socket.abort())
+                    .is_some();
+                if !aborted {
+                    log::warn!(
+                        "[net] TCP removal route {} disappeared before forced abort",
+                        removal.route
+                    );
+                }
+                self.remove_routed(removal.route);
             } else {
-                TCP_SOCKETS_TO_REMOVE.lock().push(route);
+                let mut removals = TCP_SOCKETS_TO_REMOVE.lock();
+                if let Some(existing) = removals
+                    .iter_mut()
+                    .find(|pending| pending.route == removal.route)
+                {
+                    existing.deadline = existing.deadline.min(removal.deadline);
+                    existing.abort_if_active |= removal.abort_if_active;
+                } else {
+                    removals.push(removal);
+                }
             }
         }
+        !TCP_SOCKETS_TO_REMOVE.lock().is_empty()
+    }
+
+    /// TCP 仍处于 FIN_WAIT/TIME_WAIT 时，按 smoltcp 的 `poll_at()` 重装唯一的
+    /// worker deadline；没有协议 deadline 时仍由每个 route 的强制回收 deadline
+    /// 保证最终释放。任何目录、SocketSet 与 timer queue 锁都不重叠。
+    fn rearm_tcp_cleanup_poll(&self) {
+        let forced_deadline = {
+            let removals = TCP_SOCKETS_TO_REMOVE.lock();
+            removals.iter().map(|removal| removal.deadline).min()
+        };
+        let generation = self
+            .poll
+            .tcp_cleanup_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let Some(forced_deadline) = forced_deadline else {
+            return;
+        };
+
+        let now = Instant::from_millis(current_time_duration().as_millis() as i64);
+        let protocol_deadline = self
+            .snapshot_stack_arcs()
+            .into_iter()
+            .filter(|stack| stack.state.load(Ordering::Acquire) == STACK_ACTIVE)
+            .filter_map(|stack| {
+                let mut inner = stack.inner.try_lock()?;
+                let DeviceStackInner { iface, sockets, .. } = &mut *inner;
+                iface.poll_at(now, sockets)
+                    .map(|deadline| TimeSpec::from_us(deadline.total_micros().max(0) as usize))
+            })
+            .min();
+        let deadline = protocol_deadline
+            .map(|deadline| deadline.min(forced_deadline))
+            .unwrap_or(forced_deadline)
+            .max(TimeSpec::now());
+        crate::task::add_kernel_timer(
+            crate::task::TimerAction::NetPoll { generation },
+            deadline,
+        );
     }
 
     /// 一轮 worker poll：每个 stack 只试拿一次锁；每次通知均由 `try_poll_stack()`
@@ -945,11 +1083,20 @@ impl<'a> NetInterface<'a> {
         // A syscall/trap poll may have queued TX while local IRQs were off.
         // Only the scheduler worker (IRQ-enabled) is allowed to drain it.
         drain_deferred_tx();
-        self.drain_pending_socket_removals();
+        let tcp_cleanup_pending = self.drain_pending_socket_removals();
         for stack in self.snapshot_stack_arcs() {
             if stack.state.load(Ordering::Acquire) == STACK_ACTIVE {
                 let _ = self.try_poll_stack(stack.ifindex);
             }
+        }
+        if tcp_cleanup_pending {
+            self.rearm_tcp_cleanup_poll();
+        } else {
+            // 使所有已装载的 TCP cleanup deadline 失效；不会为已回收的 socket 留下
+            // 额外 worker wakeup。
+            self.poll
+                .tcp_cleanup_generation
+                .fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -1180,7 +1327,12 @@ impl<'a> NetInterface<'a> {
             entry.state = RouteState::Draining;
             directory.routes.remove(&route)
         });
-        let Some(stack) = entry.and_then(|entry| entry.stack.upgrade()) else {
+        let Some(entry) = entry else {
+            log::warn!("[net] route {} was absent during SocketSet removal", route);
+            return;
+        };
+        let Some(stack) = entry.stack.upgrade() else {
+            log::warn!("[net] route {} lost its DeviceStack during SocketSet removal", route);
             return;
         };
         let removed = {
@@ -1190,6 +1342,9 @@ impl<'a> NetInterface<'a> {
                 .remove(&route)
                 .map(|binding| inner.sockets.remove(binding.handle))
         };
+        if removed.is_none() {
+            log::warn!("[net] route {} had no SocketSet binding during removal", route);
+        }
         drop(removed);
     }
 

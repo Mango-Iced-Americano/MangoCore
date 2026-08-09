@@ -144,7 +144,19 @@ pub static UDP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec
 
 // tcp
 pub static TCP_SOCKETS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
-pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<RouteSocketHandle>> = Mutex::new(Vec::new());
+/// 一个 TCP route 的延迟回收请求。
+///
+/// `close_started` 只能由 CPU0 poll worker 更新；析构方只在短临界区内发布请求，
+/// 因此不会在任意 fd/epoll Drop 上取得 DeviceStack 锁或推进 smoltcp。
+#[derive(Clone, Copy)]
+pub(crate) struct TcpSocketRemoval {
+    pub(crate) route: RouteSocketHandle,
+    pub(crate) deadline: TimeSpec,
+    pub(crate) close_started: bool,
+    pub(crate) abort_if_active: bool,
+}
+
+pub static TCP_SOCKETS_TO_REMOVE: Mutex<Vec<TcpSocketRemoval>> = Mutex::new(Vec::new());
 /// Listening-only TCP sockets, scanned after every completed stack poll.
 pub static TCP_LISTENERS: Mutex<Vec<Weak<TcpSocket>>> = Mutex::new(Vec::new());
 
