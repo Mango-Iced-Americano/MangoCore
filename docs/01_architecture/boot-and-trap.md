@@ -419,8 +419,10 @@ reason/ack 已复用这个窗口，B33 又接入 RESCHEDULE，不需要为“长
 
 ## 构建与验证
 
-构建期 `CORE_NUM` 同时导出为 Cargo 环境变量 `MANGO_CORE_NUM`，并生成 QEMU
-拓扑：
+构建期 `CORE_NUM` 导出为 Cargo 环境变量 `MANGO_CORE_NUM`，仅作为 FDT `/cpus`
+探测失败时的兜底；运行时的实际 CPU 数（`smp::runtime_cpu_count()`）在启动早期
+从 FDT `/cpus` 的 `cpu@N` 子节点探测并截断到编译期上限 `MAX_CPUS`（Linux
+`NR_CPUS`/`nr_cpu_ids` 双轨制）。因此同一镜像可运行在不同核数的 QEMU 上：
 
 ```text
 -smp cpus=N,sockets=1,cores=N,threads=1

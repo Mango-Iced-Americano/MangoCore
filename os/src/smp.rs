@@ -342,6 +342,7 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
 ];
 
 // build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
+// FDT `/cpus` 探测失败（如 LA64 静态板级）时作为运行时 CPU 数的兜底值。
 const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
 
 const AP_RELEASED: usize = 1;
@@ -485,13 +486,34 @@ static BOOT_PHASE: AtomicUsize = AtomicUsize::new(0);
 #[link_section = ".data.boot"]
 static SCHEDULER_RELEASED: AtomicBool = AtomicBool::new(false);
 
-const fn expected_online_mask() -> usize {
-    (1usize << CONFIGURED_CPU_COUNT) - 1
+/// 运行时可用的逻辑 CPU 数量（Linux `nr_cpu_ids` 语义）。
+///
+/// 以 FDT `/cpus` 探测到的实际 CPU 数为准，并截断到编译期上限 `MAX_CPUS`
+/// （Linux `NR_CPUS` 语义：`PER_CPUS`、IdleStacks 等数组仍按 `MAX_CPUS` 定界）。
+/// FDT 缺失 `/cpus` 或固件发现尚未执行时回退到编译期 `CONFIGURED_CPU_COUNT`，
+/// 保证至少 1 个 CPU，绝不返回 0。
+///
+/// 该值决定“启动几个 AP + 期望 online mask”，因此与 QEMU 的 `-smp N` 自动匹配：
+/// 同一镜像在不同核数的 QEMU 上都能启动，而不再依赖编译期 `MANGO_CORE_NUM`。
+pub fn runtime_cpu_count() -> usize {
+    let probed = crate::hal::firmware::cpu_count();
+    if probed == 0 {
+        CONFIGURED_CPU_COUNT
+    } else {
+        probed.min(MAX_CPUS)
+    }
 }
 
-/// 返回本次构建配置的逻辑 CPU 数量。
-pub const fn configured_cpu_count() -> usize {
-    CONFIGURED_CPU_COUNT
+fn expected_online_mask() -> usize {
+    (1usize << runtime_cpu_count()) - 1
+}
+
+/// 返回本次运行实际配置的逻辑 CPU 数量。
+///
+/// 语义等同 `runtime_cpu_count()`，保留该入口名以兼容历史调用方；数组定界请
+/// 使用编译期常量 `MAX_CPUS`（如 IdleStacks）。
+pub fn configured_cpu_count() -> usize {
+    runtime_cpu_count()
 }
 
 /// 汇总当前已经完成本地初始化的 CPU。
@@ -501,7 +523,7 @@ pub const fn configured_cpu_count() -> usize {
 /// 同时保证该 CPU 在 Release 前完成的本地初始化对当前 CPU 可见。
 pub fn online_cpu_mask() -> usize {
     let mut mask = 0usize;
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if PER_CPUS[cpu_id].online.load(Ordering::Acquire) {
             mask |= 1usize << cpu_id;
         }
@@ -515,7 +537,7 @@ pub fn online_cpu_mask() -> usize {
 /// 并不随每次 `wfi`/`idle` 睡眠清零；后续调度器会另行补全瞬时 idle 握手。
 pub fn idle_cpu_mask() -> usize {
     let mut mask = 0usize;
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if PER_CPUS[cpu_id].idle.load(Ordering::Acquire) {
             mask |= 1usize << cpu_id;
         }
@@ -526,7 +548,7 @@ pub fn idle_cpu_mask() -> usize {
 /// 汇总已经进入 per-CPU 调度循环的 CPU。
 pub fn scheduler_cpu_mask() -> usize {
     let mut mask = 0usize;
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if PER_CPUS[cpu_id]
             .scheduler_entered
             .load(Ordering::Acquire)
@@ -540,7 +562,7 @@ pub fn scheduler_cpu_mask() -> usize {
 /// 汇总已经进入不可返回 stop loop 的 AP。
 pub fn stopped_cpu_mask() -> usize {
     let mut mask = 0usize;
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if PER_CPUS[cpu_id].stopped.load(Ordering::Acquire) {
             mask |= 1usize << cpu_id;
         }
@@ -553,7 +575,7 @@ pub fn stopped_cpu_mask() -> usize {
 /// 该函数不等待任何普通锁；任务侧唯一的锁访问是 `active_user_vm.try_lock()`。
 /// 远端 CPU 可能继续改变状态，因此结果只用于诊断，不能参与调度或资源释放决策。
 pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
-    assert!(cpu_id < CONFIGURED_CPU_COUNT);
+    assert!(cpu_id < MAX_CPUS);
     let cpu = &PER_CPUS[cpu_id];
     CpuDiagnostics {
         cpu_id,
@@ -616,7 +638,7 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
     // 先向全部目标 Release 发布 reason，再允许任一目标开始处理。这为整轮
     // 广播建立统一的“publication before delivery”批次边界；handler 仍然
     // 只读取本 CPU mailbox，不依赖其他 CPU 的状态。
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if targets & (1usize << cpu_id) != 0 {
             PER_CPUS[cpu_id]
                 .pending_ipi
@@ -635,7 +657,7 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
 
     let boot_hardware_id = BOOT_HARDWARE_ID.load(Ordering::Acquire);
     let mut first_error = None;
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if targets & (1usize << cpu_id) != 0 {
             let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
             // 一个 doorbell 失败不能阻止其余已发布 mailbox 的目标被唤醒；
@@ -656,7 +678,7 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
 
 /// 向一个逻辑 CPU 发布通用 IPI reason。
 pub fn send_ipi(cpu_id: usize, reason: IpiReason) -> Result<(), isize> {
-    if cpu_id >= CONFIGURED_CPU_COUNT {
+    if cpu_id >= runtime_cpu_count() {
         return Err(-3);
     }
     send_ipi_mask(1usize << cpu_id, reason)
@@ -899,7 +921,7 @@ pub(crate) fn synchronize_memory(targets: usize) -> Result<(), MemoryBarrierErro
 
     // 先约束调用者在 syscall 入口前的用户内存访问，再发布远端 request。
     fence(Ordering::SeqCst);
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if remote & (1usize << cpu_id) == 0 {
             continue;
         }
@@ -921,7 +943,7 @@ pub(crate) fn synchronize_memory(targets: usize) -> Result<(), MemoryBarrierErro
         loop {
             let stopped = stopped_cpu_mask();
             let mut missing = None;
-            for cpu_id in 0..CONFIGURED_CPU_COUNT {
+            for cpu_id in 0..runtime_cpu_count() {
                 if remote & (1usize << cpu_id) == 0 || stopped & (1usize << cpu_id) != 0 {
                     continue;
                 }
@@ -985,7 +1007,7 @@ fn synchronize_kernel_mapping_mask(
     let current_bit = 1usize << self::cpu_id();
     let remote = targets & !current_bit;
     let mut expected = [0usize; MAX_CPUS];
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if remote & (1usize << cpu_id) == 0 {
             continue;
         }
@@ -1021,7 +1043,7 @@ fn synchronize_kernel_mapping_mask(
         let mut missing = None;
         let stopped = stopped_cpu_mask();
         available &= !stopped;
-        for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        for cpu_id in 0..runtime_cpu_count() {
             if remote & (1usize << cpu_id) == 0 {
                 continue;
             }
@@ -1078,7 +1100,7 @@ fn synchronize_kernel_mapping_mask(
 
 /// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
 pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
-    if cpu_id >= CONFIGURED_CPU_COUNT {
+    if cpu_id >= runtime_cpu_count() {
         return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
     }
     synchronize_kernel_mapping_mask(1usize << cpu_id, false)
@@ -1230,7 +1252,7 @@ pub(crate) fn synchronize_user_tlb(
     }
 
     let mut expected = [0usize; MAX_CPUS];
-    for cpu_id in 0..CONFIGURED_CPU_COUNT {
+    for cpu_id in 0..runtime_cpu_count() {
         if remote & (1usize << cpu_id) == 0 {
             continue;
         }
@@ -1254,7 +1276,7 @@ pub(crate) fn synchronize_user_tlb(
     let result = loop {
         let stopped = stopped_cpu_mask();
         let mut missing = None;
-        for cpu_id in 0..CONFIGURED_CPU_COUNT {
+        for cpu_id in 0..runtime_cpu_count() {
             if remote & (1usize << cpu_id) == 0 || stopped & (1usize << cpu_id) != 0 {
                 continue;
             }
@@ -1417,7 +1439,7 @@ fn mark_cpu_idle(cpu_id: usize) {
 /// 由 CPU 自己唯一一次发布本地初始化完成。
 fn mark_cpu_online(cpu_id: usize) {
     assert!(
-        cpu_id < CONFIGURED_CPU_COUNT,
+        cpu_id < MAX_CPUS,
         "cannot publish unconfigured CPU {} online",
         cpu_id
     );
@@ -1516,7 +1538,10 @@ pub(crate) fn request_reschedule_mask(targets: usize) -> Result<(), isize> {
 /// OpenSBI may choose any configured hart for cold boot under MTTCG.  The
 /// winner remains the physical BSP but is always exposed as logical CPU0.
 pub fn register_cpu_entry(hardware_id: usize) -> usize {
-    if hardware_id >= CONFIGURED_CPU_COUNT {
+    // 该入口在 `rust_main` 开头调用，此时固件 FDT 尚未解析（`runtime_cpu_count()`
+    // 会回退到编译期值），因此只能按编译期上限 `MAX_CPUS` 做纯数组安全防护；
+    // 真正的拓扑门禁由 `secondary_main` 的 `runtime_cpu_count()` 完成。
+    if hardware_id >= MAX_CPUS {
         crate::hal::boot_cpu_park();
     }
 
@@ -1578,7 +1603,7 @@ pub fn cpu_id() -> usize {
     );
     let logical_id = offset / stride;
     assert!(
-        logical_id < CONFIGURED_CPU_COUNT,
+        logical_id < MAX_CPUS,
         "CPU-local pointer {:#x} selects unconfigured CPU {}",
         ptr,
         logical_id
@@ -1601,7 +1626,7 @@ fn try_local_per_cpu() -> Option<&'static PerCpu> {
         return None;
     }
     let logical_id = offset / stride;
-    if logical_id >= CONFIGURED_CPU_COUNT {
+    if logical_id >= MAX_CPUS {
         return None;
     }
     let per_cpu = &PER_CPUS[logical_id];
@@ -1621,7 +1646,7 @@ pub(crate) fn local_task_state() -> &'static crate::task::processor::CpuTaskStat
 /// 保证一次只持有一个 runqueue 锁。
 pub(crate) fn task_state(cpu_id: usize) -> &'static crate::task::processor::CpuTaskState {
     assert!(
-        cpu_id < CONFIGURED_CPU_COUNT,
+        cpu_id < MAX_CPUS,
         "task state requested for unconfigured CPU {}",
         cpu_id
     );
@@ -1670,7 +1695,7 @@ pub(crate) fn logical_to_hardware_mask(logical_mask: usize) -> usize {
     );
 
     let mut hardware_mask = 0usize;
-    for logical_id in 0..CONFIGURED_CPU_COUNT {
+    for logical_id in 0..runtime_cpu_count() {
         if logical_mask & (1usize << logical_id) != 0 {
             hardware_mask |= 1usize << logical_to_hardware_id(logical_id, boot_hardware_id);
         }
@@ -1686,7 +1711,7 @@ pub(crate) fn logical_to_hardware_mask(logical_mask: usize) -> usize {
 pub fn secondary_main(cpu_id: usize) -> ! {
     // A QEMU/kernel topology mismatch must not let an unconfigured CPU touch
     // shared state.  It owns a reserved stack, so it can safely park here.
-    if cpu_id >= CONFIGURED_CPU_COUNT {
+    if cpu_id >= runtime_cpu_count() {
         crate::hal::boot_cpu_park();
     }
 
@@ -1764,7 +1789,14 @@ pub fn bring_up_secondary_cpus() {
     // 所以在发布 AP 前用同一镜像基址反算物理入口，不能把高半区地址交给固件。
     let secondary_entry = crate::hal::boot::kernel_linked_to_phys(_start as usize);
 
-    for (cpu_id, _) in PER_CPUS.iter().enumerate().take(CONFIGURED_CPU_COUNT).skip(1) {
+    // CPU0 与 AP 走同一发布协议。启动循环上限 = runtime_cpu_count()，由 FDT
+    // `/cpus` 决定，因此不会尝试启动 QEMU 实际不存在的 AP。
+    for (cpu_id, _) in PER_CPUS
+        .iter()
+        .enumerate()
+        .take(runtime_cpu_count())
+        .skip(1)
+    {
         let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
         // RV64 uses OpenSBI HSM. LA64 uses QEMU's mailbox-plus-IPI slave ROM.
         if let Err(error) = crate::hal::start_secondary_cpu(hardware_id, secondary_entry) {
@@ -1789,7 +1821,7 @@ pub fn bring_up_secondary_cpus() {
         if online & expected == expected {
             crate::println!(
                 "[smp] minimal boot ready: configured={} boot_hw_id={} online_mask={:#x}",
-                CONFIGURED_CPU_COUNT,
+                runtime_cpu_count(),
                 boot_hardware_id,
                 online
             );

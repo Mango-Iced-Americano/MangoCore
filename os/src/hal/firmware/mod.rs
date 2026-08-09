@@ -83,6 +83,8 @@ pub struct MemoryRegionBuf {
     pub region_count: usize,
     pub reserved_count: usize,
     pub mmio_count: usize,
+    /// FDT `/cpus` 探测到的逻辑 CPU 数量；0 表示 FDT 缺失 `/cpus` 或尚未初始化。
+    pub cpu_count: usize,
     #[cfg(target_arch = "riscv64")]
     pub timebase_frequency: usize,
 }
@@ -96,6 +98,7 @@ impl MemoryRegionBuf {
             region_count: 0,
             reserved_count: 0,
             mmio_count: 0,
+            cpu_count: 0,
             #[cfg(target_arch = "riscv64")]
             timebase_frequency: 0,
         }
@@ -303,6 +306,16 @@ pub fn timebase_frequency() -> usize {
     frequency
 }
 
+/// 返回 FDT `/cpus` 探测到的逻辑 CPU 数量（Linux nr_cpu_ids 语义的探测源）。
+///
+/// 0 表示探测失败或尚未执行 `populate_memory_regions()`；调用方（`smp`）负责
+/// 回退到编译期配置并截断到 `MAX_CPUS`。
+pub fn cpu_count() -> usize {
+    // SAFETY: The pre-heap parser publishes this scalar once before `mm::init()`
+    // and never mutates it afterwards; all later access is read-only.
+    unsafe { (*core::ptr::addr_of!(MEMORY_BUF)).cpu_count }
+}
+
 /// Sum discovered usable RAM ranges for runtime accounting.
 pub fn usable_memory_size() -> usize {
     let mut total = 0usize;
@@ -320,6 +333,8 @@ fn populate_from_static() {
     buffer.region_count = 0;
     buffer.reserved_count = 0;
     buffer.mmio_count = 0;
+    // 静态板级描述没有 FDT `/cpus`；保持 cpu_count=0，由 smp 回退到编译期配置。
+    buffer.cpu_count = 0;
 
     for (index, &(start, end)) in MEMORY_REGIONS_FALLBACK.iter().enumerate() {
         if index >= MAX_MEMORY_REGIONS {

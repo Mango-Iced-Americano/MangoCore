@@ -338,17 +338,18 @@ pub fn bootstrap_init(cpu_id: usize) {
 }
 
 #[repr(C, align(4096))]
-struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::MAX_CPUS]);
 
 // AP 只有在 CPU0 清完 BSS 并发布 BOOT_PHASE 后才会进入 idle stack，所以该
 // 数组放在普通 `.bss.*` 内。它仍属于内核镜像，不会被物理页分配器重新分配。
+// 数组按编译期上限 `MAX_CPUS` 定界（Linux __per_cpu_offset[NR_CPUS] 模式）；
+// 实际使用的槽数由运行时的 `runtime_cpu_count()` 决定。
 #[link_section = ".bss.idle_stack"]
-static mut IDLE_STACKS: IdleStacks =
-    IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+static mut IDLE_STACKS: IdleStacks = IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::MAX_CPUS]);
 
 /// 抛弃当前 boot stack，并在指定 CPU 的 idle stack 上进入 Rust。
 pub fn enter_secondary_idle(cpu_id: usize, entry: extern "C" fn(usize) -> !) -> ! {
-    assert!(cpu_id < crate::smp::configured_cpu_count());
+    assert!(cpu_id < crate::smp::MAX_CPUS);
 
     // 使用裸地址避免创建指向 `static mut` 的引用。KERNEL_STACK_SIZE 为页倍数，
     // 数组本身按页对齐，因此每个槽的顶部同时满足 LA64 ABI 的 16 字节对齐。

@@ -114,18 +114,19 @@ pub fn bootstrap_init(cpu_id: usize) {
 }
 
 #[repr(C, align(4096))]
-struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+struct IdleStacks([u8; config::KERNEL_STACK_SIZE * crate::smp::MAX_CPUS]);
 
 // idle stack 直到 CPU0 清完 BSS 才会启用，因此它应位于 sbss 之后，而不是和
 // 固件入口正在使用的 boot stack 一样逃过清零。链接脚本的 `.bss.*` 通配符
 // 会把该数组保留在内核镜像范围内，物理页分配器也不会回收这段内存。
+// 数组按编译期上限 `MAX_CPUS` 定界（Linux __per_cpu_offset[NR_CPUS] 模式）；
+// 实际使用的槽数由运行时的 `runtime_cpu_count()` 决定。
 #[link_section = ".bss.idle_stack"]
-static mut IDLE_STACKS: IdleStacks =
-    IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::configured_cpu_count()]);
+static mut IDLE_STACKS: IdleStacks = IdleStacks([0; config::KERNEL_STACK_SIZE * crate::smp::MAX_CPUS]);
 
 /// 抛弃当前 boot stack，并在指定 CPU 的 idle stack 上进入 Rust。
 pub fn enter_secondary_idle(cpu_id: usize, entry: extern "C" fn(usize) -> !) -> ! {
-    assert!(cpu_id < crate::smp::configured_cpu_count());
+    assert!(cpu_id < crate::smp::MAX_CPUS);
 
     // 只取得静态区的裸地址，不为 `static mut` 创建共享引用；每个 CPU 根据
     // logical ID 独占一个固定槽，切栈后也不会与其他 CPU 产生别名写入。

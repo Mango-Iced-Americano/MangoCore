@@ -141,6 +141,7 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
 
     buf.reserved_count = 0;
     buf.mmio_count = 0;
+    buf.cpu_count = 0;
     #[cfg(target_arch = "riscv64")]
     {
         buf.timebase_frequency = 0;
@@ -159,15 +160,71 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         return false;
     }
 
-    #[cfg(target_arch = "riscv64")]
-    {
-        parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf) && buf.timebase_frequency != 0
+    let resources_ok = {
+        #[cfg(target_arch = "riscv64")]
+        {
+            parse_memreserve(blob, buf)
+                && parse_node_resources(&fdt, buf)
+                && buf.timebase_frequency != 0
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            // LA64 timer 频率由 CPUCFG 探测，不要求 FDT `/cpus/timebase-frequency`。
+            parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf)
+        }
+    };
+    if resources_ok {
+        // CPU 数量探测是尽力而为：任何解析失败都不应回退整个固件发现。
+        count_cpus(&fdt, buf);
     }
-    #[cfg(not(target_arch = "riscv64"))]
-    {
-        // LA64 timer 频率由 CPUCFG 探测，不要求 FDT `/cpus/timebase-frequency`。
-        parse_memreserve(blob, buf) && parse_node_resources(&fdt, buf)
+    resources_ok
+}
+
+/// 尽力统计 `/cpus` 的直接子节点数量，写入 `buffer.cpu_count`。
+///
+/// 每个 `/cpus` 的直接子节点对应一个 CPU（QEMU virt 使用 `cpu@N` 命名）。为了
+/// 兼容 board 级命名并排除 `cpu-map` 等拓扑辅助节点，子节点判据为：节点名恰为
+/// `cpu`（不含 `@` 单元地址），或带有 `device_type = "cpu"` 属性。结果截断到
+/// 编译期 `MAX_CPUS`（Linux NR_CPUS 语义）。FDT 缺失 `/cpus` 或遍历中途失败时
+/// 保持当前值（调用方负责以 0 表示未探测）。
+fn count_cpus(fdt: &FallibleFdt<'_>, buffer: &mut crate::hal::firmware::MemoryRegionBuf) {
+    let Ok(nodes) = fdt.all_nodes() else {
+        return;
+    };
+    let mut in_cpus = false;
+    let mut count = 0usize;
+    for entry in nodes {
+        let Ok((depth, node)) = entry else {
+            // 遍历中断：只保留已经统计的值，不视为致命错误。
+            break;
+        };
+        if depth == 1 {
+            // DFS 顺序下，深度 2 的节点都属于最近出现的深度 1 父节点。
+            in_cpus = match node.name() {
+                Ok(node_name) => &*node_name.name == "cpus",
+                Err(_) => false,
+            };
+            continue;
+        }
+        if !in_cpus || depth != 2 {
+            continue;
+        }
+        let name_is_cpu = node
+            .name()
+            .is_ok_and(|node_name| node_name.name == "cpu");
+        let device_type_is_cpu = node
+            .raw_property("device_type")
+            .ok()
+            .flatten()
+            .is_some_and(|property| {
+                let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
+                value == b"cpu"
+            });
+        if name_is_cpu || device_type_is_cpu {
+            count = (count + 1).min(crate::smp::MAX_CPUS);
+        }
     }
+    buffer.cpu_count = count;
 }
 
 /// Collect every root-level `/memory` node, regardless of whether its name
