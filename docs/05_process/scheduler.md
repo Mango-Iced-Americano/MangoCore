@@ -375,22 +375,19 @@ best-effort 输出，不能替代 processor/runqueue 锁或调度状态机的 ow
 
 ## 6. run_tasks 主循环阶段
 
-CPU0 的 `run_tasks()` 每轮执行：
+CPU0 的 `run_tasks()` 使用事件驱动 idle。每轮先短暂开放 IRQ 交付 pending
+timer/IPI，立即回到 IRQ-off idle 栈；只有 10ms scheduler tick 发布的可合并事件才执行
+全局 housekeeping：
 
 ```text
-schedule_tick += 1
-  ├── console poll
-  ├── do_wake_expired()
-  ├── NET_INTERFACE.run_deferred_poll_retry() 每 tick
-  ├── NET_INTERFACE.request_poll()    每 64 tick
-  ├── fs::reclaim::maybe_reclaim_fs_caches()
-  ├── drain 本 CPU local_zombies
-  ├── 每 64 tick 记录 runqueue/interruptible 长度和本地队列统计
-  ├── compact_shared_futex()
-  ├── fetch_task()
-  ├── queue sample / perf
-  ├── switch to task
-  └── idle path: NET_INTERFACE.request_poll() 或 spin_loop()
+短暂开放 IRQ → 立即关 IRQ → consume RESCHEDULE/deferred timer
+  ├── housekeeping pending 时：
+  │     console / legacy timeout / net retry / FS reclaim / futex compact
+  │     NET poll 与 taskq sample 每 64 个真实 tick，FS lifecycle 每 128 tick
+  ├── 每轮回收退休内核栈和本 CPU local_zombies
+  ├── fetch_task() / queue sample / perf
+  ├── 有任务：switch to task
+  └── 无任务：IRQ-off cpu_wait_for_interrupt()
 ```
 
 调度循环承担了若干后台维护职责，不能把它理解成单纯的 “while fetch ready task”。
@@ -400,6 +397,7 @@ schedule_tick += 1
 调度循环里所有后台动作都必须短小，不应长期持有业务锁。CPU0 仍是
 全局 housekeeping 关键路径，长时间操作会推迟 CPU0 用户任务和 timeout wake。
 因此 PageCache reclaim、网络 poll、shared futex compact 都采用有限预算或降频策略。
+维护节拍不再随空队列循环次数放大；长临界区后的多个 tick 合并为一次维护，不追赶形成风暴。
 
 AP 走独立的精简分支，只执行：
 
@@ -417,6 +415,12 @@ FS reclaim 或 OOM active tracker。B39 的无 syscall 用户忙循环已证明 
 trap-return 安全点把 current 交给同核 helper。远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait
 之间到达的 doorbell 或 timer pending 会唤醒 CPU，不会丢失 wakeup。
+
+CPU0 与 AP 共用架构中立的 `cpu_wait_for_interrupt()`。RV64 在 IRQ-off 状态执行
+`wfi`，pending timer/IPI 会使其返回；LoongArch 的 `idle 0` 必须在 `CRMD.IE=1`
+时执行，因此 HAL 把“开启 IE→idle”放进对齐的汇编 interrupt region。若 kernel
+timer/IPI 正好打断该窗口，trap 返回路径把保存的 PC 改到 region exit，避免 handler
+消费唯一事件后又回到 `idle 0`。HAL 返回 Rust 前统一恢复 IRQ-off 调度器契约。
 
 ### 6.1 Per-CPU tick 与 CPU0 全局 timer
 
@@ -454,9 +458,9 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 | 操作 | 频率 |
 |------|------|
-| `NET_INTERFACE.run_deferred_poll_retry()` | 每 tick，消费忙栈 retry 位 |
-| `NET_INTERFACE.request_poll()` | 每 64 tick 与每 64 idle tick |
-| `fs::reclaim::maybe_reclaim_fs_caches()` | 每轮 |
+| `NET_INTERFACE.run_deferred_poll_retry()` | 每个真实 10ms scheduler tick，消费忙栈 retry 位 |
+| `NET_INTERFACE.request_poll()` | 每 64 个真实 scheduler tick |
+| `fs::reclaim::maybe_reclaim_fs_caches()` | 每个真实 scheduler tick |
 
 网络 syscall 只做一次有界 `poll_now()` 或异步请求；真正的全栈推进由 CPU0 worker
 负责。调度循环中的 request 是后台兜底，避免没有 socket syscall 时网络完全不推进。
@@ -515,9 +519,9 @@ syscall 可在受控区间带着开中断状态 yield/block。`schedule()` 因�
 2. 以 IRQ-off 状态切回本 CPU idle scheduler；
 3. 原任务再次被切入时，在 `__switch` 返回后恢复它自己的快照。
 
-CPU0 的 housekeeping 循环仍保持 IRQ-off，因为 console、FS reclaim 等共享路径
+CPU0 的 housekeeping 仍保持 IRQ-off，因为 console、FS reclaim 等共享路径
 尚未完成 IRQ 并发审计；network 在这里仅发布原子 request，smoltcp 由独立 worker
-在任务上下文推进。AP 已采用独立的“关中断—重查工作—架构 wait”
+在任务上下文推进。CPU0 和 AP 均采用“短暂开中断—立即关中断—重查工作—架构 wait”
 协议，但 B19 kernel-only 任务运行期间也保持 IRQ-off；STOP/RESCHEDULE 最长延迟到
 该短函数返回或主动 yield，不能据此开放无界通用内核线程。
 

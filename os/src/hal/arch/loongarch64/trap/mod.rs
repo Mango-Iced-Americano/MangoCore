@@ -41,6 +41,21 @@ extern "C" {
     pub fn __call_sigreturn();
     pub fn strampoline();
     pub fn __kern_trap();
+    fn __mango_cpu_idle_interrupt_start();
+    fn __mango_cpu_idle_interrupt_exit();
+}
+
+/// Interrupts inside the architecture idle region must resume after IDLE.
+///
+/// The region contains exactly the CRMD.IE setup, `csrxchg`, and `idle 0`.
+/// Redirecting every PC in that half-open interval closes the classic race in
+/// which the handler consumes the only wake event and then returns to IDLE.
+fn redirect_idle_interrupt_return(gr: &mut GeneralRegs) {
+    let start = __mango_cpu_idle_interrupt_start as *const () as usize;
+    let exit = __mango_cpu_idle_interrupt_exit as *const () as usize;
+    if gr.pc >= start && gr.pc < exit {
+        gr.pc = exit;
+    }
 }
 
 #[allow(unused)]
@@ -593,12 +608,14 @@ pub extern "C" fn trap_from_kernel(gr: &mut GeneralRegs) {
         Trap::Interrupt(Interrupt::IPI) => {
             // IPI fast path 必须早于 BADV/console 诊断：中断不会更新 BADV，
             // 陈旧地址可能误触发栈溢出打印。
+            redirect_idle_interrupt_return(gr);
             handle_ipi_interrupt();
             return;
         }
         Trap::Interrupt(Interrupt::Timer) => {
             // timer fast path 同样必须早于 BADV 和普通异常诊断，并且只发布
             // deferred 状态；任意内核位置都不会在这里 context switch。
+            redirect_idle_interrupt_return(gr);
             handle_timer_interrupt();
             return;
         }

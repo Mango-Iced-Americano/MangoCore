@@ -23,9 +23,26 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 const BACKGROUND_NET_POLL_INTERVAL: usize = 64;
-const IDLE_NET_POLL_INTERVAL: usize = 64;
 /// idle 起点的空值；正常的单调微秒时间不可能达到该值。
 const IDLE_TIME_INACTIVE: u64 = u64::MAX;
+
+/// CPU0 周期 housekeeping 的可合并发布位。
+///
+/// timer 工作可能在任务安全点消费本地调度 tick，随后才切回 idle 栈。单独保存
+/// 这个事件，避免 idle 调度器再次检查 timer 时因为 pending 已清空而漏做维护。
+static BOOT_HOUSEKEEPING_PENDING: AtomicBool = AtomicBool::new(true);
+
+/// 由 CPU0 timer 安全点发布一次周期 housekeeping。
+pub(crate) fn request_boot_housekeeping() {
+    debug_assert_eq!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+    BOOT_HOUSEKEEPING_PENDING.store(true, Ordering::Release);
+}
+
+/// 只由 CPU0 idle 栈消费可合并的周期 housekeeping 请求。
+fn take_boot_housekeeping() -> bool {
+    debug_assert_eq!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+    BOOT_HOUSEKEEPING_PENDING.swap(false, Ordering::Acquire)
+}
 
 #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
 static BOARD_FIRST_TASK_SWITCH: core::sync::atomic::AtomicBool =
@@ -407,6 +424,119 @@ fn drain_local_zombies(cpu: usize, limit: usize) -> usize {
     drained
 }
 
+/// 执行一轮由 CPU0 本地 10ms scheduler tick 驱动的全局维护。
+///
+/// 该函数只在 idle 栈、IRQ-off 且未持有调度锁时调用。调度 tick 使用可合并
+/// 发布位，因此长临界区之后最多补做一轮，不按遗漏 tick 数追赶形成维护风暴。
+fn run_boot_housekeeping(cpu: usize, schedule_tick: &mut usize, sched_profile: bool) {
+    *schedule_tick = schedule_tick.wrapping_add(1);
+
+    // 每个周期读取一个 UART 字符。RV64 的 SBI ecall 最多按 100Hz 执行，
+    // 不再随 context switch 或空队列 busy loop 放大。
+    let stage_t0 = sched_profile_start(sched_profile);
+    let ch = crate::hal::console_getchar() as u8;
+    if ch != 0xFF {
+        if crate::trace::check_magic_key(ch, "schedule") {
+            // check_magic_key -> dump_from -> shutdown, never returns.
+        } else {
+            crate::trace::stash_char(ch);
+            crate::fs::dev::tty::Teletype::receive_stashed();
+        }
+    }
+    sched_record_stage(
+        sched_profile,
+        &SCHED_STAGE_CONSOLE_CALLS,
+        &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
+        &SCHED_STAGE_CONSOLE_CYCLES_MAX,
+        stage_t0,
+    );
+
+    // legacy timeout queue 尚未完全由精确 timer 取代；固定在 CPU0 tick 扫描，
+    // 保持早期网络等待与旧 wait-IO fallback 的有界唤醒延迟。
+    let stage_t0 = sched_profile_start(sched_profile);
+    do_wake_expired();
+    sched_record_stage(
+        sched_profile,
+        &SCHED_STAGE_WAKE_EXPIRED_CALLS,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL,
+        &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
+        stage_t0,
+    );
+
+    // DeviceStack try_lock 失败只在下一个 scheduler tick 重新提交，避免 poll
+    // worker 立即重试并饿死真正的锁持有者。
+    NET_INTERFACE.run_deferred_poll_retry();
+    if *schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
+        let stage_t0 = sched_profile_start(sched_profile);
+        NET_INTERFACE.request_poll();
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_NET_POLL_CALLS,
+            &SCHED_STAGE_NET_POLL_CYCLES_TOTAL,
+            &SCHED_STAGE_NET_POLL_CYCLES_MAX,
+            stage_t0,
+        );
+    }
+
+    let rec_t0 = sched_profile_start(sched_profile);
+    crate::fs::reclaim::maybe_reclaim_fs_caches();
+    sched_record_stage(
+        sched_profile,
+        &SCHED_STAGE_RECLAIM_CALLS,
+        &SCHED_STAGE_RECLAIM_CYCLES_TOTAL,
+        &SCHED_STAGE_RECLAIM_CYCLES_MAX,
+        rec_t0,
+    );
+    if sched_profile {
+        let rec_dt = sched_rdcycle().saturating_sub(rec_t0);
+        SCHED_RECLAIM_CALL_CYCLES_TOTAL.fetch_add(rec_dt, SchedOrdering::Relaxed);
+        sched_atomic_max(&SCHED_RECLAIM_CALL_CYCLES_MAX, rec_dt);
+    }
+
+    // on_umount 在 registry 锁外执行；每 1.28s 最多处理一个 Dying backend。
+    if *schedule_tick % 128 == 0 {
+        crate::fs::vfs::drain_one_dying_lifecycle();
+    }
+
+    // 每 64 个真实 scheduler tick 扫描一次本地 runqueue 诊断状态。
+    if *schedule_tick % 64 == 0 {
+        let stage_t0 = sched_profile_start(sched_profile);
+        let (_, ready_z, nnice) = super::run_queue::stats(cpu);
+        crate::task::perf::record_taskq_queue_lens(
+            crate::task::manager::ready_count_fast() as usize,
+            crate::task::manager::interruptible_count_fast() as usize,
+            ready_z,
+            0,
+            nnice,
+        );
+        sched_record_stage(
+            sched_profile,
+            &SCHED_STAGE_TASKQ_STATS_CALLS,
+            &SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL,
+            &SCHED_STAGE_TASKQ_STATS_CYCLES_MAX,
+            stage_t0,
+        );
+    } else {
+        crate::task::perf::record_taskq_queue_lens(
+            crate::task::manager::ready_count_fast() as usize,
+            crate::task::manager::interruptible_count_fast() as usize,
+            0,
+            0,
+            0,
+        );
+    }
+
+    let stage_t0 = sched_profile_start(sched_profile);
+    super::threads::compact_shared_futex();
+    sched_record_stage(
+        sched_profile,
+        &SCHED_STAGE_FUTEX_COMPACT_CALLS,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL,
+        &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX,
+        stage_t0,
+    );
+}
+
 /// 运行调度主循环。
 ///
 /// # Semantics
@@ -430,13 +560,16 @@ pub fn run_tasks() -> ! {
     }
 
     let mut schedule_tick = 0usize;
+    // 与 AP 一样让 idle 调度边界始终从 IRQ-off 开始。每轮只打开一个短窗口
+    // 交付已经 pending 的 hard IRQ，完整维护仍在关中断 idle 栈上执行。
+    let _ = crate::hal::local_irq_save();
     loop {
-        // `schedule()` 保证 idle 总是以 IRQ-off 状态恢复。Phase 2 仍保持这个
-        // legacy scheduler 边界；console/net/FS reclaim 完成 IRQ 并发审计前，
-        // 不能把整个 housekeeping 循环扩大为开中断区间。
-        // schedule() 可能在内核 timer 打断长 syscall 后直接切回 idle。
-        // 在获取 processor 或队列锁之前消费 pending，保证 callback 不跨锁，
-        // 且已经处于 idle 调度上下文时无需再次 context switch。
+        crate::hal::local_irq_restore(true);
+        let irq_was_enabled = crate::hal::local_irq_save();
+        debug_assert!(irq_was_enabled);
+        // RESCHEDULE 只是一条可合并提示；真正的任务可见性由发送端先入队、
+        // 后发 IPI 的 Release 顺序和下面的 runqueue 锁保证。
+        let _ = crate::smp::take_reschedule_request();
         let _ = super::run_deferred_timer_work();
         // TCB 的最后一个 Arc 可能在持有进程锁时消失；KernelStack::drop 只把
         // 缓存溢出的 slot 登记到退休队列。此处尚未获取任何调度/子系统锁，
@@ -447,79 +580,9 @@ pub fn run_tasks() -> ! {
             SCHED_LOOPS.fetch_add(1, SchedOrdering::Relaxed);
         }
         let loop_t0 = sched_profile_start(sched_profile);
-        schedule_tick = schedule_tick.wrapping_add(1);
-        // Read one character from UART per iteration. Handle in priority order:
-        // 1. Magic key (Ctrl+T) → trace dump + shutdown
-        // 2. Other input → stash, then feed the TTY line discipline.  The
-        //    production path owns both task and epoll readiness notification.
-        //
-        #[cfg(target_arch = "riscv64")]
-        let should_poll_console = true;
-        #[cfg(not(target_arch = "riscv64"))]
-        let should_poll_console = true;
-        if should_poll_console {
-            let stage_t0 = sched_profile_start(sched_profile);
-            let ch = crate::hal::console_getchar() as u8;
-            if ch != 0xFF {
-                if crate::trace::check_magic_key(ch, "schedule") {
-                    // check_magic_key → dump_from → shutdown, never returns.
-                } else {
-                    crate::trace::stash_char(ch);
-                    crate::fs::dev::tty::Teletype::receive_stashed();
-                }
-            }
-            sched_record_stage(
-                sched_profile,
-                &SCHED_STAGE_CONSOLE_CALLS,
-                &SCHED_STAGE_CONSOLE_CYCLES_TOTAL,
-                &SCHED_STAGE_CONSOLE_CYCLES_MAX,
-                stage_t0,
-            );
-        }
-        // Keep the legacy timeout sweep until every wait path has been proven
-        // to be driven solely by timer interrupts. Removing it can strand early
-        // boot networking waits before init reaches the test runner.
-        let stage_t0 = sched_profile_start(sched_profile);
-        do_wake_expired();
-        sched_record_stage(
-            sched_profile,
-            &SCHED_STAGE_WAKE_EXPIRED_CALLS,
-            &SCHED_STAGE_WAKE_EXPIRED_CYCLES_TOTAL,
-            &SCHED_STAGE_WAKE_EXPIRED_CYCLES_MAX,
-            stage_t0,
-        );
-        // DeviceStack try_lock 失败只登记一次 retry；由下一次 CPU0 调度循环
-        // 重新提交 generation，避免 worker 紧循环饿死持锁者。
-        NET_INTERFACE.run_deferred_poll_retry();
-        if schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
-            let stage_t0 = sched_profile_start(sched_profile);
-            NET_INTERFACE.request_poll();
-            sched_record_stage(
-                sched_profile,
-                &SCHED_STAGE_NET_POLL_CALLS,
-                &SCHED_STAGE_NET_POLL_CYCLES_TOTAL,
-                &SCHED_STAGE_NET_POLL_CYCLES_MAX,
-                stage_t0,
-            );
-        }
-        let rec_t0 = sched_profile_start(sched_profile);
-        crate::fs::reclaim::maybe_reclaim_fs_caches();
-        sched_record_stage(
-            sched_profile,
-            &SCHED_STAGE_RECLAIM_CALLS,
-            &SCHED_STAGE_RECLAIM_CYCLES_TOTAL,
-            &SCHED_STAGE_RECLAIM_CYCLES_MAX,
-            rec_t0,
-        );
-        if sched_profile {
-            let rec_dt = sched_rdcycle().saturating_sub(rec_t0);
-            SCHED_RECLAIM_CALL_CYCLES_TOTAL.fetch_add(rec_dt, SchedOrdering::Relaxed);
-            sched_atomic_max(&SCHED_RECLAIM_CALL_CYCLES_MAX, rec_dt);
-        }
-        // Drain one Dying MountFS backend lifecycle per tick when available.
-        // Backend teardown (on_umount) runs outside any lock.
-        if schedule_tick % 128 == 0 {
-            crate::fs::vfs::drain_one_dying_lifecycle();
+        let housekeeping_due = take_boot_housekeeping();
+        if housekeeping_due {
+            run_boot_housekeeping(cpu, &mut schedule_tick, sched_profile);
         }
         // 当前任务退出后先进入专用 zombie 队列；切回 idle 后即可安全 drop。
         // 这样避免把不可运行的 TCB 塞进 runqueue 再扫描剔除。
@@ -530,44 +593,6 @@ pub fn run_tasks() -> ! {
             &SCHED_STAGE_ZOMBIE_QUEUE_CALLS,
             &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_TOTAL,
             &SCHED_STAGE_ZOMBIE_QUEUE_CYCLES_MAX,
-            stage_t0,
-        );
-        // 每 64 tick 扫描本地 runqueue 的诊断状态；interruptible registry
-        // 只允许 Blocking/Blocked，不再承担第二套 zombie owner。
-        if schedule_tick % 64 == 0 {
-            let stage_t0 = sched_profile_start(sched_profile);
-            let (_, ready_z, nnice) = super::run_queue::stats(cpu);
-            crate::task::perf::record_taskq_queue_lens(
-                crate::task::manager::ready_count_fast() as usize,
-                crate::task::manager::interruptible_count_fast() as usize,
-                ready_z,
-                0,
-                nnice,
-            );
-            sched_record_stage(
-                sched_profile,
-                &SCHED_STAGE_TASKQ_STATS_CALLS,
-                &SCHED_STAGE_TASKQ_STATS_CYCLES_TOTAL,
-                &SCHED_STAGE_TASKQ_STATS_CYCLES_MAX,
-                stage_t0,
-            );
-        } else {
-            crate::task::perf::record_taskq_queue_lens(
-                crate::task::manager::ready_count_fast() as usize,
-                crate::task::manager::interruptible_count_fast() as usize,
-                0,
-                0,
-                0,
-            );
-        }
-        // 降频清理 PROCESS_SHARED_FUTEX 空 WaitQueue 键
-        let stage_t0 = sched_profile_start(sched_profile);
-        super::threads::compact_shared_futex();
-        sched_record_stage(
-            sched_profile,
-            &SCHED_STAGE_FUTEX_COMPACT_CALLS,
-            &SCHED_STAGE_FUTEX_COMPACT_CYCLES_TOTAL,
-            &SCHED_STAGE_FUTEX_COMPACT_CYCLES_MAX,
             stage_t0,
         );
         let stage_t0 = sched_profile_start(sched_profile);
@@ -581,17 +606,19 @@ pub fn run_tasks() -> ! {
             &SCHED_STAGE_FETCH_TASK_CYCLES_MAX,
             stage_t0,
         );
-        let stage_t0 = sched_profile_start(sched_profile);
-        if let Some((ready_len, interruptible_len)) = super::task_manager_counts() {
-            sched_record_queue_sample(ready_len as u64, interruptible_len as u64);
+        if housekeeping_due {
+            let stage_t0 = sched_profile_start(sched_profile);
+            if let Some((ready_len, interruptible_len)) = super::task_manager_counts() {
+                sched_record_queue_sample(ready_len as u64, interruptible_len as u64);
+            }
+            sched_record_stage(
+                sched_profile,
+                &SCHED_STAGE_QUEUE_SAMPLE_CALLS,
+                &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL,
+                &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX,
+                stage_t0,
+            );
         }
-        sched_record_stage(
-            sched_profile,
-            &SCHED_STAGE_QUEUE_SAMPLE_CALLS,
-            &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_TOTAL,
-            &SCHED_STAGE_QUEUE_SAMPLE_CYCLES_MAX,
-            stage_t0,
-        );
         if sched_profile {
             if next_task.is_some() {
                 SCHED_FETCH.fetch_add(1, SchedOrdering::Relaxed);
@@ -605,12 +632,7 @@ pub fn run_tasks() -> ! {
         } else {
             // 没有就绪的任务 → CPU idle
             let stage_t0 = sched_profile_start(sched_profile);
-            super::perf::record_scheduler_idle(cpu, false);
-            if schedule_tick % IDLE_NET_POLL_INTERVAL == 0 {
-                NET_INTERFACE.request_poll();
-            } else {
-                spin_loop();
-            }
+            super::perf::record_scheduler_idle(cpu, true);
             sched_record_stage(
                 sched_profile,
                 &SCHED_STAGE_IDLE_CALLS,
@@ -619,6 +641,10 @@ pub fn run_tasks() -> ! {
                 stage_t0,
             );
             sched_record_loop_cycles(sched_profile, loop_t0);
+            // 当前仍为 IRQ-off；并发发布者在入队后发送 IPI，本地 one-shot timer
+            // 最迟 10ms 到期。两者都会使架构 wait 返回，下一轮先打开 IRQ
+            // 交付 handler，因此 check -> wait 窗口不会丢失唤醒。
+            crate::hal::cpu_wait_for_interrupt();
         }
     }
 }
@@ -659,7 +685,7 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
             // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
             // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
             super::perf::record_scheduler_idle(cpu, true);
-            crate::hal::secondary_cpu_wait();
+            crate::hal::cpu_wait_for_interrupt();
         }
     }
 }

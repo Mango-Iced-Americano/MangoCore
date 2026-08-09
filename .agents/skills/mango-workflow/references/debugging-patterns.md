@@ -1505,3 +1505,18 @@
   强持有该 owner 或其 filesystem。审计生命周期时必须画出 owner→cache→backend 的完整图，而
   不能只检查全局 registry 为 Weak。
 - **相关文件**: `os/src/fs/ext4_another/{page_cache.rs,lifetime.rs,fs.rs}`
+
+## LoongArch IDLE 的开中断窗口必须与 trap 返回 PC 协同
+
+- **危险模式**：把 RV64 的 IRQ-off `wfi` 协议直接翻译为 IRQ-off `idle 0`。LoongArch
+  只有在 `CRMD.IE=1` 时才接受普通 timer/IPI；若先开 IE、再从 Rust 执行 `idle 0`，中断还
+  可能恰好落在两者之间，handler 消费唯一 wake event 后返回到 `idle 0`，形成丢失唤醒。
+- **固定协议**：把“设置 `CRMD.IE` → `idle 0`”放进有明确 start/exit label 的对齐汇编区域；
+  kernel timer/IPI trap 若发现保存 PC 位于该半开区间，返回前改写为 exit。HAL 返回 Rust
+  调度器前再次关 IE，从而保持 IRQ-off 的队列重查和锁序契约。
+- **测试陷阱**：远程 wake 测试不能只等 target 变成 `Blocked`。sender 可能在 CPU0 清除
+  current 后、真正进入 wait 前入队，任务随后被直接取走，测试虽绿却没有覆盖 WFI/IDLE。
+  应先记录 idle-wait generation/计数，再等待其增长后发送 RESCHEDULE，并验证 helper 只
+  运行一次、IPI 请求被消费且任务 owner/队列计数恢复基线。
+- **相关文件**：`os/src/hal/arch/loongarch64/{mod.rs,trap/trap.S,trap/mod.rs}`、
+  `os/src/task/processor.rs`、`os/src/kernel_tests/smp.rs`

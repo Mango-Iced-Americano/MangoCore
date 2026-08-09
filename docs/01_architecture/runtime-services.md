@@ -135,39 +135,45 @@ let should_poll_console = true;
 
 ## 4. 调度循环维护动作
 
-`task/processor.rs::run_tasks()` 每轮执行的维护顺序：
+`task/processor.rs::run_tasks()` 把 CPU0 的全局维护与空闲循环次数解耦。CPU0
+本地 10ms scheduler tick 发布一个可合并的 `boot_housekeeping_pending`，idle 栈消费
+该事件时执行：
 
 ```
-schedule_tick += 1
-console poll                       [rv64 每 64 tick，其他架构每 tick]
+schedule_tick += 1                 [每个真实 10ms tick 至多一次]
+console poll
 do_wake_expired()
-NET_INTERFACE.run_deferred_poll_retry() [每 tick]
+NET_INTERFACE.run_deferred_poll_retry()
 NET_INTERFACE.request_poll()       [每 64 tick]
 fs::reclaim::maybe_reclaim_fs_caches()
-zombie queue drain
+drain_one_dying_lifecycle()        [每 128 tick]
 task queue stats [每 64 tick]
 threads::compact_shared_futex()
-fetch_task()
-switch or idle
 ```
+
+退休内核栈回收、zombie queue drain、取任务和切换仍在每次任务切回 idle 后立即
+执行，不等待下一个 housekeeping tick。
 
 ### 4.1 网络 poll
 
 | 场景 | 行为 |
 |------|------|
-| 有调度循环进展 | 每 tick 消费 retry 位；每 `BACKGROUND_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()` |
-| 没有 ready task | 每 `IDLE_NET_POLL_INTERVAL = 64` tick 调用 `NET_INTERFACE.request_poll()`，否则 `spin_loop()` |
+| scheduler tick 到期 | 消费 retry 位；每 `BACKGROUND_NET_POLL_INTERVAL = 64` 个真实 tick 调用 `NET_INTERFACE.request_poll()` |
+| 没有 ready task | IRQ-off 重查队列后调用 `cpu_wait_for_interrupt()`；网络维护不再由 busy loop 次数驱动 |
 
 housekeeping 只异步 request；真正的 smoltcp 推进固定由 CPU0 poll worker 执行。
 忙栈 retry 延后一整个 scheduler tick，避免 worker 在内核栈上空转。
 
 ### 4.2 timeout 唤醒
 
-`do_wake_expired()` 在每轮循环执行。源码注释说明这是 legacy timeout sweep，保留到所有等待路径都证明完全由 timer interrupt 驱动为止；移除它可能让早期启动网络等待滞留。
+`do_wake_expired()` 在每个 CPU0 housekeeping tick 执行。源码注释说明这是 legacy
+timeout sweep，保留到所有等待路径都证明完全由 timer interrupt 驱动为止；移除它可能让
+早期启动网络等待滞留。
 
 ### 4.3 FS reclaim
 
-每轮调用 `fs::reclaim::maybe_reclaim_fs_caches()`。该入口负责按文件系统缓存策略尝试回收 page cache 等资源。
+每个 CPU0 housekeeping tick 调用 `fs::reclaim::maybe_reclaim_fs_caches()`。该入口负责按
+文件系统缓存策略尝试回收 page cache 等资源。
 
 ### 4.4 zombie drain
 
@@ -179,7 +185,8 @@ Per-CPU `local_zombies` 一种容器 owner。
 
 ### 4.5 shared futex compact
 
-每轮调用 `threads::compact_shared_futex()`，降低 `PROCESS_SHARED_FUTEX` 中空 futex queue key 长期残留的概率。
+每个 CPU0 housekeeping tick 调用 `threads::compact_shared_futex()`，降低
+`PROCESS_SHARED_FUTEX` 中空 futex queue key 长期残留的概率。
 
 ## 5. Per-CPU 当前任务状态
 

@@ -19,7 +19,7 @@ pub use loongarch64::{
     local_irq_save,
     machine_init, machine_shutdown, panic_console_write, prepare_secondary_cpu_stop, reboot,
     reclaim_retired_kernel_stacks, remote_user_tlb_invalidate_range, secondary_cpu_stop,
-    secondary_cpu_wait, send_ipi, start_secondary_cpu, syscall_id,
+    cpu_wait_for_interrupt, send_ipi, start_secondary_cpu, syscall_id,
     time::{
         get_clock_freq, get_time, program_timer_delta, quiesce_local_timer_interrupt, TICKS_PER_SEC,
     },
@@ -53,7 +53,7 @@ pub use riscv::{
         console_write_bytes, irq_enabled, local_irq_restore, local_irq_save, machine_shutdown,
         init_runtime_console_rx, panic_console_write, set_timer, shutdown,
     },
-    secondary_cpu_stop, secondary_cpu_wait, send_ipi, start_secondary_cpu,
+    cpu_wait_for_interrupt, secondary_cpu_stop, send_ipi, start_secondary_cpu,
     sv39::tlb_invalidate,
     switch::__switch,
     syscall_id,

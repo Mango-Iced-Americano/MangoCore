@@ -189,8 +189,8 @@ pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
 /// 在全局 SIE 关闭时等待一个局部已使能的中断。
 ///
 /// RISC-V 规定 WFI 必须因局部 enabled+pending 的中断恢复，不受全局 SIE
-/// 影响；调用方在返回后恢复 SIE，让 pending source 真正进入 trap。
-pub fn secondary_cpu_wait() {
+/// 影响；CPU0 与 AP 调度器都在返回后恢复 SIE，让 pending source 真正进入 trap。
+pub fn cpu_wait_for_interrupt() {
     // Safety: WFI 只暂停当前 hart，不访问内存或改变中断 mask。
     unsafe { riscv::asm::wfi() };
 }

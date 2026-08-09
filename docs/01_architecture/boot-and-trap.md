@@ -412,6 +412,13 @@ AP 若插入新的最早全局 timer，会先在队列锁内发布 deadline，�
 循环也能直接观察该标志；IPI handler 不读取 timer queue。安全点抢占模型仍允许长 syscall
 把 callback 推迟到返回边界，但请求不会丢失，CPU0 的周期 tick 也提供有界兜底重查。
 
+CPU0 与 AP 共用 `cpu_wait_for_interrupt()`，在 IRQ-off 的队列重查之后进入架构等待。
+RV64 直接执行 `wfi`；LoongArch `idle 0` 要求 `CRMD.IE=1`，HAL 因而使用一段对齐的
+“开 IE→idle”汇编区域。kernel timer/IPI 若打断该区域，trap 分发在返回前把保存 PC
+重定向到区域出口，避免处理完唯一 wake event 后再次执行 `idle 0`；HAL 返回调度器前
+重新关闭 IE。远程唤醒必须先发布 runqueue，再发送 RESCHEDULE IPI，才能与这一
+check→wait 协议共同保证无丢失唤醒。
+
 该边界消除了 CPU0 接收内核 IPI 的 timer 前置风险。普通长 syscall
 现在可在任务 yield/block 之前、之后响应 timer/IPI；B23—B27 的 TLB shootdown
 reason/ack 已复用这个窗口，B33 又接入 RESCHEDULE，不需要为“长 syscall 能否被

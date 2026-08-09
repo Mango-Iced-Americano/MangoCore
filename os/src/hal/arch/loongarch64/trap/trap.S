@@ -261,3 +261,21 @@ __kern_trap:
     
     csrrd $sp, CSR_SAVE
     ertn
+
+# LoongArch IDLE only accepts interrupts with CRMD.IE enabled.  Keep the
+# enable-and-idle sequence in one aligned assembly region so the kernel trap
+# path can redirect an interrupt that lands before IDLE to the common exit.
+# Without that redirect ERTN could resume at IDLE after the handler consumed
+# the only wake event, sleeping despite a newly runnable task.
+    .section .text.cpu_idle, "ax"
+    .align 5
+    .globl __mango_cpu_wait_for_interrupt
+    .globl __mango_cpu_idle_interrupt_start
+    .globl __mango_cpu_idle_interrupt_exit
+__mango_cpu_wait_for_interrupt:
+__mango_cpu_idle_interrupt_start:
+    ori $t0, $zero, 4          # CSR_CRMD_IE
+    csrxchg $t0, $t0, 0       # LOONGARCH_CSR_CRMD
+    idle 0
+__mango_cpu_idle_interrupt_exit:
+    jirl $zero, $ra, 0

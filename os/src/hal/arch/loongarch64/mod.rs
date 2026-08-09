@@ -495,13 +495,22 @@ pub(super) fn clear_local_ipi() {
 #[cfg(feature = "boot_la_uboot_dmw")]
 pub(super) fn clear_local_ipi() {}
 
-/// 在全局 IE 关闭时等待一个中断唤醒。
+extern "C" {
+    fn __mango_cpu_wait_for_interrupt();
+}
+
+/// 等待一个中断，并在返回前恢复调度器要求的 IRQ-off 状态。
 ///
-/// LoongArch IDLE 被中断唤醒后从下一条指令继续；调用方随后恢复 IE，使已
-/// pending 的 IPI 进入统一内核 trap，再回到 idle 循环处理 deferred work。
-pub fn secondary_cpu_wait() {
-    // Safety: `idle 0` 只暂停当前 CPU，不访问内存或修改 CSR mask。
-    unsafe { core::arch::asm!("idle 0") };
+/// LoongArch `idle 0` 必须在 CRMD.IE 开启时执行。汇编入口把“开启 IE → IDLE”
+/// 固定为可由 kernel trap 识别的 interrupt region；若中断落在该窗口内，trap
+/// 返回路径会直接跳到 region exit，避免处理完唯一事件后再次睡眠。
+pub fn cpu_wait_for_interrupt() {
+    debug_assert!(!sbi::irq_enabled());
+    // Safety: the assembly routine only changes this CPU's CRMD.IE, executes
+    // IDLE, and returns through a fixed label after an interrupt.
+    unsafe { __mango_cpu_wait_for_interrupt() };
+    let was_enabled = sbi::local_irq_save();
+    debug_assert!(was_enabled, "LoongArch idle returned with IRQ disabled");
 }
 
 /// 为终态 stop 关闭 CPU 内部和 IOCSR 控制器两层 IPI 使能。

@@ -33,7 +33,7 @@ pub use arch::user_tlb_invalidate_range;
 pub use arch::LsxRegs;
 pub use arch::{
     boot_cpu_park, bootstrap_init, cpu_local_ptr, enter_secondary_idle, install_cpu_local,
-    machine_init, prepare_secondary_cpu_stop, secondary_cpu_stop, secondary_cpu_wait, send_ipi,
+    cpu_wait_for_interrupt, machine_init, prepare_secondary_cpu_stop, secondary_cpu_stop, send_ipi,
     start_secondary_cpu, user_hwcap,
 };
 pub use arch::{

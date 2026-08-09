@@ -434,6 +434,9 @@ const IRQ_PROBE_DISABLED: usize = 1;
 const IRQ_PROBE_ENABLED: usize = 2;
 static IDLE_TO_TASK_IRQ_PROBE: AtomicUsize = AtomicUsize::new(IRQ_PROBE_NOT_RUN);
 static SCHED_STATE_HELPER_RUNS: AtomicUsize = AtomicUsize::new(0);
+static CPU0_IDLE_WAKE_ERRORS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_stats")]
+static CPU0_IDLE_WAKE_WAIT_BASELINE: AtomicUsize = AtomicUsize::new(0);
 static AP_TASK_ERRORS: AtomicUsize = AtomicUsize::new(0);
 static AP_TASK_RUNS: [AtomicUsize; crate::smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
@@ -518,6 +521,10 @@ static AP_BARRIER_RESULT: [AtomicUsize; crate::smp::MAX_CPUS] =
 lazy_static! {
     static ref SCHED_STATE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
+    static ref CPU0_IDLE_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
+        Mutex::new(None);
+    static ref CPU0_IDLE_WAKE_TARGET: Mutex<Option<Weak<crate::task::TaskControlBlock>>> =
+        Mutex::new(None);
     static ref AP_BLOCKED_WAKE_COMPLETION: Mutex<Option<Arc<crate::task::Completion>>> =
         Mutex::new(None);
     /// B41 用未完成事件把 sibling 固定在真实 killable wait 路径。
@@ -567,6 +574,14 @@ pub fn tests() -> Vec<KernelTest> {
         KernelTest::new(
             "smp::kernel_timer_irq_is_deferred",
             kernel_timer_irq_is_deferred,
+        ),
+        KernelTest::new(
+            "smp::cpu0_idle_wakes_on_local_timer",
+            cpu0_idle_wakes_on_local_timer,
+        ),
+        KernelTest::new(
+            "smp::cpu0_idle_wakes_on_remote_reschedule",
+            cpu0_idle_wakes_on_remote_reschedule,
         ),
         KernelTest::new(
             "smp::user_timer_preempts_on_secondary_cpu",
@@ -1983,6 +1998,156 @@ fn kernel_timer_irq_is_deferred() -> Result<(), &'static str> {
     let result = deferred_timer_round(tid).and_then(|_| deferred_timer_round(tid));
     crate::hal::local_irq_restore(original_irq_state);
     result
+}
+
+/// CPU0 没有其它本地 runnable 时，绝对超时只能依靠本地 one-shot timer
+/// 使架构 wait 返回，再由 idle 栈消费 deferred timer 并唤醒 runner。
+fn cpu0_idle_wakes_on_local_timer() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("CPU0 idle timer test ran on an AP");
+    }
+
+    let stats_was_on = crate::task::perf::STATS_ON.swap(true, Ordering::AcqRel);
+    let profile_before = crate::task::perf::STATS_PROFILE.swap(
+        crate::task::perf::STATS_PROFILE_CORE,
+        Ordering::AcqRel,
+    );
+    #[cfg(feature = "perf_stats")]
+    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
+        [crate::smp::BOOT_CPU_ID]
+        .load(Ordering::Relaxed);
+    let timer_before = crate::smp::timer_irq_count(crate::smp::BOOT_CPU_ID);
+    let wait_queue = Mutex::new(crate::task::WaitQueue::new());
+    let deadline = crate::timer::TimeSpec::now() + crate::timer::TimeSpec::from_ms(30);
+    let wait_result = crate::task::WaitQueue::wait_event_timeout(&wait_queue, || None, deadline);
+    #[cfg(feature = "perf_stats")]
+    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
+        [crate::smp::BOOT_CPU_ID]
+        .load(Ordering::Relaxed);
+    crate::task::perf::STATS_PROFILE.store(profile_before, Ordering::Release);
+    crate::task::perf::STATS_ON.store(stats_was_on, Ordering::Release);
+
+    if !matches!(wait_result, crate::task::WaitResult::TimedOut) {
+        return Err("CPU0 local timer wait did not time out");
+    }
+    if crate::smp::timer_irq_count(crate::smp::BOOT_CPU_ID) <= timer_before {
+        return Err("CPU0 local timer did not interrupt idle wait");
+    }
+    #[cfg(feature = "perf_stats")]
+    if waits_after <= waits_before {
+        return Err("CPU0 local timer wait did not enter architecture idle");
+    }
+    Ok(())
+}
+
+/// CPU1 在确认 runner 已完全离开 CPU0 current 后完成事件。完成路径通过
+/// `Blocked -> Queued(CPU0)` 发布任务，再发送生产 RESCHEDULE doorbell。
+fn wake_cpu0_idle_from_ap() {
+    let target = CPU0_IDLE_WAKE_TARGET.lock().as_ref().cloned();
+    let completion = CPU0_IDLE_WAKE_COMPLETION.lock().as_ref().cloned();
+    let (Some(target), Some(completion)) = (target, completion) else {
+        CPU0_IDLE_WAKE_ERRORS.fetch_or(1, Ordering::Release);
+        return;
+    };
+
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    loop {
+        let Some(task) = target.upgrade() else {
+            CPU0_IDLE_WAKE_ERRORS.fetch_or(2, Ordering::Release);
+            break;
+        };
+        #[cfg(feature = "perf_stats")]
+        let idle_wait_entered = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
+            [crate::smp::BOOT_CPU_ID]
+            .load(Ordering::Acquire)
+            > CPU0_IDLE_WAKE_WAIT_BASELINE.load(Ordering::Acquire);
+        #[cfg(not(feature = "perf_stats"))]
+        let idle_wait_entered = true;
+        if task.task_status() == crate::task::TaskStatus::Blocked
+            && !crate::task::processor::cpu_has_current(crate::smp::BOOT_CPU_ID)
+            && idle_wait_entered
+        {
+            break;
+        }
+        if crate::hal::get_time() >= deadline {
+            CPU0_IDLE_WAKE_ERRORS.fetch_or(4, Ordering::Release);
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !completion.complete() {
+        CPU0_IDLE_WAKE_ERRORS.fetch_or(8, Ordering::Release);
+    }
+}
+
+/// 覆盖 CPU0 的完整 check -> WFI -> IPI -> fetch 链路，并确认 profile 计数
+/// 观察到真实 wait，而不是在关中断 idle 栈上继续 busy loop。
+fn cpu0_idle_wakes_on_remote_reschedule() -> Result<(), &'static str> {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return Err("CPU0 remote idle wake test ran on an AP");
+    }
+    if crate::smp::configured_cpu_count() == 1 {
+        return Ok(());
+    }
+    if CPU0_IDLE_WAKE_COMPLETION.lock().is_some()
+        || CPU0_IDLE_WAKE_TARGET.lock().is_some()
+    {
+        return Err("stale CPU0 idle wake state remained before test");
+    }
+
+    CPU0_IDLE_WAKE_ERRORS.store(0, Ordering::Release);
+    let runner = crate::task::current_task().ok_or("CPU0 idle wake runner is missing")?;
+    let completion = Arc::new(crate::task::Completion::new());
+    *CPU0_IDLE_WAKE_TARGET.lock() = Some(Arc::downgrade(&runner));
+    *CPU0_IDLE_WAKE_COMPLETION.lock() = Some(completion.clone());
+
+    let stats_was_on = crate::task::perf::STATS_ON.swap(true, Ordering::AcqRel);
+    let profile_before = crate::task::perf::STATS_PROFILE.swap(
+        crate::task::perf::STATS_PROFILE_CORE,
+        Ordering::AcqRel,
+    );
+    #[cfg(feature = "perf_stats")]
+    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
+        [crate::smp::BOOT_CPU_ID]
+        .load(Ordering::Relaxed);
+    #[cfg(feature = "perf_stats")]
+    CPU0_IDLE_WAKE_WAIT_BASELINE.store(waits_before, Ordering::Release);
+    let reschedules_before = crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID);
+    let helper = crate::task::spawn_ktest_task_on(1, wake_cpu0_idle_from_ap);
+    let wait_result = completion.wait_killable();
+    #[cfg(feature = "perf_stats")]
+    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
+        [crate::smp::BOOT_CPU_ID]
+        .load(Ordering::Relaxed);
+    crate::task::perf::STATS_PROFILE.store(profile_before, Ordering::Release);
+    crate::task::perf::STATS_ON.store(stats_was_on, Ordering::Release);
+    *CPU0_IDLE_WAKE_TARGET.lock() = None;
+    *CPU0_IDLE_WAKE_COMPLETION.lock() = None;
+
+    if !matches!(wait_result, crate::task::WaitResult::Ready(_)) {
+        return Err("CPU0 remote completion wait was interrupted");
+    }
+    if CPU0_IDLE_WAKE_ERRORS.load(Ordering::Acquire) != 0 {
+        return Err("CPU1 did not observe and wake a stable CPU0 idle runner");
+    }
+    if crate::smp::reschedule_count(crate::smp::BOOT_CPU_ID) <= reschedules_before {
+        return Err("CPU0 did not consume the remote idle RESCHEDULE");
+    }
+    #[cfg(feature = "perf_stats")]
+    if waits_after <= waits_before {
+        return Err("CPU0 remote wake did not pass through architecture idle");
+    }
+
+    let helper_deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+    while helper.task_status() != crate::task::TaskStatus::Zombie {
+        if crate::hal::get_time() >= helper_deadline {
+            return Err("CPU0 idle wake helper did not exit");
+        }
+        core::hint::spin_loop();
+    }
+    Ok(())
 }
 
 /// 在“入口关中断、出口仍关中断”的约束下完成一轮真实 timer IRQ 测试。

@@ -1759,7 +1759,7 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
             crate::task::run_tasks();
         }
         if !service_secondary_ipi_work() {
-            crate::hal::secondary_cpu_wait();
+            crate::hal::cpu_wait_for_interrupt();
         }
         crate::hal::local_irq_restore(irq_was_enabled);
     }

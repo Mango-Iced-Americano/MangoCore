@@ -2224,6 +2224,9 @@ pub fn run_deferred_timer_work() -> bool {
     // 由固定在 CPU0 的 worker 在任务上下文执行。
     let need_resched = crate::smp::advance_local_sched_tick(now_ns, SCHED_TICK_NS);
     if need_resched && is_boot_cpu {
+        // scheduler tick 可能在任务安全点被消费；把周期维护请求单独交给随后
+        // 恢复的 CPU0 idle 栈，避免 pending timer 清零后漏掉 housekeeping。
+        crate::task::processor::request_boot_housekeeping();
         crate::net::config::NET_INTERFACE.try_poll_irq();
         // hard IRQ 只设置 deferred_wake；到这个 task/idle 安全点才允许获取
         // WaitQueue 并唤醒 worker。
