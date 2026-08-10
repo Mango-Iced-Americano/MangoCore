@@ -8,7 +8,9 @@
 //! 本模块只通过 `Vma`/`UserMapper` 修改 PTE；`UserMapper` 同步记录到
 //! `MmuGather`，由外层地址空间在解锁后执行 TLB 失效。不得在此绕过该边界。
 
-use super::filemap::{filemap_private_fault, filemap_read_fault, filemap_shared_write_fault};
+use super::filemap::{
+    elf_lazy_fault, filemap_private_fault, filemap_read_fault, filemap_shared_write_fault,
+};
 use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
@@ -54,6 +56,8 @@ pub(super) enum FaultAction {
     FileBackedWrite,
     /// 文件共享映射首次写，取得可写 page cache 页并恢复 W。
     FileBackedSharedWrite,
+    /// ELF PT_LOAD page assembled into a private frame on first access.
+    ElfLazy,
     #[cfg(feature = "oom_handler")]
     /// 压缩匿名页再次访问，需要从 zram 解压。
     Decompress,
@@ -109,7 +113,8 @@ impl PageFaultHandler {
             FaultAction::FileBackedWrite => 3,
             FaultAction::SharedWrite => 4,
             FaultAction::Cow => 5,
-            _ => 6,
+            FaultAction::ElfLazy => 6,
+            _ => 7,
         };
         let _pf_start = crate::task::perf::perf_memory_io_time_now();
         let result = match action {
@@ -120,9 +125,12 @@ impl PageFaultHandler {
             // 文件映射页首次读取/执行：直接映射文件页缓存。
             FaultAction::FileBackedRead => return filemap_read_fault(area, mapper, ctx),
             // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
-            FaultAction::FileBackedSharedWrite => return filemap_shared_write_fault(area, mapper, ctx),
+            FaultAction::FileBackedSharedWrite => {
+                return filemap_shared_write_fault(area, mapper, ctx)
+            }
             // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => return filemap_private_fault(area, mapper, ctx),
+            FaultAction::ElfLazy => return elf_lazy_fault(area, mapper, ctx),
             // 压缩匿名页再次访问：解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
@@ -172,6 +180,14 @@ impl PageFaultHandler {
         }
 
         match area.vm_kind() {
+            VmAreaKind::ElfLazy => match area.vm_page_state(ctx.vpn)? {
+                VmPageState::InMemory => Ok(FaultAction::ResidentWithoutPte),
+                VmPageState::Unallocated => Ok(FaultAction::ElfLazy),
+                #[cfg(feature = "oom_handler")]
+                VmPageState::Compressed => Ok(FaultAction::Decompress),
+                #[cfg(feature = "oom_handler")]
+                VmPageState::SwappedOut => Ok(FaultAction::SwapIn),
+            },
             VmAreaKind::FileBacked => Ok(match ctx.access {
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
                     FaultAction::FileBackedSharedWrite

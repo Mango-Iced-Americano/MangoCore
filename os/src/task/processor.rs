@@ -986,6 +986,16 @@ pub fn current_syscall_name() -> &'static str {
     }
 }
 
+/// 返回当前 CPU 正在处理的 syscall ID，仅供低频诊断记账。
+#[inline(always)]
+pub(crate) fn current_syscall_id() -> Option<usize> {
+    let task_state = crate::smp::try_local_task_state()?;
+    match task_state.current_syscall_id.load(Ordering::Relaxed) {
+        0 => None,
+        id => Some(id - 1),
+    }
+}
+
 /// 设置当前系统调用 ID。
 ///
 /// # Semantics

@@ -171,9 +171,13 @@ fn enable_buildstorm_stats(profile_name: &str, profile_value: &[u8]) -> bool {
     enabled
 }
 
-fn dump_buildstorm_stats(sample: usize, all: bool) -> bool {
-    println!("BUILDSTORM_STATS_BEGIN sample={}", sample);
-    let paths: &[&str] = if all {
+fn dump_buildstorm_stats(sample: usize, dump_heavy: bool) -> bool {
+    println!(
+        "BUILDSTORM_STATS_BEGIN sample={} heavy={}",
+        sample,
+        usize::from(dump_heavy)
+    );
+    let paths: &[&str] = if dump_heavy {
         &[
             "/sys/kernel/stats/taskq\0",
             "/sys/kernel/stats/pagecache\0",
@@ -196,7 +200,7 @@ fn dump_buildstorm_stats(sample: usize, all: bool) -> bool {
             available = false;
             continue;
         }
-        let mut buf = [0u8; 16384];
+        let mut buf = [0u8; 32768];
         let size = read(fd as usize, &mut buf);
         let _ = close(fd as usize);
         if size > 0 {
@@ -211,18 +215,17 @@ fn start_buildstorm_stats_collector(all: bool) {
     let child = fork();
     if child == 0 {
         let mut sample = 0;
-        let (period_ms, dump_all) = if all {
-            (30_000, true)
-        } else {
-            (5_000, false)
-        };
         loop {
-            if !dump_buildstorm_stats(sample, dump_all) {
+            // Task identity and scheduler state must be sampled faster than
+            // Cargo's short parallel waves. Heavy MM/FS/block counters remain
+            // at 30 seconds to keep serial-console perturbation bounded.
+            let dump_heavy = all && sample % 6 == 0;
+            if !dump_buildstorm_stats(sample, dump_heavy) {
                 println!("[init] BuildStorm stats unavailable; collector stopped");
                 exit(0);
             }
             sample = sample.wrapping_add(1);
-            sleep_blocking(period_ms);
+            sleep_blocking(5_000);
         }
     }
     if child < 0 {

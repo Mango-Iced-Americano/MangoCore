@@ -89,6 +89,9 @@ impl BlockDevice for VirtIOBlock {
                 .ok_or(BlockDeviceError::OutOfBounds)?;
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_read();
+            #[cfg(feature = "perf_stats")]
+            let _blocked_reason = crate::task::current_task()
+                .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_read_chunk(chunk_len);
 
@@ -132,6 +135,9 @@ impl BlockDevice for VirtIOBlock {
                 .ok_or(BlockDeviceError::OutOfBounds)?;
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_write(chunk_len);
+            #[cfg(feature = "perf_stats")]
+            let _blocked_reason = crate::task::current_task()
+                .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_write_chunk(chunk_len);
 

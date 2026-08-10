@@ -26,6 +26,8 @@ use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::mm::{frame_alloc, FrameTracker};
 use crate::mm::{FileVmaRmap, FileVmaSnapshot, RetryWait};
 use crate::task::perf;
+#[cfg(feature = "perf_stats")]
+use crate::task::BlockedReason;
 use crate::task::{WaitQueue, WaitResult};
 
 // ── Global dirty page accounting ──────────────────────────────────────
@@ -276,11 +278,7 @@ pub trait PageCacheBackend: Send + Sync {
     ///
     /// 默认实现按页回退，后端可以覆盖此方法把整段读取直接交给文件系统
     /// 或块设备。`buffer` 长度必须是 PAGE_SIZE 的整数倍。
-    fn read_contiguous(
-        &self,
-        start_index: usize,
-        buffer: &mut [u8],
-    ) -> Result<usize, SyscallErr> {
+    fn read_contiguous(&self, start_index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
         if buffer.len() % PAGE_SIZE != 0 {
             return Err(SyscallErr::ENOBUFS);
         }
@@ -758,9 +756,8 @@ impl From<SyscallErr> for WriteAttemptError {
 
 impl RetryWait for PageCacheFaultWait {
     fn wait(&self) {
-        let wait_start = crate::task::perf::perf_time_now_for(
-            crate::task::perf::STATS_PROFILE_MEMORY_IO,
-        );
+        let wait_start =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         // 此处由 trap/uaccess 外层保证已经释放 VM 锁。I/O 仍可在 op_gate
         // 读侧完成，但任何睡眠都必须发生在释放 op_gate 之后。
         loop {
@@ -879,6 +876,9 @@ impl PageCache {
             return Err(SyscallErr::EAGAIN);
         }
         self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "perf_stats")]
+        let _blocked_reason = crate::task::current_task()
+            .map(|task| task.blocked_reason_scope(BlockedReason::PageCache));
         let result = match WaitQueue::wait_event(&self.state_waiters, || {
             (self.state_wait_generation.load(Ordering::Acquire) != observed).then_some(0)
         }) {
@@ -895,6 +895,9 @@ impl PageCache {
             return Err(SyscallErr::EAGAIN);
         }
         self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "perf_stats")]
+        let _blocked_reason = crate::task::current_task()
+            .map(|task| task.blocked_reason_scope(BlockedReason::PageCache));
         let result = match WaitQueue::wait_event_interruptible(&self.state_waiters, || {
             entry.write_lease_ready().then_some(0)
         }) {
@@ -1554,6 +1557,56 @@ impl PageCache {
         }
     }
 
+    /// Copy a byte range from an already-resident page without starting I/O.
+    ///
+    /// ELF demand paging uses this while the address-space write lock is held.
+    /// Missing or transient pages therefore return a Retry token; its `wait()`
+    /// performs the backend read after the VM lock has been released.
+    pub(crate) fn try_copy_resident_range(
+        self: &Arc<Self>,
+        page_index: usize,
+        page_offset: usize,
+        dst: &mut [u8],
+    ) -> Result<(), PageCacheFault> {
+        let range_end = page_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| PageCacheFault::Error(SyscallErr::EINVAL))?;
+        if range_end > PAGE_SIZE {
+            return Err(PageCacheFault::Error(SyscallErr::EINVAL));
+        }
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.with_bytes(|src| dst.copy_from_slice(&src[page_offset..range_end]));
+                Ok(())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
+        }
+    }
+
     /// 获取页帧用于文件映射写（如 `MAP_SHARED` file-backed page fault）。
     ///
     /// # Semantics
@@ -1785,10 +1838,8 @@ impl PageCache {
                     .map_err(|_| SyscallErr::ENOMEM)?;
                 staging.resize(chunk_pages * PAGE_SIZE, 0);
                 if readable_pages != 0 {
-                    backend.read_contiguous(
-                        first_page,
-                        &mut staging[..readable_pages * PAGE_SIZE],
-                    )?;
+                    backend
+                        .read_contiguous(first_page, &mut staging[..readable_pages * PAGE_SIZE])?;
                 }
                 for index in 0..chunk_pages {
                     let entry = &new_entries[offset + index].1;
@@ -3664,8 +3715,9 @@ impl PageCacheBackend for FatPageCacheBackend {
                     let (block_id, block_off_bytes) = self.sector_to_parent(sec_id);
                     let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
                     self.fs.block_device.read_block(block_id, &mut block);
-                    buf[start..start + self.block_size]
-                        .copy_from_slice(&block[block_off_bytes..block_off_bytes + self.block_size]);
+                    buf[start..start + self.block_size].copy_from_slice(
+                        &block[block_off_bytes..block_off_bytes + self.block_size],
+                    );
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);

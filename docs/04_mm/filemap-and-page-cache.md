@@ -3,7 +3,7 @@ title: "文件映射缺页与 PageCache 交互"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-08-10
 tags: [mm, mmap, filemap, page-cache, mmu-gather]
 ---
 
@@ -21,6 +21,7 @@ tags: [mm, mmap, filemap, page-cache, mmu-gather]
 | `os/src/mm/filemap.rs` | `check_within_file()` | 检查 fault 偏移是否在文件大小 round-up 范围内 |
 | `os/src/mm/filemap.rs` | `zero_tail()` | 清零最后一页 EOF 之后的字节 |
 | `os/src/mm/filemap.rs` | `verify_filemap_fault()` | 校验 VMA resident frame 与 PTE 一致 |
+| `os/src/mm/filemap.rs` | `ElfLazyBacking` / `elf_lazy_fault()` | 首次触页时装配私有 ELF PT_LOAD 页 |
 | `os/src/mm/page_fault.rs` | `FaultAction::FileBacked*` | 将缺页分类派发到 filemap |
 | `os/src/fs/` | `PageCache` / inode page cache 接口 | 提供文件页缓存 frame |
 
@@ -42,6 +43,8 @@ do_page_fault()
         │     └── filemap_read_fault()
         ├── FileBackedWrite
         │     └── filemap_private_fault()
+        ├── ElfLazy
+        │     └── elf_lazy_fault()
         └── FileBackedSharedWrite
               └── filemap_shared_write_fault()
 ```
@@ -53,6 +56,10 @@ do_page_fault()
 | 是否文件映射 | `area.vm_kind() == VmAreaKind::FileBacked` |
 | private/shared | `area.vm_mapping()` |
 | fault 类型 | `FaultAccess::Load/Store/Execute` |
+
+ELF PT_LOAD 不等价于普通 `MAP_PRIVATE` 文件映射：同一虚拟页可以被多个非页对齐或
+重叠的 program header 覆盖，并且 BSS 需要保留零填充。因此 `ElfLazyBacking` 保存
+经验证的 PT_LOAD 列表与 PageCache，而不是把一个 VMA 简化为单一文件偏移。
 
 ## 3. 文件偏移计算
 
@@ -256,3 +263,18 @@ file-backed mmap 的关键是区分“文件页缓存”和“进程私有页”
 | MAP_SHARED 写不回文件 | store fault 是否经过 `frame_for_write()` |
 | mincore 返回 0 但 page cache 已有页 | `file_backed_page_resident()` 的 offset/page_index 计算 |
 | 文件 VMA 分裂后读错位置 | `Vma::into_two()` 是否正确调整 `map_file_offset` |
+
+## 16. ELF PT_LOAD 按需装页
+
+`from_elf_inode()` 只建立按页权限并后的 `ElfLazy` VMA，不为整个可执行映像分配
+目标 frame。首次 fault 的顺序是：
+
+1. 分配清零且尚未安装 PTE 的私有 frame。
+2. 按 program-header 顺序将所有相交 PT_LOAD 文件范围覆盖到该页。
+3. 只访问已 resident 的 PageCache 页；缺页时返回 `RetryWait`，回滚目标 frame。
+4. 外层释放 VM 锁后完成后端 I/O，再重新 fault。
+5. 文件字节覆盖完成后才安装 PTE，避免其它 CPU 观察到半成品页。
+
+最终 resident 页是进程私有 frame，不直接暴露 PageCache frame；因此后续写入不会污染
+可执行文件。后备 `Arc` 在 VMA clone/split/fork 时保留，同时保持主程序和动态解释器
+inode 的 ETXTBSY 生命周期。

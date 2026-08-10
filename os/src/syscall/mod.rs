@@ -311,6 +311,24 @@ use crate::{
 /// Log each unknown syscall id exactly once (first hit) to stop rseq/fsopen spam.
 static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
+/// 没有更精确等待点标注时，按 syscall 给任务阻塞快照归类。
+pub(crate) fn default_blocked_reason(syscall_id: usize) -> crate::task::BlockedReason {
+    use crate::task::BlockedReason;
+
+    match syscall_id {
+        SYSCALL_READ | SYSCALL_READV | SYSCALL_PREAD | SYSCALL_PREADV | SYSCALL_PREADV2 => {
+            BlockedReason::FileRead
+        }
+        SYSCALL_WRITE | SYSCALL_WRITEV | SYSCALL_PWRITE | SYSCALL_PWRITEV | SYSCALL_PWRITEV2 => {
+            BlockedReason::FileWrite
+        }
+        SYSCALL_FUTEX | SYSCALL_FUTEX_WAITV => BlockedReason::Futex,
+        SYSCALL_WAIT4 | SYSCALL_WAITID => BlockedReason::WaitChild,
+        SYSCALL_NANOSLEEP | SYSCALL_CLOCK_NANOSLEEP => BlockedReason::Timer,
+        _ => BlockedReason::Other,
+    }
+}
+
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
     let _syscall_start = crate::task::perf::perf_time_now();

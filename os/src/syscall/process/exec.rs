@@ -350,8 +350,8 @@ fn exec_opened_file(
     let task = current_task().unwrap();
     show_frame_consumption! {
         "load_elf";
-        // Try zero-copy direct loader first; fall back to old kmap-based loader
-        // if the file's filesystem doesn't provide a PageCache.
+        // Try the PageCache-backed demand-paged loader first; fall back to the
+        // eager kmap loader if the filesystem doesn't provide a PageCache.
         crate::task::perf::record_exec_direct();
         let result = task.load_elf_direct(elf.clone(), &argv_vec, &envp_vec);
         let result = match result {
@@ -369,7 +369,8 @@ fn exec_opened_file(
         };
     }
     task.process.mark_execed();
-    task.process.set_exe_path(abs_path);
+    task.set_exec_comm(&abs_path);
+    task.process.set_exec_identity(abs_path, &argv_vec);
     task.process.complete_vfork();
     SUCCESS
 }

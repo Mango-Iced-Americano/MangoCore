@@ -15,9 +15,101 @@ use super::vma::Vma;
 use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
-use crate::fs::PageCacheFault;
+use crate::fs::{PageCache, PageCacheFault};
 use crate::mm::FaultOutcome;
 use crate::utils::error::SyscallErr;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+/// One validated PT_LOAD segment, in program-header order.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ElfLoadSegment {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) file_offset: usize,
+    pub(super) filesz: usize,
+    pub(super) map_perm: MapPermission,
+}
+
+/// Immutable backing shared by every VMA of one lazily loaded ELF image.
+///
+/// The segment vector preserves program-header order. A fault starts with a
+/// zero page and overlays every intersecting file range in that order, which
+/// matches the eager loader for overlapping PT_LOAD pages while naturally
+/// retaining zero-filled BSS and page tails.
+pub(super) struct ElfLazyBacking {
+    cache: Arc<PageCache>,
+    _executable: crate::task::ExecutableMappingGuard,
+    segments: Vec<ElfLoadSegment>,
+}
+
+impl ElfLazyBacking {
+    pub(super) fn new(
+        cache: Arc<PageCache>,
+        inode: Arc<dyn IndexNode>,
+        segments: Vec<ElfLoadSegment>,
+    ) -> Self {
+        Self {
+            cache,
+            _executable: crate::task::ExecutableMappingGuard::new(inode),
+            segments,
+        }
+    }
+
+    fn try_fill_page(
+        self: &Arc<Self>,
+        vpn: super::VirtPageNum,
+        dst: &mut [u8],
+    ) -> Result<(), PageCacheFault> {
+        if dst.len() != PAGE_SIZE {
+            return Err(PageCacheFault::Error(SyscallErr::EINVAL));
+        }
+        let page_start = super::VirtAddr::from(vpn).0;
+        let page_end = page_start
+            .checked_add(PAGE_SIZE)
+            .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+        dst.fill(0);
+
+        for segment in &self.segments {
+            let file_virtual_end = segment
+                .start
+                .checked_add(segment.filesz)
+                .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+            let copy_start = page_start.max(segment.start);
+            let copy_end = page_end.min(file_virtual_end);
+            if copy_start >= copy_end {
+                continue;
+            }
+
+            let mut virtual_cursor = copy_start;
+            let mut file_cursor = segment
+                .file_offset
+                .checked_add(copy_start - segment.start)
+                .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+            while virtual_cursor < copy_end {
+                let page_index = file_cursor >> PAGE_SIZE_BITS;
+                let page_offset = file_cursor & (PAGE_SIZE - 1);
+                let copy_len = (copy_end - virtual_cursor).min(PAGE_SIZE - page_offset);
+                let dst_offset = virtual_cursor - page_start;
+                let dst_end = dst_offset
+                    .checked_add(copy_len)
+                    .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+                self.cache.try_copy_resident_range(
+                    page_index,
+                    page_offset,
+                    &mut dst[dst_offset..dst_end],
+                )?;
+                virtual_cursor = virtual_cursor
+                    .checked_add(copy_len)
+                    .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+                file_cursor = file_cursor
+                    .checked_add(copy_len)
+                    .ok_or(PageCacheFault::Error(SyscallErr::EIO))?;
+            }
+        }
+        Ok(())
+    }
+}
 
 fn round_up_page(size: usize) -> usize {
     size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -39,6 +131,50 @@ fn map_pc_error(e: SyscallErr) -> MemoryError {
         SyscallErr::ENOMEM => MemoryError::OutOfMemory,
         SyscallErr::EIO => MemoryError::BackingStoreFailure,
         _ => MemoryError::BackingStoreFailure,
+    }
+}
+
+/// Populate one private ELF page on first access.
+///
+/// PageCache admission never performs backend I/O while the VM lock is held.
+/// A cold source page rolls back the unpublished target frame and returns a
+/// Retry token; the token loads that source after the caller releases VM.
+pub(super) fn elf_lazy_fault<T: PageTable>(
+    area: &mut Vma,
+    mapper: &mut UserMapper<'_, T>,
+    ctx: FaultContext,
+) -> FaultOutcome {
+    let backing = match area.vm_elf_backing() {
+        Some(backing) => backing,
+        None => return FaultOutcome::Error(MemoryError::NotMapped),
+    };
+    let target_ppn = match area.alloc_one_zeroed_unmapped(ctx.vpn) {
+        Ok(ppn) => ppn,
+        Err(error) => return FaultOutcome::Error(error),
+    };
+    let fill_result = unsafe {
+        // Safety: the target frame is owned by this VMA but has no PTE yet;
+        // the address-space write lock makes this fault its only observer.
+        target_ppn.with_bytes_mut(|dst| backing.try_fill_page(ctx.vpn, dst))
+    };
+    match fill_result {
+        Ok(()) => {}
+        Err(PageCacheFault::Retry(wait)) => {
+            area.remove_unmapped_frame(ctx.vpn);
+            return FaultOutcome::Retry(wait);
+        }
+        Err(PageCacheFault::Error(error)) => {
+            area.remove_unmapped_frame(ctx.vpn);
+            return FaultOutcome::Error(map_pc_error(error));
+        }
+    }
+    if let Err(error) = area.map_existing_in_memory(mapper, ctx.vpn) {
+        area.remove_unmapped_frame(ctx.vpn);
+        return FaultOutcome::Error(error);
+    }
+    match verify_filemap_fault(area, mapper, ctx, target_ppn) {
+        Ok(pa) => FaultOutcome::Completed(pa),
+        Err(error) => FaultOutcome::Error(error),
     }
 }
 
@@ -233,9 +369,17 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
 ) -> FaultOutcome {
     crate::task::perf::record_filemap_shared_write_fault();
     let _pf_start = crate::task::perf::perf_time_now();
-    let inode = match area.vm_file() { Some(inode) => inode, None => return FaultOutcome::Error(MemoryError::NotMapped) };
-    let file_offset = match area.vm_file_offset(ctx.vpn) { Ok(offset) => offset, Err(error) => return FaultOutcome::Error(error) };
-    if let Err(error) = check_within_file(inode.as_ref(), file_offset) { return FaultOutcome::Error(error); }
+    let inode = match area.vm_file() {
+        Some(inode) => inode,
+        None => return FaultOutcome::Error(MemoryError::NotMapped),
+    };
+    let file_offset = match area.vm_file_offset(ctx.vpn) {
+        Ok(offset) => offset,
+        Err(error) => return FaultOutcome::Error(error),
+    };
+    if let Err(error) = check_within_file(inode.as_ref(), file_offset) {
+        return FaultOutcome::Error(error);
+    }
 
     let pc = match inode.ensure_page_cache() {
         Some(pc) => pc,
@@ -253,7 +397,9 @@ pub(super) fn filemap_shared_write_fault<T: PageTable>(
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    if let Err(error) = area.inner.alloc_in_memory(ctx.vpn, cache_frame) { return FaultOutcome::Error(error); }
+    if let Err(error) = area.inner.alloc_in_memory(ctx.vpn, cache_frame) {
+        return FaultOutcome::Error(error);
+    }
 
     let _map_start = crate::task::perf::perf_time_now();
     if let Err(err) = mapper.map_user_page(ctx.vpn, cache_ppn, area.vm_perm()) {

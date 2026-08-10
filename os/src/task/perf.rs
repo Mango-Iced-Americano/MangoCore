@@ -23,7 +23,7 @@ pub const STATS_PROFILE_ALL: usize =
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
-pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 4;
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]

@@ -1537,3 +1537,11 @@
   “弱候选快照→昂贵准备→二次复核”的路径。
 - **相关文件**：`os/src/task/run_queue.rs`、`os/src/task/perf.rs`、
   `os/src/kernel_tests/smp.rs`
+
+## 文件后备的懒加载 VMA 必须优先保留 resident 页状态和后备生命周期
+
+- **危险模式**：看到 `VmAreaKind::ElfLazy` 且 PTE 不存在就无条件从文件重建页。PTE 可能因 TLB/`mprotect`、压缩或换出被撤销，但 VMA 内已经保存了进程修改后的私有 frame；重读文件会丢数据。
+- **固定协议**：在无 PTE 分支中先查 `VmPageState`：`InMemory -> ResidentWithoutPte`、`Compressed -> Decompress`、`SwappedOut -> SwapIn`，只有 `Unallocated` 才启动文件后备装页。目标 frame 必须先填充再发布 PTE；冷源页以 Retry 移到 VM 锁外读取。
+- **生命周期**：后备对象不只要保存 PageCache 配方，还要强持有源 inode 并保持 ETXTBSY。该 `Arc` 必须在 VMA clone/split/fork 中保留；动态解释器有独立 inode，不能只依赖 PCB 的主 `exe` 引用。
+- **验收**：构造 ELF 地址空间后 entry/BSS 应无 target frame；分别 fault entry 和不同页 BSS，验证文件字节、零填充和“未触发页仍未 resident”。
+- **相关文件**：`os/src/mm/{address_space,filemap,page_fault,vma}.rs`、`os/src/task/process.rs`、`os/src/kernel_tests/mm.rs`

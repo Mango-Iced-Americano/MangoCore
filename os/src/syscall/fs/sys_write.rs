@@ -34,6 +34,9 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     if is_nonblock {
         write_from_user(&file, token, buf, count)
     } else if let Some(wq) = file.inode.write_wait_queue() {
+        #[cfg(feature = "perf_stats")]
+        let _blocked_reason = (file.file_type() == FileType::Pipe)
+            .then(|| task.blocked_reason_scope(crate::task::BlockedReason::Pipe));
         match WaitQueue::wait_until_interruptible(wq, || {
             let ret = write_from_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) {

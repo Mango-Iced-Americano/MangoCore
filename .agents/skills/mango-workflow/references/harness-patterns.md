@@ -1430,3 +1430,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**: 对"X syscall 开销是基准差距根因"的假设，动手优化前先用 `perf_diag`（仅看 count 列，不用于吞吐）验证：① 该 syscall 在目标 workload 中确实被调用；② 其单次成本在每记录总成本中的占比；③ 每次调用的固定脚手架成本（进程内锁/表锁/trap）是否已被其他路径覆盖。微优化若只移除廉价部分，吞吐基准不会移动。
 - **教训**: 基准归因必须以"每记录成本构成"而非"syscall 次数"为准；微优化验收前先估算可移除成本占总成本的比例。优化方向应从最贵项开始（此处为 `process.files()` 进程内锁与 fd-table 锁），而非 Arc clone。
 - **相关文件**: `os/src/syscall/fs/sys_lseek.rs`, `os/src/task/process.rs` (`files()`), `docs/Work_Log/evidence/2026-08-02/lseek-fastpath-rv64/`
+
+## 短并行波诊断必须拆分采样频率并做运行时 schema 握手
+
+- **现象**：宿主机或 guest 的真实并行波只有十几秒，统一 30 秒采样最多捕获一个点；任务已退出或阻塞后，累计 CPU/blocked 时间无法还原波峰为何收缩。更隐蔽的是源码已经增加字段，但 QEMU 仍可能启动旧内核，得到格式合法却缺字段的旧 schema 日志。
+- **做法**：scheduler/current/task identity 使用 5 秒轻快照；PageCache、MM、journal、block 和 VirtIO 使用 30 秒重快照。每任务同时保留 user/kernel/blocked/runnable-wait 累计时间、阻塞类别和阻塞 syscall。启动 monitor 前固定 expected schema，首个完整快照必须同时验证版本和关键字段；不匹配就只终止明确绑定 kernel/overlay/PID 的本轮 QEMU。
+- **判据**：以 workload begin marker 重置 pre-timed 状态；连续两个轻快照 active≥4，或单点 active≥6 且下一窗口平均忙核≥3.5，才算真实峰值。峰后至少保留 36 个 5 秒快照（3 分钟），目标 60 个（5 分钟）；15 分钟无峰值本身就是前置串行放大的证据。
+- **扰动边界**：不逐事件打印；精确等待域使用编译期诊断门控和任务原子字段，正式构建不执行 `current_task()` 克隆。原始日志、pcap、overlay 和镜像永不提交。
+- **相关文件**：`user/src/bin/init.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/task/task.rs`、`scripts/monitor_buildstorm_peak.py`

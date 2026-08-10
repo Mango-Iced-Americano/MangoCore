@@ -140,6 +140,15 @@ fn cpu_load(cpu: usize) -> usize {
     nr_running(cpu) + super::processor::cpu_current_count(cpu)
 }
 
+#[inline(always)]
+fn record_runnable_enqueue(task: &TaskControlBlock) {
+    #[cfg(feature = "perf_stats")]
+    task.wake_enqueued_ticks.store(
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE),
+        Ordering::Release,
+    );
+}
+
 fn minimum_runnable_cpu(runnable: usize) -> usize {
     (0..crate::smp::configured_cpu_count())
         .filter(|cpu| runnable & (1usize << cpu) != 0)
@@ -207,6 +216,7 @@ pub(crate) fn publish(task: Arc<TaskControlBlock>, cpu: usize) {
     task.require_cpu_allowed(cpu, "publish new task");
     let mut queue = state(cpu).run_queue.lock();
     task.require_sched_transition(TaskStatus::New, TaskStatus::Queued(cpu), "publish new task");
+    record_runnable_enqueue(&task);
     queue.push_back(task);
     add_running(cpu);
 }
@@ -229,6 +239,7 @@ pub(crate) fn requeue_after_switch(
         TaskStatus::Queued(target_cpu),
         "requeue task after switch-out",
     );
+    record_runnable_enqueue(&task);
     queue.push_back(task);
     add_running(target_cpu);
 }
@@ -243,10 +254,7 @@ pub(crate) fn enqueue_woken(task: Arc<TaskControlBlock>, cpu: usize) {
         TaskStatus::Queued(cpu),
         "wake blocked task",
     );
-    task.wake_enqueued_ticks.store(
-        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE),
-        Ordering::Release,
-    );
+    record_runnable_enqueue(&task);
     queue.push_front(task);
     add_running(cpu);
 }
@@ -272,12 +280,17 @@ fn finish_running_claim(cpu: usize, task: Arc<TaskControlBlock>) -> Arc<TaskCont
     if task.note_running_cpu(cpu) {
         state(cpu).record_migration();
     }
-    let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
-    let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
-    if enqueued != 0 {
-        crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
+    #[cfg(feature = "perf_stats")]
+    {
+        let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
+        let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
+        if enqueued != 0 {
+            let wait_ticks = now.wrapping_sub(enqueued);
+            crate::task::perf::record_wake_to_run(wait_ticks);
+            task.account_runnable_wait_ticks(wait_ticks);
+        }
+        task.run_started_ticks.store(now, Ordering::Release);
     }
-    task.run_started_ticks.store(now, Ordering::Release);
     task
 }
 

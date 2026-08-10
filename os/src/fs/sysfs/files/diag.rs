@@ -5,8 +5,9 @@
 //! writable files backed by [`crate::trace`].
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt::Write;
 use core::sync::atomic::Ordering;
 
@@ -28,6 +29,17 @@ fn write_str(offset: usize, len: usize, buf: &mut [u8], s: &str) -> Result<usize
 
 fn read_counter(c: &core::sync::atomic::AtomicUsize) -> usize {
     c.load(Ordering::Relaxed)
+}
+
+fn diagnostic_token(value: &str, limit: usize) -> String {
+    let mut token = String::new();
+    for ch in value.chars().take(limit) {
+        token.push(if ch.is_whitespace() || ch == '=' { '_' } else { ch });
+    }
+    if token.is_empty() {
+        token.push('-');
+    }
+    token
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -71,8 +83,8 @@ fn stats_taskq_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    // Leave room for the per-CPU current/runqueue snapshot appended below.
-    let mut s = String::with_capacity(4096);
+    // Leave room for per-CPU and live-task identity snapshots appended below.
+    let mut s = String::with_capacity(32768);
     let _ = writeln!(
         s,
         "scheduler_counter_schema_version={}",
@@ -174,11 +186,37 @@ fn stats_taskq_content(
     let _ = writeln!(s, "steal_ktlb_sync_calls={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_CALLS));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_total={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_max={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX));
+    let mut cpu_snapshots = Vec::new();
+    let mut runnable_total = 0usize;
+    let mut current_total_excluding_collector = 0usize;
     for cpu in 0..crate::smp::configured_cpu_count() {
         let snapshot = crate::smp::task_state(cpu).read_diagnostics();
+        runnable_total = runnable_total.saturating_add(snapshot.nr_running);
+        current_total_excluding_collector = current_total_excluding_collector.saturating_add(
+            usize::from(snapshot.current_present && snapshot.current_pid != 3),
+        );
+        cpu_snapshots.push(snapshot);
+    }
+    let _ = writeln!(s, "scheduler_clock_freq_hz={}", crate::hal::get_clock_freq());
+    let _ = writeln!(s, "runnable_total={}", runnable_total);
+    let _ = writeln!(
+        s,
+        "current_total_excluding_collector={}",
+        current_total_excluding_collector
+    );
+    let _ = writeln!(
+        s,
+        "active_tasks_excluding_collector={}",
+        runnable_total.saturating_add(current_total_excluding_collector)
+    );
+    for (cpu, snapshot) in cpu_snapshots.iter().enumerate() {
+        let syscall_id = snapshot
+            .current_syscall_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| String::from("-"));
         let _ = writeln!(
             s,
-            "cpu{}_current_present={} cpu{}_nr_running={} cpu{}_current_pid={} cpu{}_steals={}",
+            "cpu{}_current_present={} cpu{}_nr_running={} cpu{}_current_pid={} cpu{}_current_tid={} cpu{}_current_syscall_id={} cpu{}_steals={}",
             cpu,
             usize::from(snapshot.current_present),
             cpu,
@@ -186,8 +224,63 @@ fn stats_taskq_content(
             cpu,
             snapshot.current_pid,
             cpu,
+            snapshot.current_tid,
+            cpu,
+            syscall_id,
+            cpu,
             snapshot.steals,
         );
+    }
+    for process in crate::task::all_processes() {
+        let (exe_path, crate_name) = process.exec_diagnostics();
+        let exe_name = exe_path.rsplit('/').next().unwrap_or(&exe_path);
+        let exe_name = diagnostic_token(exe_name, 96);
+        let crate_name = diagnostic_token(&crate_name, 64);
+        for task in process.threads() {
+            let tid = task.gettid();
+            let (
+                comm,
+                user_us,
+                system_us,
+                blocked_us,
+                runnable_wait_us,
+                blocked_reason,
+                blocked_syscall_id,
+            ) = task.runtime_diagnostics();
+            let comm_len = comm.iter().position(|byte| *byte == 0).unwrap_or(comm.len());
+            let comm = diagnostic_token(core::str::from_utf8(&comm[..comm_len]).unwrap_or("-"), 15);
+            let current = cpu_snapshots.iter().enumerate().find(|(_, snapshot)| {
+                snapshot.current_present && snapshot.current_tid == tid
+            });
+            let current_cpu = current
+                .map(|(cpu, _)| cpu.to_string())
+                .unwrap_or_else(|| String::from("-"));
+            let syscall_id = current
+                .and_then(|(_, snapshot)| snapshot.current_syscall_id)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| String::from("-"));
+            let blocked_syscall_id = blocked_syscall_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| String::from("-"));
+            let _ = writeln!(
+                s,
+                "task_diag pid={} tid={} state={:?} current_cpu={} comm={} exe={} crate={} syscall_id={} user_us={} kernel_us={} blocked_us={} runnable_wait_us={} blocked_reason={} blocked_syscall_id={}",
+                process.pid,
+                tid,
+                task.task_status(),
+                current_cpu,
+                comm,
+                exe_name,
+                crate_name,
+                syscall_id,
+                user_us,
+                system_us,
+                blocked_us,
+                runnable_wait_us,
+                blocked_reason.as_str(),
+                blocked_syscall_id,
+            );
+        }
     }
     for cpu in 0..crate::smp::MAX_CPUS {
         let _ = writeln!(

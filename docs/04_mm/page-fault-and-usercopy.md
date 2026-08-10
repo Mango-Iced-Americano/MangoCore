@@ -3,7 +3,7 @@ title: "缺页处理与用户内存 fault-in"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-03
+last_update: 2026-08-10
 tags: [mm, page-fault, cow, uaccess, mmu-gather]
 ---
 
@@ -93,10 +93,16 @@ if area.vm_allows(ctx.access) {
 | 文件映射，store 且 shared | `FileBackedSharedWrite` |
 | 文件映射，store 且 private | `FileBackedWrite` |
 | 文件映射，load/execute | `FileBackedRead` |
+| ELF PT_LOAD 页 `Unallocated` | `ElfLazy` |
 | 匿名页 `Unallocated` | `LazyAlloc` |
 | 匿名页 `InMemory` 但 PTE 未映射 | `ResidentWithoutPte` |
 | 匿名页 `Compressed` | `Decompress`，仅 `oom_handler` |
 | 匿名页 `SwappedOut` | `SwapIn`，仅 `oom_handler` |
+
+`ElfLazy` 不能只根据 VMA 类型判断。PTE 不存在时仍须先查 `VmPageState`：
+`Unallocated` 才从 ELF 后备装页，`InMemory` 恢复已 resident 页，而
+`Compressed/SwappedOut` 继续走原有解压/换入路径。否则 PTE 撤销、压缩或换出后会错误从
+文件重建页，覆盖进程已修改的私有内容。
 
 这个分类表是理解 MM 行为的核心：VMA 权限只决定“是否允许”，具体动作取决于 PTE 和 `VmPageStore` 状态。
 
@@ -133,6 +139,8 @@ impl PageFaultHandler {
             FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射: 分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
+            // ELF PT_LOAD 首次访问：组装私有页，冷源页通过 Retry 在 VM 锁外读取。
+            FaultAction::ElfLazy => return elf_lazy_fault(area, mapper, ctx),
             // 压缩匿名页再次访问: 解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
@@ -176,6 +184,14 @@ impl PageFaultHandler {
         }
 
         match area.vm_kind() {
+            VmAreaKind::ElfLazy => match area.vm_page_state(ctx.vpn)? {
+                VmPageState::InMemory => Ok(FaultAction::ResidentWithoutPte),
+                VmPageState::Unallocated => Ok(FaultAction::ElfLazy),
+                #[cfg(feature = "oom_handler")]
+                VmPageState::Compressed => Ok(FaultAction::Decompress),
+                #[cfg(feature = "oom_handler")]
+                VmPageState::SwappedOut => Ok(FaultAction::SwapIn),
+            },
             VmAreaKind::FileBacked => Ok(match ctx.access {
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
                     FaultAction::FileBackedSharedWrite
@@ -196,7 +212,7 @@ impl PageFaultHandler {
 }
 ```
 
-这段代码可以直接解释上表的优先级：只要页表已经有 PTE，分类就不会进入文件/匿名的“未映射”分支；store fault 在已映射 PTE 上优先按 shared、stale lazy、COW 分流。页表没有 PTE 时才看 `VmAreaKind` 和 `VmPageState`。
+这段代码可以直接解释上表的优先级：只要页表已经有 PTE，分类就不会进入文件/ELF/匿名的“未映射”分支；store fault 在已映射 PTE 上优先按 shared、stale lazy、COW 分流。页表没有 PTE 时才看 `VmAreaKind` 和 `VmPageState`。
 
 ## 5. 匿名 lazy allocation
 

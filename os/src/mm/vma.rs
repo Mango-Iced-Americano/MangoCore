@@ -11,6 +11,7 @@
 
 use core::fmt::Debug;
 
+use super::filemap::ElfLazyBacking;
 use super::frame_store::{Frame, FrameState, VmPageStore};
 use super::page_table::PageTable;
 use super::user_mapper::UserMapper;
@@ -34,6 +35,7 @@ impl Debug for Vma {
                 "map_file",
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
+            .field("elf_lazy", &self.elf_lazy.is_some())
             .field("wipe_on_fork", &self.wipe_on_fork)
             .field("dont_fork", &self.dont_fork)
             .field("fork_inherited", &self.fork_inherited)
@@ -50,6 +52,10 @@ pub struct Vma {
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
     pub map_file: Option<Arc<dyn IndexNode>>,
+    /// Immutable PT_LOAD recipe for demand-paged executable VMAs. This is
+    /// separate from ordinary mmap file backing because resident ELF pages are
+    /// private frames assembled from potentially overlapping segments.
+    pub(super) elf_lazy: Option<Arc<ElfLazyBacking>>,
     /// Offset into the file where this VMA starts (in bytes).
     /// For anonymous mappings, this is always 0.
     pub map_file_offset: usize,
@@ -144,6 +150,7 @@ impl Vma {
             inner,
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
+            elf_lazy: self.elf_lazy.clone(),
             map_file_offset: self.map_file_offset,
             may_write: self.may_write,
             write_sealed: self.write_sealed,
@@ -178,6 +185,7 @@ impl Vma {
             inner,
             map_perm,
             map_file,
+            elf_lazy: None,
             map_file_offset,
             may_write: true,
             write_sealed: false,
@@ -198,6 +206,7 @@ impl Vma {
             )),
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
+            elf_lazy: another.elf_lazy.clone(),
             map_file_offset: another.map_file_offset,
             may_write: another.may_write,
             write_sealed: another.write_sealed,
@@ -808,6 +817,7 @@ impl Vma {
             inner: second_frames,
             map_perm: self.map_perm,
             map_file: second_file,
+            elf_lazy: self.elf_lazy.clone(),
             map_file_offset: second_offset,
             may_write: self.may_write,
             write_sealed: self.write_sealed,
@@ -935,6 +945,7 @@ impl Vma {
 pub(super) enum VmAreaKind {
     Anonymous,
     FileBacked,
+    ElfLazy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -975,7 +986,9 @@ impl Vma {
     }
 
     pub(super) fn vm_kind(&self) -> VmAreaKind {
-        if self.map_file.is_some() {
+        if self.elf_lazy.is_some() {
+            VmAreaKind::ElfLazy
+        } else if self.map_file.is_some() {
             VmAreaKind::FileBacked
         } else {
             VmAreaKind::Anonymous
@@ -1039,6 +1052,10 @@ impl Vma {
 
     pub(super) fn vm_file(&self) -> Option<Arc<dyn IndexNode>> {
         self.map_file.clone()
+    }
+
+    pub(super) fn vm_elf_backing(&self) -> Option<Arc<ElfLazyBacking>> {
+        self.elf_lazy.clone()
     }
 
     pub(super) fn vm_file_offset(&self, vpn: VirtPageNum) -> Result<usize, MemoryError> {

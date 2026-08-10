@@ -455,14 +455,19 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
     loop {
         match task.task_status() {
             TaskStatus::Running(owner) if owner == cpu => {
-                let run_started = task
-                    .run_started_ticks
-                    .swap(0, AtomicOrdering::AcqRel);
-                if run_started != 0 {
-                    crate::task::perf::record_task_run_slice(
-                        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE)
+                #[cfg(feature = "perf_stats")]
+                {
+                    let run_started = task
+                        .run_started_ticks
+                        .swap(0, AtomicOrdering::AcqRel);
+                    if run_started != 0 {
+                        crate::task::perf::record_task_run_slice(
+                            crate::task::perf::perf_time_now_for(
+                                crate::task::perf::STATS_PROFILE_CORE,
+                            )
                             .wrapping_sub(run_started),
-                    );
+                        );
+                    }
                 }
                 // current 槽已在 idle 栈清空，但 Running(owner) 仍是唯一
                 // 权威状态。持请求槽锁直到新 runqueue owner 提交，防止
