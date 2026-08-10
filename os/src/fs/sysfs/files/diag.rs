@@ -603,8 +603,13 @@ fn stats_heap_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(1024);
+    let mut s = String::with_capacity(4096);
     let (free, total, _, _, _) = crate::mm::heap_stats();
+    let _ = writeln!(
+        s,
+        "heap_counter_schema_version={}",
+        crate::task::perf::HEAP_COUNTER_SCHEMA_VERSION
+    );
     let _ = writeln!(
         s,
         "heap_current_bytes={}",
@@ -652,6 +657,49 @@ fn stats_heap_content(
         "heap_dealloc_scan_steps_total={}",
         read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL)
     );
+    let _ = writeln!(s, "heap_alloc_requested_bytes={}", read_counter(&crate::task::perf::HEAP_ALLOC_REQUESTED_BYTES));
+    let _ = writeln!(s, "heap_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_lock_wait_ticks_max={}", read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_MAX));
+    let _ = writeln!(s, "heap_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_lock_hold_ticks_max={}", read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_MAX));
+    let _ = writeln!(s, "heap_alloc_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_alloc_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_dealloc_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_dealloc_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL));
+    let _ = writeln!(s, "heap_slab_eligible_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_ALLOC_CALLS));
+    let _ = writeln!(s, "heap_slab_fast_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_FAST_CALLS));
+    let _ = writeln!(s, "heap_slab_refill_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_REFILL_CALLS));
+    let _ = writeln!(s, "heap_slab_fallback_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_FALLBACK_CALLS));
+    let _ = writeln!(s, "heap_direct_buddy_calls={}", read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_CALLS));
+    let _ = writeln!(s, "heap_direct_buddy_failures={}", read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_FAILURES));
+    let _ = writeln!(s, "heap_alloc_retry_attempts={}", read_counter(&crate::task::perf::HEAP_ALLOC_RETRY_ATTEMPTS));
+    let _ = writeln!(s, "heap_recovery_attempts={}", read_counter(&crate::task::perf::HEAP_RECOVERY_ATTEMPTS));
+    let _ = writeln!(s, "heap_recovery_successes={}", read_counter(&crate::task::perf::HEAP_RECOVERY_SUCCESSES));
+    let _ = writeln!(s, "heap_alloc_final_failures={}", read_counter(&crate::task::perf::HEAP_ALLOC_FINAL_FAILURES));
+    let heap_classes = [
+        (8, &crate::task::perf::HEAP_CLASS_8_CALLS),
+        (16, &crate::task::perf::HEAP_CLASS_16_CALLS),
+        (32, &crate::task::perf::HEAP_CLASS_32_CALLS),
+        (64, &crate::task::perf::HEAP_CLASS_64_CALLS),
+        (128, &crate::task::perf::HEAP_CLASS_128_CALLS),
+        (256, &crate::task::perf::HEAP_CLASS_256_CALLS),
+        (512, &crate::task::perf::HEAP_CLASS_512_CALLS),
+        (1024, &crate::task::perf::HEAP_CLASS_1024_CALLS),
+        (2048, &crate::task::perf::HEAP_CLASS_2048_CALLS),
+    ];
+    for (bytes, counter) in heap_classes {
+        let _ = writeln!(s, "heap_class_{}_calls={}", bytes, read_counter(counter));
+    }
+    let hist_names = ["zero", "1_63", "64_1023", "1024_16383", "16384_262143", "ge262144"];
+    for (index, name) in hist_names.iter().enumerate() {
+        let _ = writeln!(s, "heap_lock_wait_hist_{}={}", name, read_counter(&crate::task::perf::HEAP_LOCK_WAIT_HIST[index]));
+        let _ = writeln!(s, "heap_lock_hold_hist_{}={}", name, read_counter(&crate::task::perf::HEAP_LOCK_HOLD_HIST[index]));
+    }
+    for cpu in 0..crate::smp::MAX_CPUS {
+        let _ = writeln!(s, "heap_cpu{}_lock_calls={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_CALLS_BY_CPU[cpu]));
+        let _ = writeln!(s, "heap_cpu{}_lock_wait_ticks_total={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_BY_CPU[cpu]));
+        let _ = writeln!(s, "heap_cpu{}_lock_hold_ticks_total={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_BY_CPU[cpu]));
+    }
     let _ = writeln!(
         s,
         "page_faults={}",

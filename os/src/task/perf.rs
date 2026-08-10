@@ -26,6 +26,9 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
 pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 3;
+/// `/sys/kernel/stats/heap` allocator attribution field semantics version.
+pub const HEAP_COUNTER_SCHEMA_VERSION: usize = 1;
+pub const HEAP_LOCK_HIST_BUCKETS: usize = 6;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -255,8 +258,31 @@ mod enabled {
     pub static HEAP_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LOCK_CALLS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_WAIT_TICKS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_HOLD_TICKS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_WAIT_HIST: [AtomicUsize; super::HEAP_LOCK_HIST_BUCKETS] =
+        [const { AtomicUsize::new(0) }; super::HEAP_LOCK_HIST_BUCKETS];
+    pub static HEAP_LOCK_HOLD_HIST: [AtomicUsize; super::HEAP_LOCK_HIST_BUCKETS] =
+        [const { AtomicUsize::new(0) }; super::HEAP_LOCK_HIST_BUCKETS];
     pub static HEAP_SLAB_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_FAST_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_REFILL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_FALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_DIRECT_BUDDY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DIRECT_BUDDY_FAILURES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_RETRY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_RECOVERY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_RECOVERY_SUCCESSES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_FINAL_FAILURES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_REQUESTED_BYTES: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_8_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_16_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_32_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -689,7 +715,7 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_heap_lock(wait_ticks: usize, hold_ticks: usize) {
+    pub fn record_heap_lock(wait_ticks: usize, hold_ticks: usize, is_alloc: bool) {
         if !memory_io_stats_enabled() {
             return;
         }
@@ -697,6 +723,81 @@ mod enabled {
         update_max(&HEAP_LOCK_WAIT_TICKS_MAX, wait_ticks);
         HEAP_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
         update_max(&HEAP_LOCK_HOLD_TICKS_MAX, hold_ticks);
+        if is_alloc {
+            HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        } else {
+            HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        }
+        let cpu = crate::smp::cpu_id();
+        if cpu < crate::smp::MAX_CPUS {
+            HEAP_LOCK_CALLS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+            HEAP_LOCK_WAIT_TICKS_BY_CPU[cpu].fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_LOCK_HOLD_TICKS_BY_CPU[cpu].fetch_add(hold_ticks, Ordering::Relaxed);
+        }
+        let bucket = |ticks: usize| match ticks {
+            0 => 0,
+            1..=63 => 1,
+            64..=1023 => 2,
+            1024..=16_383 => 3,
+            16_384..=262_143 => 4,
+            _ => 5,
+        };
+        HEAP_LOCK_WAIT_HIST[bucket(wait_ticks)].fetch_add(1, Ordering::Relaxed);
+        HEAP_LOCK_HOLD_HIST[bucket(hold_ticks)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc_request(bytes: usize) {
+        if memory_io_stats_enabled() {
+            HEAP_ALLOC_REQUESTED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_slab_result(new_page: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        if new_page {
+            HEAP_SLAB_REFILL_CALLS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            HEAP_SLAB_FAST_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_slab_fallback() {
+        if memory_io_stats_enabled() {
+            HEAP_SLAB_FALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_direct_buddy_failure() {
+        if memory_io_stats_enabled() {
+            HEAP_DIRECT_BUDDY_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_recovery(recovered: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        HEAP_RECOVERY_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        if recovered {
+            HEAP_RECOVERY_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            HEAP_ALLOC_RETRY_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_final_failure() {
+        if memory_io_stats_enabled() {
+            HEAP_ALLOC_FINAL_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -2850,8 +2951,36 @@ mod enabled {
         HEAP_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
         HEAP_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
         HEAP_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        for counter in &HEAP_LOCK_CALLS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_WAIT_TICKS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_HOLD_TICKS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_WAIT_HIST {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_HOLD_HIST {
+            counter.store(0, Ordering::Relaxed);
+        }
         HEAP_SLAB_ALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_FAST_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_REFILL_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_FALLBACK_CALLS.store(0, Ordering::Relaxed);
         HEAP_DIRECT_BUDDY_CALLS.store(0, Ordering::Relaxed);
+        HEAP_DIRECT_BUDDY_FAILURES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_RETRY_ATTEMPTS.store(0, Ordering::Relaxed);
+        HEAP_RECOVERY_ATTEMPTS.store(0, Ordering::Relaxed);
+        HEAP_RECOVERY_SUCCESSES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_FINAL_FAILURES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_REQUESTED_BYTES.store(0, Ordering::Relaxed);
         HEAP_CLASS_8_CALLS.store(0, Ordering::Relaxed);
         HEAP_CLASS_16_CALLS.store(0, Ordering::Relaxed);
         HEAP_CLASS_32_CALLS.store(0, Ordering::Relaxed);
@@ -3825,7 +3954,31 @@ pub fn record_frame_contig_page(_zero_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_heap_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+pub fn record_heap_lock(_wait_ticks: usize, _hold_ticks: usize, _is_alloc: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc_request(_bytes: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_slab_result(_new_page: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_slab_fallback() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_direct_buddy_failure() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_recovery(_recovered: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_final_failure() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3959,8 +4112,36 @@ perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_MAX);
 perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_TOTAL);
 perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_CALLS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_WAIT_TICKS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_HOLD_TICKS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_WAIT_HIST: [core::sync::atomic::AtomicUsize; HEAP_LOCK_HIST_BUCKETS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; HEAP_LOCK_HIST_BUCKETS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_HOLD_HIST: [core::sync::atomic::AtomicUsize; HEAP_LOCK_HIST_BUCKETS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; HEAP_LOCK_HIST_BUCKETS];
 perf_stub_counter!(HEAP_SLAB_ALLOC_CALLS);
+perf_stub_counter!(HEAP_SLAB_FAST_CALLS);
+perf_stub_counter!(HEAP_SLAB_REFILL_CALLS);
+perf_stub_counter!(HEAP_SLAB_FALLBACK_CALLS);
 perf_stub_counter!(HEAP_DIRECT_BUDDY_CALLS);
+perf_stub_counter!(HEAP_DIRECT_BUDDY_FAILURES);
+perf_stub_counter!(HEAP_ALLOC_RETRY_ATTEMPTS);
+perf_stub_counter!(HEAP_RECOVERY_ATTEMPTS);
+perf_stub_counter!(HEAP_RECOVERY_SUCCESSES);
+perf_stub_counter!(HEAP_ALLOC_FINAL_FAILURES);
+perf_stub_counter!(HEAP_ALLOC_REQUESTED_BYTES);
 perf_stub_counter!(HEAP_CLASS_8_CALLS);
 perf_stub_counter!(HEAP_CLASS_16_CALLS);
 perf_stub_counter!(HEAP_CLASS_32_CALLS);
