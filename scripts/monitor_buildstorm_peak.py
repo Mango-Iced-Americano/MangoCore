@@ -28,6 +28,8 @@ class Snapshot:
     run_ticks: int
     clock_hz: int
     busy_cores: float | None
+    busy_cores_30s: float | None
+    build_tasks: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,24 +84,77 @@ def process_alive(pid: int) -> bool:
     return True
 
 
-def terminate_owned_qemu(args: argparse.Namespace, pid: int, reason: str) -> bool:
+def child_pids(pid: int) -> list[int]:
     try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
-            "utf-8", errors="replace"
-        )
-    except FileNotFoundError:
-        append_status(args.status, f"stop_reason={reason} qemu_already_exited pid={pid}")
-        return True
+        text = Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="ascii")
+    except (FileNotFoundError, OSError):
+        return []
+    return [int(value) for value in text.split() if value.isdigit()]
+
+
+def owned_qemu_pid(args: argparse.Namespace, pid: int) -> int | None:
+    """Resolve a launcher PID to its QEMU child without touching other runs."""
+    pending = [pid]
+    seen: set[int] = set()
     expected = ("qemu-system-riscv64", args.expected_kernel, args.expected_overlay)
-    if not all(token in cmdline for token in expected):
+    while pending:
+        candidate = pending.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            cmdline = Path(f"/proc/{candidate}/cmdline").read_bytes().replace(
+                b"\0", b" "
+            ).decode("utf-8", errors="replace")
+            executable = Path(os.readlink(f"/proc/{candidate}/exe")).name
+        except FileNotFoundError:
+            continue
+        # A launcher shell contains the complete QEMU command in its own
+        # cmdline, so token matching alone can select and terminate the shell
+        # while leaving QEMU orphaned. Require the resolved executable too.
+        if executable == expected[0] and all(token in cmdline for token in expected):
+            return candidate
+        pending.extend(child_pids(candidate))
+    return None
+
+
+def terminate_owned_qemu(args: argparse.Namespace, pid: int, reason: str) -> bool:
+    qemu_pid = owned_qemu_pid(args, pid)
+    if qemu_pid is None:
+        if not process_alive(pid):
+            append_status(args.status, f"stop_reason={reason} qemu_already_exited pid={pid}")
+            return True
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(
+                b"\0", b" "
+            ).decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            append_status(args.status, f"stop_reason={reason} qemu_already_exited pid={pid}")
+            return True
         append_status(
             args.status,
             f"refused_signal pid={pid} reason={reason} ownership_check_failed cmdline={cmdline}",
         )
         return False
-    os.kill(pid, signal.SIGTERM)
-    append_status(args.status, f"stop_reason={reason} signaled_pid={pid}")
+    os.kill(qemu_pid, signal.SIGTERM)
+    append_status(args.status, f"stop_reason={reason} signaled_pid={qemu_pid} launcher_pid={pid}")
     return True
+
+
+def build_task_count(block: str) -> int:
+    count = 0
+    for line in block.splitlines():
+        if not line.startswith("task_diag ") or "pid=3 " in line:
+            continue
+        crate = re.search(r"\bcrate=([^ ]+)", line)
+        current_cpu = re.search(r"\bcurrent_cpu=([^ ]+)", line)
+        state = re.search(r"\bstate=([^ ]+)", line)
+        if crate and crate.group(1) not in {"-", "none", "None"} and (
+            (current_cpu and current_cpu.group(1) != "-")
+            or (state and state.group(1) in {"Ready", "Running", "Runnable"})
+        ):
+            count += 1
+    return count
 
 
 def main() -> int:
@@ -176,6 +231,15 @@ def main() -> int:
             if previous is not None:
                 delta_ticks = max(0, required["run_ticks"] - previous.run_ticks)
                 busy = delta_ticks / required["clock_hz"] / args.period_seconds
+            busy_30s = None
+            if len(snapshots) >= 6:
+                window = snapshots[-6]
+                delta_ticks = max(0, required["run_ticks"] - window.run_ticks)
+                elapsed_seconds = max(
+                    args.period_seconds * (sample - window.sample),
+                    args.period_seconds,
+                )
+                busy_30s = delta_ticks / required["clock_hz"] / elapsed_seconds
             snapshot = Snapshot(
                 sample=sample,
                 active=required["active"],
@@ -183,22 +247,30 @@ def main() -> int:
                 run_ticks=required["run_ticks"],
                 clock_hz=required["clock_hz"],
                 busy_cores=busy,
+                busy_cores_30s=busy_30s,
+                build_tasks=build_task_count(block),
             )
             snapshots.append(snapshot)
             append_status(
                 args.status,
-                "{}sample={} active={} runnable={} busy_cores={}".format(
+                "{}sample={} active={} runnable={} build_tasks={} busy_cores={} busy_cores_30s={}".format(
                     "timed_" if begin_at is not None else "pre_",
                     sample,
                     snapshot.active,
                     snapshot.runnable,
+                    snapshot.build_tasks,
                     "-" if busy is None else f"{busy:.3f}",
+                    "-" if busy_30s is None else f"{busy_30s:.3f}",
                 ),
             )
 
             if begin_at is not None and peak_index is None and previous is not None:
                 sustained_active = previous.active >= 4 and snapshot.active >= 4
-                high_then_busy = previous.active >= 6 and busy is not None and busy >= 3.5
+                high_then_busy = (
+                    previous.active >= 6
+                    and snapshot.busy_cores_30s is not None
+                    and snapshot.busy_cores_30s >= 3.5
+                )
                 if sustained_active or high_then_busy:
                     peak_index = len(snapshots) - 1
                     append_status(

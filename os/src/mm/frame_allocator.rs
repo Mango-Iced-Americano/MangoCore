@@ -24,6 +24,41 @@ use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 use spin::RwLock;
 
+/// Idle CPUs may keep this many already-zeroed single pages ready for demand
+/// faults.  The pool is deliberately small relative to the 8 GiB BuildStorm
+/// guest and is disabled under memory pressure.
+pub const PREZERO_POOL_HIGH_WATER: usize = 256;
+const PREZERO_REFILL_PER_IDLE_TICK: usize = 2;
+const PREZERO_MIN_FREE_FRAMES: usize = 2048;
+
+/// Clear one allocator-owned page before it is published to another owner.
+fn zero_frame_bytes(ppn: PhysPageNum) {
+    let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
+    const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
+    const UNROLL: usize = 8;
+    let mut i = 0;
+    while i + UNROLL <= WORDS_PER_PAGE {
+        // Safety: the allocator has removed `ppn` from every free structure,
+        // the page is not visible to an owner, and the bounds cover one page.
+        unsafe {
+            ptr.add(i).write(0);
+            ptr.add(i + 1).write(0);
+            ptr.add(i + 2).write(0);
+            ptr.add(i + 3).write(0);
+            ptr.add(i + 4).write(0);
+            ptr.add(i + 5).write(0);
+            ptr.add(i + 6).write(0);
+            ptr.add(i + 7).write(0);
+        }
+        i += UNROLL;
+    }
+    while i < WORDS_PER_PAGE {
+        // Safety: same ownership and bounds argument as the unrolled loop.
+        unsafe { ptr.add(i).write(0) };
+        i += 1;
+    }
+}
+
 /// 一个已分配物理页帧的 RAII 跟踪器。
 pub struct FrameTracker {
     /// 跟踪的物理页号。
@@ -34,30 +69,8 @@ impl FrameTracker {
     /// 分配跟踪器并把整页清零。
     pub fn new(ppn: PhysPageNum) -> Self {
         let zero_start = crate::task::perf::perf_memory_io_time_now();
-        let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
-        const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
-        const UNROLL: usize = 8;
-        let mut i = 0;
-        while i + UNROLL <= WORDS_PER_PAGE {
-            // Safety: `ppn` 刚从帧分配器取出，尚未发布给任何 owner；页首按
-            // PAGE_SIZE 对齐，`WORDS_PER_PAGE` 和循环边界保证写入不越界。
-            unsafe {
-                ptr.add(i).write(0);
-                ptr.add(i + 1).write(0);
-                ptr.add(i + 2).write(0);
-                ptr.add(i + 3).write(0);
-                ptr.add(i + 4).write(0);
-                ptr.add(i + 5).write(0);
-                ptr.add(i + 6).write(0);
-                ptr.add(i + 7).write(0);
-            }
-            i += UNROLL;
-        }
-        while i < WORDS_PER_PAGE {
-            // Safety: 同上，尾部循环只覆盖剩余未清零的页内 u64。
-            unsafe { ptr.add(i).write(0) };
-            i += 1;
-        }
+        zero_frame_bytes(ppn);
+        crate::task::perf::record_frame_sync_zero();
         crate::task::perf::record_pagefault_stage(
             4,
             crate::task::perf::perf_memory_io_time_now().wrapping_sub(zero_start),
@@ -125,6 +138,21 @@ impl FrameReservation {
 }
 
 impl Drop for FrameReservation {
+    fn drop(&mut self) {
+        if let Some(ppn) = self.ppn.take() {
+            frame_dealloc(ppn);
+        }
+    }
+}
+
+/// A page temporarily owned by an idle CPU while it is being zeroed.  If the
+/// refill path cannot publish it, Drop returns it to the ordinary recycled
+/// list so no page is leaked.
+struct PrezeroReservation {
+    ppn: Option<PhysPageNum>,
+}
+
+impl Drop for PrezeroReservation {
     fn drop(&mut self) {
         if let Some(ppn) = self.ppn.take() {
             frame_dealloc(ppn);
@@ -339,6 +367,8 @@ pub struct StackFrameAllocator {
     fresh_region: usize,
     // 已回收的页面（内存框架）的列表
     recycled: Vec<usize>,
+    // 已从 free structures 摘除并在锁外清零、可直接发布的单页。
+    prezeroed: Vec<usize>,
 }
 
 impl StackFrameAllocator {
@@ -347,6 +377,10 @@ impl StackFrameAllocator {
         self.regions.clear();
         self.reclaimed_regions.clear();
         self.recycled.clear();
+        self.prezeroed.clear();
+        self.prezeroed
+            .try_reserve_exact(PREZERO_POOL_HIGH_WATER + crate::smp::MAX_CPUS * 2)
+            .ok();
         self.fresh_region = 0;
         self.regions.reserve(
             crate::hal::firmware::memory_regions().len()
@@ -510,10 +544,8 @@ impl StackFrameAllocator {
             frames.push(Arc::new(frame));
             crate::task::perf::record_frame_alloc_source(false);
             crate::task::perf::record_frame_contig_page(
-                crate::task::perf::perf_time_now_for(
-                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
-                )
-                .wrapping_sub(started),
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(started),
             );
             crate::task::perf::record_frame_alloc_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
@@ -560,10 +592,8 @@ impl StackFrameAllocator {
             frames.push(Arc::new(frame));
             crate::task::perf::record_frame_alloc_source(false);
             crate::task::perf::record_frame_contig_page(
-                crate::task::perf::perf_time_now_for(
-                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
-                )
-                .wrapping_sub(started),
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
+                    .wrapping_sub(started),
             );
             crate::task::perf::record_frame_alloc_time_us(
                 crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
@@ -617,6 +647,34 @@ impl StackFrameAllocator {
             return Some(ppn);
         }
         panic!("recycled frame outside registered allocator regions");
+    }
+
+    /// Claim one free page for background zeroing.  The global allocator lock
+    /// protects only ownership transfer; the 4 KiB clear runs after unlock.
+    fn reserve_for_prezero(&mut self) -> Option<PrezeroReservation> {
+        if self.prezeroed.capacity() < PREZERO_POOL_HIGH_WATER
+            || self.prezeroed.len() >= PREZERO_POOL_HIGH_WATER
+            || self.unallocated_frames() <= PREZERO_MIN_FREE_FRAMES
+        {
+            return None;
+        }
+        let ppn = self.take_recycled_ppn().or_else(|| {
+            if cfg!(feature = "zero_init") {
+                None
+            } else {
+                self.take_fresh_ppn()
+            }
+        })?;
+        Some(PrezeroReservation {
+            ppn: Some(ppn.into()),
+        })
+    }
+
+    fn publish_prezeroed(&mut self, ppn: PhysPageNum) {
+        // Capacity is reserved at init for the high-water mark plus all CPUs'
+        // possible in-flight pages, so this push never allocates under lock.
+        assert!(self.prezeroed.len() < self.prezeroed.capacity());
+        self.prezeroed.push(ppn.0);
     }
 
     /// Register a linker-owned page range as free after its final use.
@@ -700,6 +758,7 @@ impl StackFrameAllocator {
             .map(FrameRegion::unallocated_frames)
             .sum::<usize>()
             + self.recycled.len()
+            + self.prezeroed.len()
     }
 
     /// 返回帧分配器碎片化诊断 `(total, fresh, recycled, recycled_ratio)`。
@@ -709,7 +768,7 @@ impl StackFrameAllocator {
             .iter()
             .map(FrameRegion::unallocated_frames)
             .sum();
-        let recycled = self.recycled.len();
+        let recycled = self.recycled.len() + self.prezeroed.len();
         let total = fresh + recycled;
         let ratio = if total > 0 {
             recycled as f64 / total as f64
@@ -727,6 +786,7 @@ impl FrameAllocator for StackFrameAllocator {
             reclaimed_regions: Vec::new(),
             fresh_region: 0,
             recycled: Vec::new(),
+            prezeroed: Vec::new(),
         }
     }
 
@@ -735,14 +795,21 @@ impl FrameAllocator for StackFrameAllocator {
         let started_ticks =
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         crate::task::perf::record_frame_alloc();
-        let result = if let Some(ppn) = self.take_recycled_ppn() {
+        let result = if let Some(ppn) = self.prezeroed.pop() {
+            crate::task::perf::record_frame_alloc_source_prezeroed();
+            crate::task::perf::record_frame_prezero_hit();
+            Some((PhysPageNum::from(ppn), false))
+        } else if let Some(ppn) = self.take_recycled_ppn() {
+            crate::task::perf::record_frame_prezero_miss();
             crate::task::perf::record_frame_alloc_source(true);
             // recycled 也包含显式释放的 linker payload 页，必须重新清零。
             Some((PhysPageNum::from(ppn), true))
         } else if let Some(ppn) = self.take_fresh_ppn() {
+            crate::task::perf::record_frame_prezero_miss();
             crate::task::perf::record_frame_alloc_source(false);
             Some((PhysPageNum::from(ppn), !cfg!(feature = "zero_init")))
         } else {
+            crate::task::perf::record_frame_prezero_miss();
             None
         };
         match result {
@@ -779,6 +846,13 @@ impl FrameAllocator for StackFrameAllocator {
         } else if let Some(ppn) = self.take_fresh_ppn() {
             crate::task::perf::record_frame_alloc_source(false);
             // Safety: `ppn` 是 fresh 帧，尚未交给其他所有者；调用者负责初始化。
+            let frame_tracker = FrameTracker::new_uninit(ppn.into());
+            Some(frame_tracker)
+        } else if let Some(ppn) = self.prezeroed.pop() {
+            // A zeroed page also satisfies the weaker uninitialized-page
+            // contract. Keep this fallback so the bounded idle pool cannot
+            // make free memory invisible to full-page-copy callers.
+            crate::task::perf::record_frame_alloc_source_prezeroed();
             let frame_tracker = FrameTracker::new_uninit(ppn.into());
             Some(frame_tracker)
         } else {
@@ -852,17 +926,11 @@ lazy_static! {
 
 #[inline]
 fn with_frame_alloc_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
-    let start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let start = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let mut guard = FRAME_ALLOCATOR.write();
-    let acquired = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let acquired = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let result = op(&mut *guard);
-    let released = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let released = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     crate::task::perf::record_frame_global_alloc_lock(
         acquired.wrapping_sub(start),
         released.wrapping_sub(acquired),
@@ -872,17 +940,11 @@ fn with_frame_alloc_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R 
 
 #[inline]
 fn with_frame_free_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
-    let start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let start = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let mut guard = FRAME_ALLOCATOR.write();
-    let acquired = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let acquired = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let result = op(&mut *guard);
-    let released = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let released = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     crate::task::perf::record_frame_global_free_lock(
         acquired.wrapping_sub(start),
         released.wrapping_sub(acquired),
@@ -892,17 +954,11 @@ fn with_frame_free_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
 
 #[inline]
 fn with_frame_contig_lock<R>(op: impl FnOnce(&mut FrameAllocatorImpl) -> R) -> R {
-    let start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let start = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let mut guard = FRAME_ALLOCATOR.write();
-    let acquired = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let acquired = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     let result = op(&mut *guard);
-    let released = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let released = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     crate::task::perf::record_frame_contig_lock(
         acquired.wrapping_sub(start),
         released.wrapping_sub(acquired),
@@ -975,6 +1031,39 @@ pub fn init_frame_allocator() {
     with_frame_alloc_lock(|allocator| allocator.init());
 }
 
+/// Spend a bounded amount of an idle scheduler tick preparing zeroed demand
+/// pages.  CPU0 and APs share this routine; every iteration drops the allocator
+/// lock before touching page contents.
+pub fn idle_prezero_refill() -> usize {
+    let mut completed = 0;
+    for _ in 0..PREZERO_REFILL_PER_IDLE_TICK {
+        let Some(mut reservation) =
+            with_frame_alloc_lock(|allocator| allocator.reserve_for_prezero())
+        else {
+            break;
+        };
+        let ppn = reservation
+            .ppn
+            .expect("prezero reservation lost its physical page");
+        let started = crate::task::perf::perf_memory_io_time_now();
+        zero_frame_bytes(ppn);
+        let elapsed = crate::task::perf::perf_memory_io_time_now().wrapping_sub(started);
+        with_frame_alloc_lock(|allocator| allocator.publish_prezeroed(ppn));
+        reservation.ppn = None;
+        crate::task::perf::record_frame_prezero_refill(elapsed);
+        completed += 1;
+    }
+    completed
+}
+
+/// Current prezero pool occupancy and its configured high-water mark.
+pub fn prezero_pool_stats() -> (usize, usize) {
+    (
+        FRAME_ALLOCATOR.read().prezeroed.len(),
+        PREZERO_POOL_HIGH_WATER,
+    )
+}
+
 /// 尝试回收至少 `req` 个物理页。
 ///
 /// # Locking
@@ -1011,9 +1100,7 @@ pub fn oom_handler(req: usize) -> Result<(), ()> {
 #[cfg(feature = "oom_handler")]
 /// 尽力保证至少还有 `num` 个可分配帧。
 pub fn frame_reserve(num: usize) {
-    let started = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
+    let started = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
     // 获取还可分配的帧数量
     let remain = FRAME_ALLOCATOR.read().unallocated_frames();
     if remain < num {

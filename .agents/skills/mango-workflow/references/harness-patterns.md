@@ -1437,4 +1437,5 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **做法**：scheduler/current/task identity 使用 5 秒轻快照；PageCache、MM、journal、block 和 VirtIO 使用 30 秒重快照。每任务同时保留 user/kernel/blocked/runnable-wait 累计时间、阻塞类别和阻塞 syscall。启动 monitor 前固定 expected schema，首个完整快照必须同时验证版本和关键字段；不匹配就只终止明确绑定 kernel/overlay/PID 的本轮 QEMU。
 - **判据**：以 workload begin marker 重置 pre-timed 状态；连续两个轻快照 active≥4，或单点 active≥6 且下一窗口平均忙核≥3.5，才算真实峰值。峰后至少保留 36 个 5 秒快照（3 分钟），目标 60 个（5 分钟）；15 分钟无峰值本身就是前置串行放大的证据。
 - **扰动边界**：不逐事件打印；精确等待域使用编译期诊断门控和任务原子字段，正式构建不执行 `current_task()` 克隆。原始日志、pcap、overlay 和镜像永不提交。
+- **进程归属门禁**：停止后台 QEMU 时不能只在 `/proc/<pid>/cmdline` 搜索 kernel/overlay token；launcher shell 的 cmdline 同样包含整条 QEMU 命令，先杀 shell 会遗留孤儿 QEMU。遍历进程树时还必须解析 `/proc/<pid>/exe`，只接受 basename 与目标 `qemu-system-*` 完全一致且 kernel/overlay 同时匹配的进程，再发送信号并复查该 PID 已退出。
 - **相关文件**：`user/src/bin/init.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/task/task.rs`、`scripts/monitor_buildstorm_peak.py`

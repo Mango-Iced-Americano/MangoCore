@@ -162,7 +162,10 @@ pub(super) fn elf_lazy_fault<T: PageTable>(
         Some(backing) => backing,
         None => return FaultOutcome::Error(MemoryError::NotMapped),
     };
-    let target_ppn = match area.alloc_one_zeroed_unmapped(ctx.vpn) {
+    // Safety: `try_fill_page` first clears the complete destination and then
+    // overlays every intersecting PT_LOAD range. The frame has no PTE until
+    // that full initialization succeeds; all failure paths remove it below.
+    let target_ppn = match unsafe { area.alloc_one_uninit_unmapped(ctx.vpn) } {
         Ok(ppn) => ppn,
         Err(error) => return FaultOutcome::Error(error),
     };
@@ -255,7 +258,10 @@ pub(super) fn filemap_private_fault<T: PageTable>(
 
     // 先填充未发布页，再安装用户 PTE。若先 map 再 copy，同一 MM 的其它 CPU
     // 可能在内核写入期间访问该页，既暴露半成品数据也破坏 Rust 独占性。
-    let allocated_ppn = match area.alloc_one_zeroed_unmapped(ctx.vpn) {
+    // Safety: `try_copy_page_for_private` copies a complete cache page before
+    // applying the authoritative EOF tail zero. The target is unpublished and
+    // every retry/error path removes it before returning.
+    let allocated_ppn = match unsafe { area.alloc_one_uninit_unmapped(ctx.vpn) } {
         Ok(ppn) => ppn,
         Err(error) => return FaultOutcome::Error(error),
     };
@@ -326,21 +332,18 @@ pub(super) fn filemap_read_fault<T: PageTable>(
     };
     let page_index = file_offset >> PAGE_SIZE_BITS;
     let fault_around_pages = bounded_fault_around_pages(area, ctx, file_offset, file_size);
-    let cache_frame = match pc.try_frame_for_filemap_read_ahead(
-        page_index,
-        file_size,
-        fault_around_pages,
-    ) {
-        Ok(frame) => {
-            crate::task::perf::record_filemap_ready_hit();
-            frame
-        }
-        Err(PageCacheFault::Retry(wait)) => {
-            crate::task::perf::record_filemap_not_ready_retry();
-            return FaultOutcome::Retry(wait);
-        }
-        Err(PageCacheFault::Error(error)) => return FaultOutcome::Error(map_pc_error(error)),
-    };
+    let cache_frame =
+        match pc.try_frame_for_filemap_read_ahead(page_index, file_size, fault_around_pages) {
+            Ok(frame) => {
+                crate::task::perf::record_filemap_ready_hit();
+                frame
+            }
+            Err(PageCacheFault::Retry(wait)) => {
+                crate::task::perf::record_filemap_not_ready_retry();
+                return FaultOutcome::Retry(wait);
+            }
+            Err(PageCacheFault::Error(error)) => return FaultOutcome::Error(map_pc_error(error)),
+        };
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 

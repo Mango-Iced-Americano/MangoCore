@@ -265,9 +265,20 @@ impl Vma {
         mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
@@ -280,9 +291,20 @@ impl Vma {
         mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
@@ -294,9 +316,51 @@ impl Vma {
         &mut self,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
+        Ok(ppn)
+    }
+
+    /// Allocate one frame without clearing it and retain it in this VMA without
+    /// publishing a user PTE.
+    ///
+    /// # Safety
+    ///
+    /// The caller must completely initialize the whole page before installing
+    /// a PTE or otherwise exposing the frame to a reader. On every failure path
+    /// it must remove the unpublished frame with [`Self::remove_unmapped_frame`].
+    pub(super) unsafe fn alloc_one_uninit_unmapped(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        // Safety: this function preserves the uninitialized-frame contract for
+        // its caller and does not publish a PTE.
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
+        let frame = unsafe { frame_alloc_uninit() }.ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
+        let ppn = frame.ppn;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         Ok(ppn)
     }
 

@@ -34,7 +34,11 @@ fn read_counter(c: &core::sync::atomic::AtomicUsize) -> usize {
 fn diagnostic_token(value: &str, limit: usize) -> String {
     let mut token = String::new();
     for ch in value.chars().take(limit) {
-        token.push(if ch.is_whitespace() || ch == '=' { '_' } else { ch });
+        token.push(if ch.is_whitespace() || ch == '=' {
+            '_'
+        } else {
+            ch
+        });
     }
     if token.is_empty() {
         token.push('-');
@@ -165,27 +169,111 @@ fn stats_taskq_content(
         "ready_nonzero_nice_cur={}",
         read_counter(&crate::task::perf::READY_NONZERO_NICE_CUR)
     );
-    let _ = writeln!(s, "wake_local={}", read_counter(&crate::task::perf::WAKE_LOCAL));
-    let _ = writeln!(s, "wake_remote={}", read_counter(&crate::task::perf::WAKE_REMOTE));
-    let _ = writeln!(s, "wake_keep_last_cpu={}", read_counter(&crate::task::perf::WAKE_KEEP_LAST_CPU));
-    let _ = writeln!(s, "wake_select_idle_cpu={}", read_counter(&crate::task::perf::WAKE_SELECT_IDLE_CPU));
-    let _ = writeln!(s, "wake_select_least_loaded={}", read_counter(&crate::task::perf::WAKE_SELECT_LEAST_LOADED));
-    let _ = writeln!(s, "wake_last_busy_idle_available={}", read_counter(&crate::task::perf::WAKE_LAST_BUSY_IDLE_AVAILABLE));
-    let _ = writeln!(s, "new_task_idle_available={}", read_counter(&crate::task::perf::NEW_TASK_IDLE_AVAILABLE));
-    let _ = writeln!(s, "new_task_selected_idle={}", read_counter(&crate::task::perf::NEW_TASK_SELECTED_IDLE));
-    let _ = writeln!(s, "new_task_kept_busy_parent={}", read_counter(&crate::task::perf::NEW_TASK_KEPT_BUSY_PARENT));
-    let _ = writeln!(s, "wake_to_run_ticks_total={}", read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_TOTAL));
-    let _ = writeln!(s, "wake_to_run_ticks_max={}", read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_MAX));
-    let _ = writeln!(s, "task_run_slice_ticks_total={}", read_counter(&crate::task::perf::TASK_RUN_SLICE_TICKS_TOTAL));
-    let _ = writeln!(s, "steal_attempts={}", read_counter(&crate::task::perf::STEAL_ATTEMPTS));
-    let _ = writeln!(s, "steal_candidate_found={}", read_counter(&crate::task::perf::STEAL_CANDIDATE_FOUND));
-    let _ = writeln!(s, "steal_no_remote_ready={}", read_counter(&crate::task::perf::STEAL_NO_REMOTE_READY));
-    let _ = writeln!(s, "steal_no_eligible_candidate={}", read_counter(&crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE));
-    let _ = writeln!(s, "steal_success={}", read_counter(&crate::task::perf::STEAL_SUCCESS));
-    let _ = writeln!(s, "steal_recheck_failed={}", read_counter(&crate::task::perf::STEAL_RECHECK_FAILED));
-    let _ = writeln!(s, "steal_ktlb_sync_calls={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_CALLS));
-    let _ = writeln!(s, "steal_ktlb_sync_ticks_total={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL));
-    let _ = writeln!(s, "steal_ktlb_sync_ticks_max={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX));
+    let _ = writeln!(
+        s,
+        "wake_local={}",
+        read_counter(&crate::task::perf::WAKE_LOCAL)
+    );
+    let _ = writeln!(
+        s,
+        "wake_remote={}",
+        read_counter(&crate::task::perf::WAKE_REMOTE)
+    );
+    let _ = writeln!(
+        s,
+        "wake_keep_last_cpu={}",
+        read_counter(&crate::task::perf::WAKE_KEEP_LAST_CPU)
+    );
+    let _ = writeln!(
+        s,
+        "wake_select_idle_cpu={}",
+        read_counter(&crate::task::perf::WAKE_SELECT_IDLE_CPU)
+    );
+    let _ = writeln!(
+        s,
+        "wake_select_least_loaded={}",
+        read_counter(&crate::task::perf::WAKE_SELECT_LEAST_LOADED)
+    );
+    let _ = writeln!(
+        s,
+        "wake_last_busy_idle_available={}",
+        read_counter(&crate::task::perf::WAKE_LAST_BUSY_IDLE_AVAILABLE)
+    );
+    let _ = writeln!(
+        s,
+        "new_task_idle_available={}",
+        read_counter(&crate::task::perf::NEW_TASK_IDLE_AVAILABLE)
+    );
+    let _ = writeln!(
+        s,
+        "new_task_selected_idle={}",
+        read_counter(&crate::task::perf::NEW_TASK_SELECTED_IDLE)
+    );
+    let _ = writeln!(
+        s,
+        "new_task_kept_busy_parent={}",
+        read_counter(&crate::task::perf::NEW_TASK_KEPT_BUSY_PARENT)
+    );
+    let _ = writeln!(
+        s,
+        "wake_to_run_ticks_total={}",
+        read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "wake_to_run_ticks_max={}",
+        read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "task_run_slice_ticks_total={}",
+        read_counter(&crate::task::perf::TASK_RUN_SLICE_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "steal_attempts={}",
+        read_counter(&crate::task::perf::STEAL_ATTEMPTS)
+    );
+    let _ = writeln!(
+        s,
+        "steal_candidate_found={}",
+        read_counter(&crate::task::perf::STEAL_CANDIDATE_FOUND)
+    );
+    let _ = writeln!(
+        s,
+        "steal_no_remote_ready={}",
+        read_counter(&crate::task::perf::STEAL_NO_REMOTE_READY)
+    );
+    let _ = writeln!(
+        s,
+        "steal_no_eligible_candidate={}",
+        read_counter(&crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE)
+    );
+    let _ = writeln!(
+        s,
+        "steal_success={}",
+        read_counter(&crate::task::perf::STEAL_SUCCESS)
+    );
+    let _ = writeln!(
+        s,
+        "steal_recheck_failed={}",
+        read_counter(&crate::task::perf::STEAL_RECHECK_FAILED)
+    );
+    let _ = writeln!(
+        s,
+        "steal_ktlb_sync_calls={}",
+        read_counter(&crate::task::perf::STEAL_KTLB_SYNC_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "steal_ktlb_sync_ticks_total={}",
+        read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "steal_ktlb_sync_ticks_max={}",
+        read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX)
+    );
     let mut cpu_snapshots = Vec::new();
     let mut runnable_total = 0usize;
     let mut current_total_excluding_collector = 0usize;
@@ -197,7 +285,11 @@ fn stats_taskq_content(
         );
         cpu_snapshots.push(snapshot);
     }
-    let _ = writeln!(s, "scheduler_clock_freq_hz={}", crate::hal::get_clock_freq());
+    let _ = writeln!(
+        s,
+        "scheduler_clock_freq_hz={}",
+        crate::hal::get_clock_freq()
+    );
     let _ = writeln!(s, "runnable_total={}", runnable_total);
     let _ = writeln!(
         s,
@@ -247,11 +339,15 @@ fn stats_taskq_content(
                 blocked_reason,
                 blocked_syscall_id,
             ) = task.runtime_diagnostics();
-            let comm_len = comm.iter().position(|byte| *byte == 0).unwrap_or(comm.len());
+            let comm_len = comm
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(comm.len());
             let comm = diagnostic_token(core::str::from_utf8(&comm[..comm_len]).unwrap_or("-"), 15);
-            let current = cpu_snapshots.iter().enumerate().find(|(_, snapshot)| {
-                snapshot.current_present && snapshot.current_tid == tid
-            });
+            let current = cpu_snapshots
+                .iter()
+                .enumerate()
+                .find(|(_, snapshot)| snapshot.current_present && snapshot.current_tid == tid);
             let current_cpu = current
                 .map(|(cpu, _)| cpu.to_string())
                 .unwrap_or_else(|| String::from("-"));
@@ -657,25 +753,101 @@ fn stats_heap_content(
         "heap_dealloc_scan_steps_total={}",
         read_counter(&crate::task::perf::HEAP_DEALLOC_SCAN_STEPS_TOTAL)
     );
-    let _ = writeln!(s, "heap_alloc_requested_bytes={}", read_counter(&crate::task::perf::HEAP_ALLOC_REQUESTED_BYTES));
-    let _ = writeln!(s, "heap_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_lock_wait_ticks_max={}", read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_MAX));
-    let _ = writeln!(s, "heap_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_lock_hold_ticks_max={}", read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_MAX));
-    let _ = writeln!(s, "heap_alloc_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_alloc_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_dealloc_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_dealloc_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_slab_eligible_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_ALLOC_CALLS));
-    let _ = writeln!(s, "heap_slab_fast_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_FAST_CALLS));
-    let _ = writeln!(s, "heap_slab_refill_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_REFILL_CALLS));
-    let _ = writeln!(s, "heap_slab_fallback_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_FALLBACK_CALLS));
-    let _ = writeln!(s, "heap_direct_buddy_calls={}", read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_CALLS));
-    let _ = writeln!(s, "heap_direct_buddy_failures={}", read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_FAILURES));
-    let _ = writeln!(s, "heap_alloc_retry_attempts={}", read_counter(&crate::task::perf::HEAP_ALLOC_RETRY_ATTEMPTS));
-    let _ = writeln!(s, "heap_recovery_attempts={}", read_counter(&crate::task::perf::HEAP_RECOVERY_ATTEMPTS));
-    let _ = writeln!(s, "heap_recovery_successes={}", read_counter(&crate::task::perf::HEAP_RECOVERY_SUCCESSES));
-    let _ = writeln!(s, "heap_alloc_final_failures={}", read_counter(&crate::task::perf::HEAP_ALLOC_FINAL_FAILURES));
+    let _ = writeln!(
+        s,
+        "heap_alloc_requested_bytes={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_REQUESTED_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_wait_ticks_max={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_hold_ticks_max={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_dealloc_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_slab_eligible_calls={}",
+        read_counter(&crate::task::perf::HEAP_SLAB_ALLOC_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_slab_fast_calls={}",
+        read_counter(&crate::task::perf::HEAP_SLAB_FAST_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_slab_refill_calls={}",
+        read_counter(&crate::task::perf::HEAP_SLAB_REFILL_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_slab_fallback_calls={}",
+        read_counter(&crate::task::perf::HEAP_SLAB_FALLBACK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_direct_buddy_calls={}",
+        read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_direct_buddy_failures={}",
+        read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_FAILURES)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_retry_attempts={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_RETRY_ATTEMPTS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_recovery_attempts={}",
+        read_counter(&crate::task::perf::HEAP_RECOVERY_ATTEMPTS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_recovery_successes={}",
+        read_counter(&crate::task::perf::HEAP_RECOVERY_SUCCESSES)
+    );
+    let _ = writeln!(
+        s,
+        "heap_alloc_final_failures={}",
+        read_counter(&crate::task::perf::HEAP_ALLOC_FINAL_FAILURES)
+    );
     let heap_classes = [
         (8, &crate::task::perf::HEAP_CLASS_8_CALLS),
         (16, &crate::task::perf::HEAP_CLASS_16_CALLS),
@@ -690,15 +862,47 @@ fn stats_heap_content(
     for (bytes, counter) in heap_classes {
         let _ = writeln!(s, "heap_class_{}_calls={}", bytes, read_counter(counter));
     }
-    let hist_names = ["zero", "1_63", "64_1023", "1024_16383", "16384_262143", "ge262144"];
+    let hist_names = [
+        "zero",
+        "1_63",
+        "64_1023",
+        "1024_16383",
+        "16384_262143",
+        "ge262144",
+    ];
     for (index, name) in hist_names.iter().enumerate() {
-        let _ = writeln!(s, "heap_lock_wait_hist_{}={}", name, read_counter(&crate::task::perf::HEAP_LOCK_WAIT_HIST[index]));
-        let _ = writeln!(s, "heap_lock_hold_hist_{}={}", name, read_counter(&crate::task::perf::HEAP_LOCK_HOLD_HIST[index]));
+        let _ = writeln!(
+            s,
+            "heap_lock_wait_hist_{}={}",
+            name,
+            read_counter(&crate::task::perf::HEAP_LOCK_WAIT_HIST[index])
+        );
+        let _ = writeln!(
+            s,
+            "heap_lock_hold_hist_{}={}",
+            name,
+            read_counter(&crate::task::perf::HEAP_LOCK_HOLD_HIST[index])
+        );
     }
     for cpu in 0..crate::smp::MAX_CPUS {
-        let _ = writeln!(s, "heap_cpu{}_lock_calls={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_CALLS_BY_CPU[cpu]));
-        let _ = writeln!(s, "heap_cpu{}_lock_wait_ticks_total={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_BY_CPU[cpu]));
-        let _ = writeln!(s, "heap_cpu{}_lock_hold_ticks_total={}", cpu, read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_BY_CPU[cpu]));
+        let _ = writeln!(
+            s,
+            "heap_cpu{}_lock_calls={}",
+            cpu,
+            read_counter(&crate::task::perf::HEAP_LOCK_CALLS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "heap_cpu{}_lock_wait_ticks_total={}",
+            cpu,
+            read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "heap_cpu{}_lock_hold_ticks_total={}",
+            cpu,
+            read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_BY_CPU[cpu])
+        );
     }
     let _ = writeln!(
         s,
@@ -1627,28 +1831,116 @@ fn stats_blockio_content(
         "virtio_dma_small_pool_enabled={}",
         crate::drivers::block::virtio_dma_pool::dma_small_pool_is_enabled()
     );
-    let _ = writeln!(s, "virtio_blk_read_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_CHUNKS));
-    let _ = writeln!(s, "virtio_blk_read_bytes={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_BYTES));
-    let _ = writeln!(s, "virtio_blk_write_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_CHUNKS));
-    let _ = writeln!(s, "virtio_blk_write_bytes={}", read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_BYTES));
-    let _ = writeln!(s, "virtio_dma_pool_reserve_success={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_SUCCESS));
-    let _ = writeln!(s, "virtio_dma_pool_reserve_fail={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_FAIL));
-    let _ = writeln!(s, "virtio_dma_pool_consume={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CONSUME));
-    let _ = writeln!(s, "virtio_dma_pool_cancel={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CANCEL));
-    let _ = writeln!(s, "virtio_dma_pool_finish={}", read_counter(&crate::task::perf::VIRTIO_DMA_POOL_FINISH));
-    let _ = writeln!(s, "virtio_dma_share_calls={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_CALLS));
-    let _ = writeln!(s, "virtio_dma_share_data_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_POOL));
-    let _ = writeln!(s, "virtio_dma_share_data_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_FALLBACK));
-    let _ = writeln!(s, "virtio_dma_share_header_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_FALLBACK));
-    let _ = writeln!(s, "virtio_dma_share_status_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_FALLBACK));
-    let _ = writeln!(s, "virtio_dma_share_indirect_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_FALLBACK));
-    let _ = writeln!(s, "virtio_dma_share_other_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_OTHER_FALLBACK));
-    let _ = writeln!(s, "virtio_dma_share_header_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_POOL));
-    let _ = writeln!(s, "virtio_dma_share_status_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_POOL));
-    let _ = writeln!(s, "virtio_dma_share_indirect_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_POOL));
-    let _ = writeln!(s, "virtio_dma_bridge_lock_wait_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_max={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX));
+    let _ = writeln!(
+        s,
+        "virtio_blk_read_chunks={}",
+        read_counter(&crate::task::perf::VIRTIO_BLK_READ_CHUNKS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_blk_read_bytes={}",
+        read_counter(&crate::task::perf::VIRTIO_BLK_READ_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_blk_write_chunks={}",
+        read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_CHUNKS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_blk_write_bytes={}",
+        read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_reserve_success={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_SUCCESS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_reserve_fail={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_POOL_RESERVE_FAIL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_consume={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CONSUME)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_cancel={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_POOL_CANCEL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_pool_finish={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_POOL_FINISH)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_calls={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_data_pool={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_POOL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_data_fallback={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_DATA_FALLBACK)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_header_fallback={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_FALLBACK)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_status_fallback={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_FALLBACK)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_indirect_fallback={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_FALLBACK)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_other_fallback={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_OTHER_FALLBACK)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_header_pool={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_POOL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_status_pool={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_POOL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_share_indirect_pool={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_POOL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_bridge_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_bridge_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "virtio_dma_bridge_lock_hold_ticks_max={}",
+        read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX)
+    );
     let _ = writeln!(
         s,
         "sata_read_reqs={}",
@@ -2187,6 +2479,46 @@ fn stats_pagefault_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(1024);
+    let _ = writeln!(
+        s,
+        "pagefault_counter_schema_version={}",
+        crate::task::perf::PAGEFAULT_COUNTER_SCHEMA_VERSION
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_attempts={}",
+        crate::task::perf::pagefault_attempts()
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_completed={}",
+        crate::task::perf::pagefault_completed()
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_retries={}",
+        crate::task::perf::pagefault_retries()
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_errors={}",
+        crate::task::perf::pagefault_errors()
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_access_load={}",
+        crate::task::perf::pagefault_access_count(0)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_access_store={}",
+        crate::task::perf::pagefault_access_count(1)
+    );
+    let _ = writeln!(
+        s,
+        "pagefault_access_execute={}",
+        crate::task::perf::pagefault_access_count(2)
+    );
     let names = &crate::task::perf::PF_ACTION_NAMES;
     for tag in 0..names.len() {
         let count = crate::task::perf::pf_action_count(tag);
@@ -2222,95 +2554,514 @@ fn stats_vm_content(
         "filemap_counter_schema_version={}",
         crate::task::perf::FILEMAP_COUNTER_SCHEMA_VERSION
     );
-    let _ = writeln!(s, "filemap_fault_frames={}", read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES));
-    let _ = writeln!(s, "filemap_fault_ticks={}", read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS));
-    let _ = writeln!(s, "filemap_private_copy_ticks={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS));
-    let _ = writeln!(s, "filemap_map_user_ticks={}", read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS));
-    let _ = writeln!(s, "filemap_read_fault_calls={}", read_counter(&crate::task::perf::FILEMAP_READ_FAULT_CALLS));
-    let _ = writeln!(s, "filemap_private_fault_calls={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_FAULT_CALLS));
-    let _ = writeln!(s, "filemap_shared_write_fault_calls={}", read_counter(&crate::task::perf::FILEMAP_SHARED_WRITE_FAULT_CALLS));
-    let _ = writeln!(s, "filemap_ready_hit={}", read_counter(&crate::task::perf::FILEMAP_READY_HIT));
-    let _ = writeln!(s, "filemap_not_ready_retry={}", read_counter(&crate::task::perf::FILEMAP_NOT_READY_RETRY));
-    let _ = writeln!(s, "filemap_backend_read_calls={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_CALLS));
-    let _ = writeln!(s, "filemap_backend_read_ticks_total={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_TICKS_TOTAL));
-    let _ = writeln!(s, "filemap_backend_read_ticks_max={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_TICKS_MAX));
-    let _ = writeln!(s, "filemap_backend_read_under_vm_calls={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_CALLS));
-    let _ = writeln!(s, "filemap_backend_read_under_vm_ticks_total={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL));
-    let _ = writeln!(s, "filemap_backend_read_under_vm_ticks_max={}", read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX));
-    let _ = writeln!(s, "filemap_retry_wait_calls={}", read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_CALLS));
-    let _ = writeln!(s, "filemap_retry_wait_ticks_total={}", read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "filemap_retry_wait_ticks_max={}", read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_TICKS_MAX));
-    let _ = writeln!(s, "filemap_revalidate_retry={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_RETRY));
-    let _ = writeln!(s, "filemap_revalidate_vma_changed={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_VMA_CHANGED));
-    let _ = writeln!(s, "filemap_revalidate_eof_changed={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_EOF_CHANGED));
-    let _ = writeln!(s, "filemap_fault_around_calls={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CALLS));
-    let _ = writeln!(s, "filemap_fault_around_pages_requested={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_REQUESTED));
-    let _ = writeln!(s, "filemap_fault_around_pages_missing={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_MISSING));
-    let _ = writeln!(s, "filemap_fault_around_claim_conflicts={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS));
-    let _ = writeln!(s, "filemap_fault_around_pages_published={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PUBLISHED));
-    let _ = writeln!(s, "filemap_fault_around_pages_prefetched={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PREFETCHED));
-    let _ = writeln!(s, "filemap_fault_around_backend_runs={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_BACKEND_RUNS));
-    let _ = writeln!(s, "filemap_fault_around_useful_hits={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_USEFUL_HITS));
-    let _ = writeln!(s, "filemap_fault_around_unused_discards={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_UNUSED_DISCARDS));
-    let _ = writeln!(s, "filemap_fault_around_aborts={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_ABORTS));
-    let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
-    let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
-    let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));
-    let _ = writeln!(s, "execve_map_elf_ticks={}", read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS));
-    let _ = writeln!(s, "execve_kernel_map_ticks={}", read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS));
-    let _ = writeln!(s, "execve_interp_ticks={}", read_counter(&crate::task::perf::EXECVE_INTERP_TICKS));
-    let _ = writeln!(s, "execve_stack_tables_ticks={}", read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS));
-    let _ = writeln!(s, "execve_teardown_ticks={}", read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS));
-    let _ = writeln!(s, "exec_direct_count={}", read_counter(&crate::task::perf::EXEC_DIRECT_COUNT));
-    let _ = writeln!(s, "exec_fallback_count={}", read_counter(&crate::task::perf::EXEC_FALLBACK_COUNT));
-    let _ = writeln!(s, "exec_direct_enosys_count={}", read_counter(&crate::task::perf::EXEC_DIRECT_ENOSYS_COUNT));
-    let _ = writeln!(s, "vm_read_lock_calls={}", read_counter(&crate::task::perf::VM_READ_LOCK_CALLS));
-    let _ = writeln!(s, "vm_read_lock_wait_ticks_total={}", read_counter(&crate::task::perf::VM_READ_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "vm_read_lock_hold_ticks_total={}", read_counter(&crate::task::perf::VM_READ_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "vm_write_lock_calls={}", read_counter(&crate::task::perf::VM_WRITE_LOCK_CALLS));
-    let _ = writeln!(s, "vm_write_lock_wait_ticks_total={}", read_counter(&crate::task::perf::VM_WRITE_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "vm_write_lock_hold_ticks_total={}", read_counter(&crate::task::perf::VM_WRITE_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "vm_flush_outside_lock_ticks_total={}", read_counter(&crate::task::perf::VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL));
-    let _ = writeln!(s, "vm_read_lock_wait_ticks_max={}", read_counter(&crate::task::perf::VM_READ_LOCK_WAIT_TICKS_MAX));
-    let _ = writeln!(s, "vm_read_lock_hold_ticks_max={}", read_counter(&crate::task::perf::VM_READ_LOCK_HOLD_TICKS_MAX));
-    let _ = writeln!(s, "vm_write_lock_wait_ticks_max={}", read_counter(&crate::task::perf::VM_WRITE_LOCK_WAIT_TICKS_MAX));
-    let _ = writeln!(s, "vm_write_lock_hold_ticks_max={}", read_counter(&crate::task::perf::VM_WRITE_LOCK_HOLD_TICKS_MAX));
-    let _ = writeln!(s, "vm_flush_outside_lock_ticks_max={}", read_counter(&crate::task::perf::VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX));
-    let _ = writeln!(s, "task_switch_same_mm={}", read_counter(&crate::task::perf::TASK_SWITCH_SAME_MM));
-    let _ = writeln!(s, "task_switch_different_mm={}", read_counter(&crate::task::perf::TASK_SWITCH_DIFFERENT_MM));
-    let _ = writeln!(s, "task_switch_to_kernel_only={}", read_counter(&crate::task::perf::TASK_SWITCH_TO_KERNEL_ONLY));
-    let _ = writeln!(s, "task_switch_idle_no_next={}", read_counter(&crate::task::perf::TASK_SWITCH_IDLE_NO_NEXT));
-    let _ = writeln!(s, "mm_activate_calls={}", read_counter(&crate::task::perf::MM_ACTIVATE_CALLS));
-    let _ = writeln!(s, "mm_activate_ticks_total={}", read_counter(&crate::task::perf::MM_ACTIVATE_TICKS_TOTAL));
-    let _ = writeln!(s, "mm_deactivate_calls={}", read_counter(&crate::task::perf::MM_DEACTIVATE_CALLS));
-    let _ = writeln!(s, "mm_deactivate_ticks_total={}", read_counter(&crate::task::perf::MM_DEACTIVATE_TICKS_TOTAL));
-    let _ = writeln!(s, "mm_same_already_active={}", read_counter(&crate::task::perf::MM_SAME_ALREADY_ACTIVE));
-    let _ = writeln!(s, "mm_generation_catchup={}", read_counter(&crate::task::perf::MM_GENERATION_CATCHUP));
-    let _ = writeln!(s, "mm_asid_rollover={}", read_counter(&crate::task::perf::MM_ASID_ROLLOVER));
-    let _ = writeln!(s, "frame_alloc_lock_wait_ticks_total={}", read_counter(&crate::task::perf::FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "frame_alloc_lock_hold_ticks_total={}", read_counter(&crate::task::perf::FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "frame_free_lock_wait_ticks_total={}", read_counter(&crate::task::perf::FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "frame_free_lock_hold_ticks_total={}", read_counter(&crate::task::perf::FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "frame_reserve_check_calls={}", read_counter(&crate::task::perf::FRAME_RESERVE_CHECK_CALLS));
-    let _ = writeln!(s, "frame_reserve_check_ticks_total={}", read_counter(&crate::task::perf::FRAME_RESERVE_CHECK_TICKS_TOTAL));
-    let _ = writeln!(s, "frame_reserve_oom_calls={}", read_counter(&crate::task::perf::FRAME_RESERVE_OOM_CALLS));
-    let _ = writeln!(s, "frame_alloc_source_fresh={}", read_counter(&crate::task::perf::FRAME_ALLOC_SOURCE_FRESH));
-    let _ = writeln!(s, "frame_alloc_source_recycled={}", read_counter(&crate::task::perf::FRAME_ALLOC_SOURCE_RECYCLED));
-    let _ = writeln!(s, "frame_contig_pages={}", read_counter(&crate::task::perf::FRAME_CONTIG_PAGES));
-    let _ = writeln!(s, "frame_contig_zero_ticks_total={}", read_counter(&crate::task::perf::FRAME_CONTIG_ZERO_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_lock_wait_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_lock_hold_ticks_total={}", read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_TOTAL));
-    let _ = writeln!(s, "heap_slab_alloc_calls={}", read_counter(&crate::task::perf::HEAP_SLAB_ALLOC_CALLS));
-    let _ = writeln!(s, "heap_direct_buddy_calls={}", read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_CALLS));
-    let _ = writeln!(s, "heap_large_calls={}", read_counter(&crate::task::perf::HEAP_LARGE_CALLS));
-    let _ = writeln!(s, "exec_ptload_segments={}", read_counter(&crate::task::perf::EXEC_PTLOAD_SEGMENTS));
-    let _ = writeln!(s, "exec_ptload_pages={}", read_counter(&crate::task::perf::EXEC_PTLOAD_PAGES));
-    let _ = writeln!(s, "exec_ptload_file_bytes={}", read_counter(&crate::task::perf::EXEC_PTLOAD_FILE_BYTES));
-    let _ = writeln!(s, "exec_prefetch_ticks={}", read_counter(&crate::task::perf::EXEC_PREFETCH_TICKS));
-    let _ = writeln!(s, "exec_target_alloc_ticks={}", read_counter(&crate::task::perf::EXEC_TARGET_ALLOC_TICKS));
-    let _ = writeln!(s, "exec_target_zero_ticks={}", read_counter(&crate::task::perf::EXEC_TARGET_ZERO_TICKS));
-    let _ = writeln!(s, "exec_pagecache_copy_ticks={}", read_counter(&crate::task::perf::EXEC_PAGECACHE_COPY_TICKS));
-    let _ = writeln!(s, "exec_fallback_kmap_wait_ticks={}", read_counter(&crate::task::perf::EXEC_FALLBACK_KMAP_WAIT_TICKS));
+    let _ = writeln!(
+        s,
+        "filemap_fault_frames={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_private_copy_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_map_user_ticks={}",
+        read_counter(&crate::task::perf::FILEMAP_MAP_USER_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_read_fault_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_READ_FAULT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_private_fault_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_PRIVATE_FAULT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_shared_write_fault_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_SHARED_WRITE_FAULT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_ready_hit={}",
+        read_counter(&crate::task::perf::FILEMAP_READY_HIT)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_not_ready_retry={}",
+        read_counter(&crate::task::perf::FILEMAP_NOT_READY_RETRY)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_ticks_total={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_ticks_max={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_under_vm_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_under_vm_ticks_total={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_backend_read_under_vm_ticks_max={}",
+        read_counter(&crate::task::perf::FILEMAP_BACKEND_READ_UNDER_VM_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_retry_wait_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_retry_wait_ticks_total={}",
+        read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_retry_wait_ticks_max={}",
+        read_counter(&crate::task::perf::FILEMAP_RETRY_WAIT_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_revalidate_retry={}",
+        read_counter(&crate::task::perf::FILEMAP_REVALIDATE_RETRY)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_revalidate_vma_changed={}",
+        read_counter(&crate::task::perf::FILEMAP_REVALIDATE_VMA_CHANGED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_revalidate_eof_changed={}",
+        read_counter(&crate::task::perf::FILEMAP_REVALIDATE_EOF_CHANGED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_pages_requested={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_REQUESTED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_pages_missing={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_MISSING)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_claim_conflicts={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_pages_published={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PUBLISHED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_pages_prefetched={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PREFETCHED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_backend_runs={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_BACKEND_RUNS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_useful_hits={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_USEFUL_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_unused_discards={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_UNUSED_DISCARDS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_fault_around_aborts={}",
+        read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_ABORTS)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_page_flush_cycles={}",
+        read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_full_flush_cycles={}",
+        read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "tlb_activate_cycles={}",
+        read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES)
+    );
+    let _ = writeln!(
+        s,
+        "execve_map_elf_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_MAP_ELF_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_kernel_map_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_KERNEL_MAP_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_interp_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_INTERP_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_stack_tables_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_STACK_TABLES_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "execve_teardown_ticks={}",
+        read_counter(&crate::task::perf::EXECVE_TEARDOWN_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_direct_count={}",
+        read_counter(&crate::task::perf::EXEC_DIRECT_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "exec_fallback_count={}",
+        read_counter(&crate::task::perf::EXEC_FALLBACK_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "exec_direct_enosys_count={}",
+        read_counter(&crate::task::perf::EXEC_DIRECT_ENOSYS_COUNT)
+    );
+    let _ = writeln!(
+        s,
+        "vm_read_lock_calls={}",
+        read_counter(&crate::task::perf::VM_READ_LOCK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "vm_read_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::VM_READ_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "vm_read_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::VM_READ_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "vm_write_lock_calls={}",
+        read_counter(&crate::task::perf::VM_WRITE_LOCK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "vm_write_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::VM_WRITE_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "vm_write_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::VM_WRITE_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "vm_flush_outside_lock_ticks_total={}",
+        read_counter(&crate::task::perf::VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "vm_read_lock_wait_ticks_max={}",
+        read_counter(&crate::task::perf::VM_READ_LOCK_WAIT_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "vm_read_lock_hold_ticks_max={}",
+        read_counter(&crate::task::perf::VM_READ_LOCK_HOLD_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "vm_write_lock_wait_ticks_max={}",
+        read_counter(&crate::task::perf::VM_WRITE_LOCK_WAIT_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "vm_write_lock_hold_ticks_max={}",
+        read_counter(&crate::task::perf::VM_WRITE_LOCK_HOLD_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "vm_flush_outside_lock_ticks_max={}",
+        read_counter(&crate::task::perf::VM_FLUSH_OUTSIDE_LOCK_TICKS_MAX)
+    );
+    let _ = writeln!(
+        s,
+        "task_switch_same_mm={}",
+        read_counter(&crate::task::perf::TASK_SWITCH_SAME_MM)
+    );
+    let _ = writeln!(
+        s,
+        "task_switch_different_mm={}",
+        read_counter(&crate::task::perf::TASK_SWITCH_DIFFERENT_MM)
+    );
+    let _ = writeln!(
+        s,
+        "task_switch_to_kernel_only={}",
+        read_counter(&crate::task::perf::TASK_SWITCH_TO_KERNEL_ONLY)
+    );
+    let _ = writeln!(
+        s,
+        "task_switch_idle_no_next={}",
+        read_counter(&crate::task::perf::TASK_SWITCH_IDLE_NO_NEXT)
+    );
+    let _ = writeln!(
+        s,
+        "mm_activate_calls={}",
+        read_counter(&crate::task::perf::MM_ACTIVATE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "mm_activate_ticks_total={}",
+        read_counter(&crate::task::perf::MM_ACTIVATE_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "mm_deactivate_calls={}",
+        read_counter(&crate::task::perf::MM_DEACTIVATE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "mm_deactivate_ticks_total={}",
+        read_counter(&crate::task::perf::MM_DEACTIVATE_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "mm_same_already_active={}",
+        read_counter(&crate::task::perf::MM_SAME_ALREADY_ACTIVE)
+    );
+    let _ = writeln!(
+        s,
+        "mm_generation_catchup={}",
+        read_counter(&crate::task::perf::MM_GENERATION_CATCHUP)
+    );
+    let _ = writeln!(
+        s,
+        "mm_asid_rollover={}",
+        read_counter(&crate::task::perf::MM_ASID_ROLLOVER)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_GLOBAL_ALLOC_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_GLOBAL_ALLOC_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_free_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_GLOBAL_FREE_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_free_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_GLOBAL_FREE_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_reserve_check_calls={}",
+        read_counter(&crate::task::perf::FRAME_RESERVE_CHECK_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_reserve_check_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_RESERVE_CHECK_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_reserve_oom_calls={}",
+        read_counter(&crate::task::perf::FRAME_RESERVE_OOM_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_source_fresh={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_SOURCE_FRESH)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_source_recycled={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_SOURCE_RECYCLED)
+    );
+    let _ = writeln!(
+        s,
+        "frame_alloc_source_prezeroed={}",
+        read_counter(&crate::task::perf::FRAME_ALLOC_SOURCE_PREZEROED)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_pool_hits={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_POOL_HITS)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_pool_misses={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_POOL_MISSES)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_refill_pages={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_REFILL_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_refill_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_REFILL_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_sync_zero_pages={}",
+        read_counter(&crate::task::perf::FRAME_SYNC_ZERO_PAGES)
+    );
+    let (prezero_current, prezero_high_water) = crate::mm::prezero_pool_stats();
+    let _ = writeln!(s, "frame_prezero_pool_current={}", prezero_current);
+    let _ = writeln!(s, "frame_prezero_pool_high_water={}", prezero_high_water);
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_total={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_forward_1={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_FORWARD_1)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_forward_2_4={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_FORWARD_2_4)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_backward_1={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_BACKWARD_1)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_other={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_OTHER)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_locality_task_switch={}",
+        read_counter(&crate::task::perf::ANON_FAULT_LOCALITY_TASK_SWITCH)
+    );
+    let _ = writeln!(
+        s,
+        "frame_contig_pages={}",
+        read_counter(&crate::task::perf::FRAME_CONTIG_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "frame_contig_zero_ticks_total={}",
+        read_counter(&crate::task::perf::FRAME_CONTIG_ZERO_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_wait_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_WAIT_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_lock_hold_ticks_total={}",
+        read_counter(&crate::task::perf::HEAP_LOCK_HOLD_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "heap_slab_alloc_calls={}",
+        read_counter(&crate::task::perf::HEAP_SLAB_ALLOC_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_direct_buddy_calls={}",
+        read_counter(&crate::task::perf::HEAP_DIRECT_BUDDY_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "heap_large_calls={}",
+        read_counter(&crate::task::perf::HEAP_LARGE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_ptload_segments={}",
+        read_counter(&crate::task::perf::EXEC_PTLOAD_SEGMENTS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_ptload_pages={}",
+        read_counter(&crate::task::perf::EXEC_PTLOAD_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "exec_ptload_file_bytes={}",
+        read_counter(&crate::task::perf::EXEC_PTLOAD_FILE_BYTES)
+    );
+    let _ = writeln!(
+        s,
+        "exec_prefetch_ticks={}",
+        read_counter(&crate::task::perf::EXEC_PREFETCH_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_target_alloc_ticks={}",
+        read_counter(&crate::task::perf::EXEC_TARGET_ALLOC_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_target_zero_ticks={}",
+        read_counter(&crate::task::perf::EXEC_TARGET_ZERO_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_pagecache_copy_ticks={}",
+        read_counter(&crate::task::perf::EXEC_PAGECACHE_COPY_TICKS)
+    );
+    let _ = writeln!(
+        s,
+        "exec_fallback_kmap_wait_ticks={}",
+        read_counter(&crate::task::perf::EXEC_FALLBACK_KMAP_WAIT_TICKS)
+    );
     write_str(offset, len, buf, &s)
 }
 

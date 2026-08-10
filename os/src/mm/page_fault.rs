@@ -98,14 +98,28 @@ impl PageFaultHandler {
         mapper: &mut UserMapper<'_, T>,
         ctx: FaultContext,
     ) -> FaultOutcome {
+        crate::task::perf::record_pagefault_attempt(ctx.access);
         if let Err(error) = check_area_permission(area, ctx) {
+            crate::task::perf::record_pagefault_outcome(2);
             return FaultOutcome::Error(error);
         }
 
+        let classify_start = crate::task::perf::perf_memory_io_time_now();
         let action = match Self::classify(area, mapper, ctx) {
             Ok(action) => action,
-            Err(error) => return FaultOutcome::Error(error),
+            Err(error) => {
+                crate::task::perf::record_pagefault_stage(
+                    1,
+                    crate::task::perf::perf_memory_io_time_now().wrapping_sub(classify_start),
+                );
+                crate::task::perf::record_pagefault_outcome(2);
+                return FaultOutcome::Error(error);
+            }
         };
+        crate::task::perf::record_pagefault_stage(
+            1,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(classify_start),
+        );
         let action_tag = match action {
             FaultAction::LazyAlloc => 0usize,
             FaultAction::FileBackedRead => 1,
@@ -114,53 +128,64 @@ impl PageFaultHandler {
             FaultAction::SharedWrite => 4,
             FaultAction::Cow => 5,
             FaultAction::ElfLazy => 6,
-            _ => 7,
+            #[cfg(feature = "oom_handler")]
+            FaultAction::Decompress => 7,
+            #[cfg(feature = "oom_handler")]
+            FaultAction::SwapIn => 8,
+            FaultAction::StaleLazyPte => 9,
+            FaultAction::MappedRead => 10,
+            FaultAction::ResidentWithoutPte => 11,
         };
         let _pf_start = crate::task::perf::perf_memory_io_time_now();
-        let result = match action {
+        let outcome = match action {
             // 匿名页首次访问：分配清零物理页并安装用户 PTE。
             FaultAction::LazyAlloc => {
-                map_lazy_zero_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
+                crate::task::perf::record_anon_fault_locality(ctx.vpn.0);
+                result_to_outcome(
+                    map_lazy_zero_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn)),
+                )
             }
             // 文件映射页首次读取/执行：直接映射文件页缓存。
-            FaultAction::FileBackedRead => return filemap_read_fault(area, mapper, ctx),
+            FaultAction::FileBackedRead => filemap_read_fault(area, mapper, ctx),
             // 文件映射页首次写入共享映射：映射 page cache 帧并标脏。
-            FaultAction::FileBackedSharedWrite => {
-                return filemap_shared_write_fault(area, mapper, ctx)
-            }
+            FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射：分配私有物理页并从文件填充内容。
-            FaultAction::FileBackedWrite => return filemap_private_fault(area, mapper, ctx),
-            FaultAction::ElfLazy => return elf_lazy_fault(area, mapper, ctx),
+            FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
+            FaultAction::ElfLazy => elf_lazy_fault(area, mapper, ctx),
             // 压缩匿名页再次访问：解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
-            FaultAction::Decompress => {
-                finish_decompress_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
-            }
+            FaultAction::Decompress => result_to_outcome(
+                finish_decompress_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn)),
+            ),
             // 已换出的匿名页再次访问：从 swap/zram 换入后恢复映射。
             #[cfg(feature = "oom_handler")]
-            FaultAction::SwapIn => {
-                finish_swap_in_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
-            }
+            FaultAction::SwapIn => result_to_outcome(
+                finish_swap_in_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn)),
+            ),
             // MAP_SHARED 写保护 fault：恢复共享写权限。
-            FaultAction::SharedWrite => return restore_shared_write(area, mapper, ctx),
+            FaultAction::SharedWrite => restore_shared_write(area, mapper, ctx),
             // Stale lazy PTE：页表已有项但元数据仍未分配，先清理再修复。
-            FaultAction::StaleLazyPte => repair_stale_lazy_pte(area, mapper, ctx),
+            FaultAction::StaleLazyPte => {
+                result_to_outcome(repair_stale_lazy_pte(area, mapper, ctx))
+            }
             // 私有已映射页写入：触发 COW。
-            FaultAction::Cow => copy_private_page(area, mapper, ctx),
+            FaultAction::Cow => result_to_outcome(copy_private_page(area, mapper, ctx)),
             // 已映射页读取/执行：直接翻译物理地址。
-            FaultAction::MappedRead => translate_mapped_page(mapper, ctx),
+            FaultAction::MappedRead => result_to_outcome(translate_mapped_page(mapper, ctx)),
             // MAP_SHARED 匿名页可以预分配共享 frame，但延迟安装用户 PTE；
             // 这样 `mincore` 仍能观察到未访问页未 present。
-            FaultAction::ResidentWithoutPte => {
-                map_existing_resident_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn))
-            }
+            FaultAction::ResidentWithoutPte => result_to_outcome(
+                map_existing_resident_page(area, mapper, ctx).map(|ppn| ctx.offset_phys(ppn)),
+            ),
         };
         let elapsed = crate::task::perf::perf_memory_io_time_now().wrapping_sub(_pf_start);
         crate::task::perf::record_pagefault_action(action_tag, elapsed);
-        match result {
-            Ok(pa) => FaultOutcome::Completed(pa),
-            Err(error) => FaultOutcome::Error(error),
-        }
+        crate::task::perf::record_pagefault_outcome(match &outcome {
+            FaultOutcome::Completed(_) => 0,
+            FaultOutcome::Retry(_) => 1,
+            FaultOutcome::Error(_) => 2,
+        });
+        outcome
     }
 
     fn classify<T: PageTable>(
@@ -204,6 +229,14 @@ impl PageFaultHandler {
                 VmPageState::SwappedOut => Ok(FaultAction::SwapIn),
             },
         }
+    }
+}
+
+#[inline(always)]
+fn result_to_outcome(result: Result<PhysAddr, MemoryError>) -> FaultOutcome {
+    match result {
+        Ok(pa) => FaultOutcome::Completed(pa),
+        Err(error) => FaultOutcome::Error(error),
     }
 }
 

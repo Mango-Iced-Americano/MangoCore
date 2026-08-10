@@ -26,6 +26,8 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
 pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 3;
+/// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
+pub const PAGEFAULT_COUNTER_SCHEMA_VERSION: usize = 3;
 /// `/sys/kernel/stats/heap` allocator attribution field semantics version.
 pub const HEAP_COUNTER_SCHEMA_VERSION: usize = 1;
 pub const HEAP_LOCK_HIST_BUCKETS: usize = 6;
@@ -135,19 +137,39 @@ mod enabled {
         [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
 
     // ── Page fault per-action profile ──
-    // action 0=LazyAlloc 1=FileBackedRead 2=FileBackedSharedWrite
-    //        3=FileBackedWrite 4=SharedWrite 5=Cow 6=Other
-    pub const PF_ACTION_NAMES: [&str; 7] = [
+    // Keep every classifier arm distinct. The old seven-entry table folded
+    // ELF/filemap actions into "Other" and early returns skipped recording.
+    pub const PF_ACTION_NAMES: [&str; 12] = [
         "LazyAlloc",
         "FileBackedRead",
         "FileBackedSharedWrite",
         "FileBackedWrite",
         "SharedWrite",
         "Cow",
-        "Other",
+        "ElfLazy",
+        "Decompress",
+        "SwapIn",
+        "StaleLazyPte",
+        "MappedRead",
+        "ResidentWithoutPte",
     ];
-    static PF_ACTION_COUNT: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
-    static PF_ACTION_TICKS: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+    static PF_ACTION_COUNT: [AtomicUsize; 12] = [const { AtomicUsize::new(0) }; 12];
+    static PF_ACTION_TICKS: [AtomicUsize; 12] = [const { AtomicUsize::new(0) }; 12];
+    static PF_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    static PF_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+    static PF_RETRIES: AtomicUsize = AtomicUsize::new(0);
+    static PF_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static PF_ACCESS_COUNT: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+    pub static ANON_FAULT_LOCALITY_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_FORWARD_1: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_FORWARD_2_4: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_BACKWARD_1: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_OTHER: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_TASK_SWITCH: AtomicUsize = AtomicUsize::new(0);
+    static LAST_ANON_FAULT_PID: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    static LAST_ANON_FAULT_VPN: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
     // ── Demand page-fault phase profile ──
     pub const PF_STAGE_NAMES: [&str; 8] = [
@@ -158,7 +180,7 @@ mod enabled {
         "zero_copy",
         "tlb_flush",
         "trap_return",
-        "filemap_frame",
+        "frame_store",
     ];
     static PF_STAGE_COUNT: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
     static PF_STAGE_TICKS: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
@@ -246,6 +268,12 @@ mod enabled {
     pub static FRAME_RESERVE_OOM_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_ALLOC_SOURCE_FRESH: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_ALLOC_SOURCE_RECYCLED: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_ALLOC_SOURCE_PREZEROED: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_POOL_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_POOL_MISSES: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_SYNC_ZERO_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -691,6 +719,79 @@ mod enabled {
             FRAME_ALLOC_SOURCE_RECYCLED.fetch_add(1, Ordering::Relaxed);
         } else {
             FRAME_ALLOC_SOURCE_FRESH.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_alloc_source_prezeroed() {
+        if memory_io_stats_enabled() {
+            FRAME_ALLOC_SOURCE_PREZEROED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_hit() {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_POOL_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_miss() {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_POOL_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_refill(ticks: usize) {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_REFILL_PAGES.fetch_add(1, Ordering::Relaxed);
+            FRAME_PREZERO_REFILL_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_sync_zero() {
+        if memory_io_stats_enabled() {
+            FRAME_SYNC_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Classify spatial locality between consecutive anonymous demand faults
+    /// from the same task on one CPU. This is diagnostic-only and deliberately
+    /// does not pre-map pages or alter VMA residency semantics.
+    #[inline(always)]
+    pub fn record_anon_fault_locality(vpn: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        ANON_FAULT_LOCALITY_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let cpu = crate::smp::cpu_id();
+        if cpu >= crate::smp::MAX_CPUS {
+            ANON_FAULT_LOCALITY_OTHER.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let pid = crate::task::current_task()
+            .map(|task| task.pid())
+            .unwrap_or(usize::MAX);
+        let encoded_pid = pid.wrapping_add(1);
+        let encoded_vpn = vpn.wrapping_add(1);
+        let previous_pid = LAST_ANON_FAULT_PID[cpu].swap(encoded_pid, Ordering::Relaxed);
+        let previous_vpn = LAST_ANON_FAULT_VPN[cpu].swap(encoded_vpn, Ordering::Relaxed);
+        if previous_pid == 0 || previous_vpn == 0 || previous_pid != encoded_pid {
+            ANON_FAULT_LOCALITY_TASK_SWITCH.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let previous_vpn = previous_vpn - 1;
+        if vpn == previous_vpn.wrapping_add(1) {
+            ANON_FAULT_LOCALITY_FORWARD_1.fetch_add(1, Ordering::Relaxed);
+        } else if vpn > previous_vpn && vpn - previous_vpn <= 4 {
+            ANON_FAULT_LOCALITY_FORWARD_2_4.fetch_add(1, Ordering::Relaxed);
+        } else if previous_vpn == vpn.wrapping_add(1) {
+            ANON_FAULT_LOCALITY_BACKWARD_1.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ANON_FAULT_LOCALITY_OTHER.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2859,6 +2960,13 @@ mod enabled {
             PF_ACTION_COUNT[i].store(0, Ordering::Relaxed);
             PF_ACTION_TICKS[i].store(0, Ordering::Relaxed);
         }
+        PF_ATTEMPTS.store(0, Ordering::Relaxed);
+        PF_COMPLETED.store(0, Ordering::Relaxed);
+        PF_RETRIES.store(0, Ordering::Relaxed);
+        PF_ERRORS.store(0, Ordering::Relaxed);
+        for counter in &PF_ACCESS_COUNT {
+            counter.store(0, Ordering::Relaxed);
+        }
         for i in 0..PF_STAGE_COUNT.len() {
             PF_STAGE_COUNT[i].store(0, Ordering::Relaxed);
             PF_STAGE_TICKS[i].store(0, Ordering::Relaxed);
@@ -2941,6 +3049,24 @@ mod enabled {
         FRAME_RESERVE_OOM_CALLS.store(0, Ordering::Relaxed);
         FRAME_ALLOC_SOURCE_FRESH.store(0, Ordering::Relaxed);
         FRAME_ALLOC_SOURCE_RECYCLED.store(0, Ordering::Relaxed);
+        FRAME_ALLOC_SOURCE_PREZEROED.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_POOL_HITS.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_POOL_MISSES.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_PAGES.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_SYNC_ZERO_PAGES.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_TOTAL.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_FORWARD_1.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_FORWARD_2_4.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_BACKWARD_1.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_OTHER.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_TASK_SWITCH.store(0, Ordering::Relaxed);
+        for counter in &LAST_ANON_FAULT_PID {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &LAST_ANON_FAULT_VPN {
+            counter.store(0, Ordering::Relaxed);
+        }
         FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
         FRAME_CONTIG_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
         FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -3547,9 +3673,59 @@ mod enabled {
         if !memory_io_stats_enabled() {
             return;
         }
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_COUNT.len() {
             PF_ACTION_COUNT[action_tag].fetch_add(1, Ordering::Relaxed);
             PF_ACTION_TICKS[action_tag].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pagefault_attempt(access: crate::mm::FaultAccess) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PF_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let index = match access {
+            crate::mm::FaultAccess::Load => 0,
+            crate::mm::FaultAccess::Store => 1,
+            crate::mm::FaultAccess::Execute => 2,
+        };
+        PF_ACCESS_COUNT[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pagefault_outcome(outcome: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        match outcome {
+            0 => PF_COMPLETED.fetch_add(1, Ordering::Relaxed),
+            1 => PF_RETRIES.fetch_add(1, Ordering::Relaxed),
+            _ => PF_ERRORS.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    pub fn pagefault_attempts() -> usize {
+        PF_ATTEMPTS.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_completed() -> usize {
+        PF_COMPLETED.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_retries() -> usize {
+        PF_RETRIES.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_errors() -> usize {
+        PF_ERRORS.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_access_count(access: usize) -> usize {
+        if access < PF_ACCESS_COUNT.len() {
+            PF_ACCESS_COUNT[access].load(Ordering::Relaxed)
+        } else {
+            0
         }
     }
 
@@ -3593,7 +3769,7 @@ mod enabled {
     }
 
     pub fn pf_action_count(action_tag: usize) -> usize {
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_COUNT.len() {
             PF_ACTION_COUNT[action_tag].load(Ordering::Relaxed)
         } else {
             0
@@ -3601,7 +3777,7 @@ mod enabled {
     }
 
     pub fn pf_action_ticks(action_tag: usize) -> usize {
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_TICKS.len() {
             PF_ACTION_TICKS[action_tag].load(Ordering::Relaxed)
         } else {
             0
@@ -3761,6 +3937,39 @@ pub fn syscall_ticks(_id: usize) -> usize {
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_pagefault_action(_action_tag: usize, _elapsed: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_attempt(_access: crate::mm::FaultAccess) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_outcome(_outcome: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_attempts() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_completed() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_retries() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_errors() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_access_count(_access: usize) -> usize {
+    0
+}
 
 #[cfg(not(feature = "perf_stats"))]
 pub fn pf_action_count(_action_tag: usize) -> usize {
@@ -3946,6 +4155,30 @@ pub fn record_frame_alloc_source(_recycled: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_frame_alloc_source_prezeroed() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_hit() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_miss() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_refill(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_sync_zero() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_locality(_vpn: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_contig_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3994,12 +4227,7 @@ pub fn record_wake_remote() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_wake_selection(
-    _keep_last: bool,
-    _idle: bool,
-    _last_busy_idle_available: bool,
-) {
-}
+pub fn record_wake_selection(_keep_last: bool, _idle: bool, _last_busy_idle_available: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -4078,8 +4306,7 @@ pub static EXEC_PAGECACHE_COPY_TICKS: core::sync::atomic::AtomicUsize =
 macro_rules! perf_stub_counter {
     ($name:ident) => {
         #[cfg(not(feature = "perf_stats"))]
-        pub static $name: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
+        pub static $name: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     };
 }
 perf_stub_counter!(VM_READ_LOCK_WAIT_TICKS_MAX);
@@ -4102,6 +4329,18 @@ perf_stub_counter!(FRAME_RESERVE_CHECK_TICKS_TOTAL);
 perf_stub_counter!(FRAME_RESERVE_OOM_CALLS);
 perf_stub_counter!(FRAME_ALLOC_SOURCE_FRESH);
 perf_stub_counter!(FRAME_ALLOC_SOURCE_RECYCLED);
+perf_stub_counter!(FRAME_ALLOC_SOURCE_PREZEROED);
+perf_stub_counter!(FRAME_PREZERO_POOL_HITS);
+perf_stub_counter!(FRAME_PREZERO_POOL_MISSES);
+perf_stub_counter!(FRAME_PREZERO_REFILL_PAGES);
+perf_stub_counter!(FRAME_PREZERO_REFILL_TICKS_TOTAL);
+perf_stub_counter!(FRAME_SYNC_ZERO_PAGES);
+perf_stub_counter!(ANON_FAULT_LOCALITY_TOTAL);
+perf_stub_counter!(ANON_FAULT_LOCALITY_FORWARD_1);
+perf_stub_counter!(ANON_FAULT_LOCALITY_FORWARD_2_4);
+perf_stub_counter!(ANON_FAULT_LOCALITY_BACKWARD_1);
+perf_stub_counter!(ANON_FAULT_LOCALITY_OTHER);
+perf_stub_counter!(ANON_FAULT_LOCALITY_TASK_SWITCH);
 perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_MAX);
 perf_stub_counter!(FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL);
@@ -5499,23 +5738,32 @@ pub static FILEMAP_FAULT_TICKS: core::sync::atomic::AtomicUsize =
 pub static FILEMAP_PRIVATE_COPY_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_READ_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_READ_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_PRIVATE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_PRIVATE_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_READY_HIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_READY_HIT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_NOT_READY_RETRY: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_NOT_READY_RETRY: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB flush cycle stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -5542,44 +5790,62 @@ pub static EXECVE_INTERP_TICKS: core::sync::atomic::AtomicUsize =
 pub static EXECVE_STACK_TABLES_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_DIRECT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_DIRECT_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_FALLBACK_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_FALLBACK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_DIRECT_ENOSYS_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_DIRECT_ENOSYS_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Stage 0 VM/MM switch stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TASK_SWITCH_SAME_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TASK_SWITCH_SAME_MM: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TASK_SWITCH_DIFFERENT_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TASK_SWITCH_DIFFERENT_MM: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── PF action names stub ──
 #[cfg(not(feature = "perf_stats"))]
-pub const PF_ACTION_NAMES: [&str; 7] = [
+pub const PF_ACTION_NAMES: [&str; 12] = [
     "LazyAlloc",
     "FileBackedRead",
     "FileBackedSharedWrite",
     "FileBackedWrite",
     "SharedWrite",
     "Cow",
-    "Other",
+    "ElfLazy",
+    "Decompress",
+    "SwapIn",
+    "StaleLazyPte",
+    "MappedRead",
+    "ResidentWithoutPte",
 ];
 
 #[cfg(not(feature = "perf_stats"))]
@@ -5591,5 +5857,5 @@ pub const PF_STAGE_NAMES: [&str; 8] = [
     "zero_copy",
     "tlb_flush",
     "trap_return",
-    "filemap_frame",
+    "frame_store",
 ];

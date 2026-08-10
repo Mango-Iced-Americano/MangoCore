@@ -18,7 +18,6 @@ use crate::net::syscall::*;
 use alloc::collections::BTreeSet;
 use core::convert::TryFrom;
 use flock::*;
-use spin::Mutex;
 use fs::*;
 use log::{error, info};
 use process::*;
@@ -31,6 +30,7 @@ pub use process::{
     sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits, sysv_sem_proc_snapshot,
     sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
 };
+use spin::Mutex;
 use syscall_id::*;
 
 #[cfg(feature = "riscv")]
@@ -1060,6 +1060,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             0,
         );
     }
+    // The field describes what is executing now, not the last syscall seen on
+    // this CPU.  Clear it before returning to userspace so task snapshots do
+    // not attribute pure user computation to a stale syscall.
+    crate::task::set_current_syscall_id(None);
     ret
 }
 
