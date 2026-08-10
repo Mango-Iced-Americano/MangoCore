@@ -8,7 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
 use user_lib::{
     chdir, close, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction,
-    sleep, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
+    sleep, sleep_blocking, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL,
+    SIGTERM,
 };
 
 #[path = "init/mounts.rs"]
@@ -158,17 +159,19 @@ fn buildstorm_stats_profile() -> Option<(&'static str, &'static [u8], bool)> {
     }
 }
 
-fn enable_buildstorm_stats(profile_name: &str, profile_value: &[u8]) {
+fn enable_buildstorm_stats(profile_name: &str, profile_value: &[u8]) -> bool {
     let profile_ok = write_buildstorm_stat_control("/sys/kernel/stats/profile\0", profile_value);
     let reset_ok = write_buildstorm_stat_control("/sys/kernel/stats/reset\0", b"1\n");
     let stats_on_ok = write_buildstorm_stat_control("/sys/kernel/stats/stats_on\0", b"1\n");
+    let enabled = profile_ok && reset_ok && stats_on_ok;
     println!(
         "[init] BuildStorm stats enabled profile={} profile_ok={} reset_ok={} stats_on_ok={}",
         profile_name, profile_ok, reset_ok, stats_on_ok
     );
+    enabled
 }
 
-fn dump_buildstorm_stats(sample: usize, all: bool) {
+fn dump_buildstorm_stats(sample: usize, all: bool) -> bool {
     println!("BUILDSTORM_STATS_BEGIN sample={}", sample);
     let paths: &[&str] = if all {
         &[
@@ -185,10 +188,12 @@ fn dump_buildstorm_stats(sample: usize, all: bool) {
     } else {
         &["/sys/kernel/stats/taskq\0"]
     };
+    let mut available = true;
     for path in paths {
         let fd = open(path, OpenFlags::RDONLY);
         if fd < 0 {
             println!("[init] BuildStorm stats read {} failed: {}", path, fd);
+            available = false;
             continue;
         }
         let mut buf = [0u8; 16384];
@@ -199,6 +204,7 @@ fn dump_buildstorm_stats(sample: usize, all: bool) {
         }
     }
     println!("BUILDSTORM_STATS_END sample={}", sample);
+    available
 }
 
 fn start_buildstorm_stats_collector(all: bool) {
@@ -211,9 +217,12 @@ fn start_buildstorm_stats_collector(all: bool) {
             (5_000, false)
         };
         loop {
-            dump_buildstorm_stats(sample, dump_all);
+            if !dump_buildstorm_stats(sample, dump_all) {
+                println!("[init] BuildStorm stats unavailable; collector stopped");
+                exit(0);
+            }
             sample = sample.wrapping_add(1);
-            sleep(period_ms);
+            sleep_blocking(period_ms);
         }
     }
     if child < 0 {
@@ -367,8 +376,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             rescue_forever();
         }
         if let Some((profile_name, profile_value, all)) = buildstorm_stats {
-            enable_buildstorm_stats(profile_name, profile_value);
-            start_buildstorm_stats_collector(all);
+            if enable_buildstorm_stats(profile_name, profile_value) {
+                start_buildstorm_stats_collector(all);
+            } else {
+                println!("[init] BuildStorm stats unavailable; collector not started");
+            }
         }
         enable_buildstorm_cpus();
         exec_buildstorm_init();
