@@ -5,6 +5,48 @@ use crate::utils::error::SyscallErr;
 
 use super::fixtures::{ArmableFlushDevice, BarrierBlockDevice, FlushFailsAfterMountDevice};
 
+pub(super) fn test_consecutive_unlinks_batch_until_sync() -> Result<(), &'static str> {
+    const FIRST: &str = "another-unlink-batch-first";
+    const SECOND: &str = "another-unlink-batch-second";
+
+    let device = crate::drivers::block::get_block_device(0)
+        .ok_or("ktest requires a clean ext4 root block device")?;
+    if !device.supports_reliable_flush() {
+        return Err("ktest fixture device lacks reliable flush support");
+    }
+    let barrier = Arc::new(BarrierBlockDevice::new(device));
+    let fs = crate::fs::ext4_another::Ext4FileSystem::open(barrier.clone())
+        .map_err(|_| "batching fixture mount failed")?;
+    let root = fs.root_inode();
+    let _ = root.unlink(FIRST);
+    let _ = root.unlink(SECOND);
+    root.sync().map_err(|_| "stale-name cleanup sync failed")?;
+    root.create(FIRST, FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "first batching fixture create failed")?;
+    root.create(SECOND, FileType::File, InodeMode::S_IRWXUGO)
+        .map_err(|_| "second batching fixture create failed")?;
+    root.sync()
+        .map_err(|_| "batching fixture durability setup failed")?;
+
+    let flushes_before = barrier.flush_count();
+    root.unlink(FIRST)
+        .map_err(|_| "first batched unlink failed")?;
+    if barrier.flush_count() != flushes_before || root.find(FIRST).is_ok() {
+        return Err("first unlink flushed or remained visible");
+    }
+    root.unlink(SECOND)
+        .map_err(|_| "second batched unlink failed")?;
+    if barrier.flush_count() != flushes_before || root.find(SECOND).is_ok() {
+        return Err("second unlink flushed or remained visible");
+    }
+
+    root.sync().map_err(|_| "batched unlink sync failed")?;
+    if barrier.flush_count() <= flushes_before {
+        return Err("sync did not commit the deferred namespace batch");
+    }
+    Ok(())
+}
+
 pub(super) fn test_fsync_and_syncfs_surface_flush_failures() -> Result<(), &'static str> {
     let device = crate::drivers::block::get_block_device(0)
         .ok_or("ktest requires a clean ext4 root block device")?;
