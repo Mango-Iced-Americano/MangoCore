@@ -245,6 +245,13 @@ another_ext4 的 transaction 诊断会在串口输出 `[wb_txn]` 事件：`commi
 | `filemap_backend_read_calls` | counter | filemap 调用 PageCache 后端读取的次数 |
 | `filemap_backend_read_ticks_total` | counter | 上述 PageCache 读取累计 ticks |
 | `filemap_backend_read_under_vm_calls` | counter | 后端读取发生在 VM 写锁内的次数 |
+| `filemap_fault_around_calls/pages_requested` | counter | filemap 冷缺页触发的受限窗口次数与请求页数 |
+| `filemap_fault_around_pages_missing/published` | counter | admission 时实际缺页数与代际重验后实际发布页数 |
+| `filemap_fault_around_pages_prefetched` | counter | 发布页中除 demand 页外带 readahead 标记的页数 |
+| `filemap_fault_around_backend_runs` | counter | 连续 miss run 产生的真实后端 `read_pages` 调用数 |
+| `filemap_fault_around_useful_hits` | counter | readahead 页随后被 PageCache/filemap 消费的次数 |
+| `filemap_fault_around_unused_discards` | counter | readahead 页未使用即被回收、truncate 或 invalidate 的次数 |
+| `filemap_fault_around_aborts` | counter | 批量 admission 因 I/O、内存或 generation 变化放弃的次数 |
 | `exec_direct_count` | counter | exec 尝试 direct ELF loader 的次数 |
 | `exec_direct_enosys_count` | counter | direct loader 返回 ENOSYS 的次数 |
 | `exec_fallback_count` | counter | 回退到通用 ELF loader 的次数 |

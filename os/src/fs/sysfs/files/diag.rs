@@ -2169,6 +2169,11 @@ fn stats_vm_content(
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
     let mut s = String::with_capacity(512);
+    let _ = writeln!(
+        s,
+        "filemap_counter_schema_version={}",
+        crate::task::perf::FILEMAP_COUNTER_SCHEMA_VERSION
+    );
     let _ = writeln!(s, "filemap_fault_frames={}", read_counter(&crate::task::perf::FILEMAP_FAULT_FRAMES));
     let _ = writeln!(s, "filemap_fault_ticks={}", read_counter(&crate::task::perf::FILEMAP_FAULT_TICKS));
     let _ = writeln!(s, "filemap_private_copy_ticks={}", read_counter(&crate::task::perf::FILEMAP_PRIVATE_COPY_TICKS));
@@ -2190,6 +2195,15 @@ fn stats_vm_content(
     let _ = writeln!(s, "filemap_revalidate_retry={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_RETRY));
     let _ = writeln!(s, "filemap_revalidate_vma_changed={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_VMA_CHANGED));
     let _ = writeln!(s, "filemap_revalidate_eof_changed={}", read_counter(&crate::task::perf::FILEMAP_REVALIDATE_EOF_CHANGED));
+    let _ = writeln!(s, "filemap_fault_around_calls={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CALLS));
+    let _ = writeln!(s, "filemap_fault_around_pages_requested={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_REQUESTED));
+    let _ = writeln!(s, "filemap_fault_around_pages_missing={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_MISSING));
+    let _ = writeln!(s, "filemap_fault_around_pages_published={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PUBLISHED));
+    let _ = writeln!(s, "filemap_fault_around_pages_prefetched={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PREFETCHED));
+    let _ = writeln!(s, "filemap_fault_around_backend_runs={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_BACKEND_RUNS));
+    let _ = writeln!(s, "filemap_fault_around_useful_hits={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_USEFUL_HITS));
+    let _ = writeln!(s, "filemap_fault_around_unused_discards={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_UNUSED_DISCARDS));
+    let _ = writeln!(s, "filemap_fault_around_aborts={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_ABORTS));
     let _ = writeln!(s, "tlb_page_flush_cycles={}", read_counter(&crate::task::perf::TLB_PAGE_FLUSH_CYCLES));
     let _ = writeln!(s, "tlb_full_flush_cycles={}", read_counter(&crate::task::perf::TLB_FULL_FLUSH_CYCLES));
     let _ = writeln!(s, "tlb_activate_cycles={}", read_counter(&crate::task::perf::TLB_ACTIVATE_CYCLES));

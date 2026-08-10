@@ -125,8 +125,13 @@ filemap_read_fault(area, page_table, ctx)
   ├── file_offset = area.vm_file_offset(ctx.vpn)
   ├── file_size = check_within_file()
   ├── pc = inode.ensure_page_cache()
-  ├── cache_frame = pc.frame_for_read(page_index)
-  ├── zero_tail(file_size, file_offset, cache_frame)
+  ├── window = min(VMA 剩余页, EOF 剩余页, 16)
+  ├── VM 锁内 try_frame_for_filemap_read_ahead()
+  │     ├── resident → 返回 cache frame
+  │     └── miss/transient → 返回 Retry token，不执行 I/O
+  ├── VM 锁外 RetryWait::wait()
+  │     └── 连续读取当前页及最多 15 个前向页
+  ├── 重新取得 VM 锁并重验 VMA/EOF
   ├── map_perm = area.vm_perm()，若含 W 则去掉 W
   ├── area.inner.alloc_in_memory(ctx.vpn, cache_frame)
   ├── UserMapper::map_user_page(ctx.vpn, cache_ppn, map_perm)
@@ -134,6 +139,16 @@ filemap_read_fault(area, page_table, ctx)
 ```
 
 读缺页不复制文件页。VMA resident frame 指向 page cache frame。
+
+前向 fault-around 固定上限为 16 页（64 KiB），同时受当前 VMA 末端和权威 EOF
+约束。它只接入普通文件映射的读/执行缺页，不改变目录、元数据、read syscall、
+private 首次 store 或 shared 首次 store 的 admission。批量读取仍按真正连续的 miss run
+拆分，缓存洞不会被错误地拼成一段后端 I/O；truncate/invalidate 代际变化时放弃发布，
+由单页 demand 路径兜底。
+
+预取页在首次被 filemap、ELF 或普通 PageCache 读写路径消费时清除 readahead 标记；
+若在消费前被 clock、truncate 或 invalidate 丢弃，则记录为 unused discard。该标记只
+用于 `memory_io` 诊断窗口，不参与页面状态机或正确性判断。
 
 ## 7. 为什么读缺页要清 W
 
@@ -234,7 +249,7 @@ page_table.is_mapped(cursor) || file_backed_page_resident(area, cursor)
 
 | PageCache 操作 | MM 语义 |
 |----------------|---------|
-| `frame_for_read(index)` | 获取可读缓存页，必要时从文件加载 |
+| `try_frame_for_filemap_read_ahead(index, eof, pages)` | VM 锁内只检查 resident；冷页返回锁外 Retry token |
 | `frame_for_write(index)` | 获取可写缓存页，并进入 dirty/write 路径 |
 
 MM 层不直接操作块设备，也不决定脏页何时回写。

@@ -24,6 +24,8 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
+/// `/sys/kernel/stats/vm` filemap counter field semantics version.
+pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 2;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -182,6 +184,15 @@ mod enabled {
     pub static FILEMAP_REVALIDATE_RETRY: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_REVALIDATE_VMA_CHANGED: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_REVALIDATE_EOF_CHANGED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_MISSING: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_PUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_PREFETCHED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_BACKEND_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_USEFUL_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_UNUSED_DISCARDS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_ABORTS: AtomicUsize = AtomicUsize::new(0);
 
     // ── TLB flush cycle counters ──
     pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
@@ -547,6 +558,59 @@ mod enabled {
         }
         if eof_changed {
             FILEMAP_REVALIDATE_EOF_CHANGED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_start(requested_pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_FAULT_AROUND_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_REQUESTED.fetch_add(requested_pages, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_missing(missing_pages: usize) {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_PAGES_MISSING.fetch_add(missing_pages, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_backend_run() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_BACKEND_RUNS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_publish(published_pages: usize, prefetched_pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_FAULT_AROUND_PAGES_PUBLISHED.fetch_add(published_pages, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PREFETCHED.fetch_add(prefetched_pages, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_useful_hit() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_USEFUL_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_unused_discard() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_UNUSED_DISCARDS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_abort() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_ABORTS.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2714,6 +2778,15 @@ mod enabled {
         FILEMAP_REVALIDATE_RETRY.store(0, Ordering::Relaxed);
         FILEMAP_REVALIDATE_VMA_CHANGED.store(0, Ordering::Relaxed);
         FILEMAP_REVALIDATE_EOF_CHANGED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_REQUESTED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_MISSING.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PUBLISHED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PREFETCHED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_BACKEND_RUNS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_USEFUL_HITS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_UNUSED_DISCARDS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_ABORTS.store(0, Ordering::Relaxed);
 
         // ── TLB flush cycles ──
         TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
@@ -3687,6 +3760,34 @@ pub fn record_filemap_revalidate_retry(_vma_changed: bool, _eof_changed: bool) {
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_filemap_fault_around_start(_requested_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_missing(_missing_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_backend_run() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_publish(_published_pages: usize, _prefetched_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_useful_hit() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_unused_discard() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_abort() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_global_alloc_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3910,6 +4011,15 @@ perf_stub_counter!(FILEMAP_RETRY_WAIT_TICKS_MAX);
 perf_stub_counter!(FILEMAP_REVALIDATE_RETRY);
 perf_stub_counter!(FILEMAP_REVALIDATE_VMA_CHANGED);
 perf_stub_counter!(FILEMAP_REVALIDATE_EOF_CHANGED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_CALLS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_REQUESTED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_MISSING);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PUBLISHED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PREFETCHED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_BACKEND_RUNS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_USEFUL_HITS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_UNUSED_DISCARDS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_ABORTS);
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]

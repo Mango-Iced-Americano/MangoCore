@@ -310,6 +310,9 @@ const PG_ERROR: u32 = 1 << 4;
 pub const PG_REFERENCED: u32 = 1 << 5;
 /// 页面在写回期间被再次标记为脏（写回完成后应恢复为 Dirty）
 pub const PG_REDIRTIED: u32 = 1 << 6;
+/// Page admitted speculatively by filemap fault-around and not demanded yet.
+const PG_FILEMAP_READAHEAD: u32 = 1 << 7;
+const PG_ORTHOGONAL: u32 = PG_REFERENCED | PG_REDIRTIED | PG_FILEMAP_READAHEAD;
 
 // ── PageEntry ────────────────────────────────────────────────────────────
 
@@ -364,7 +367,7 @@ impl PageEntry {
         let state_flags = Self::flags_for_state(state);
         let mut old = self.flags.load(Ordering::Acquire);
         loop {
-            let desired = state_flags | (old & (PG_REFERENCED | PG_REDIRTIED));
+            let desired = state_flags | (old & PG_ORTHOGONAL);
             match self
                 .flags
                 .compare_exchange(old, desired, Ordering::AcqRel, Ordering::Acquire)
@@ -415,7 +418,7 @@ impl PageEntry {
             if Self::decode_state(raw) != old {
                 return Err(raw);
             }
-            let desired = Self::flags_for_state(new) | (raw & (PG_REFERENCED | PG_REDIRTIED));
+            let desired = Self::flags_for_state(new) | (raw & PG_ORTHOGONAL);
             match self
                 .flags
                 .compare_exchange(raw, desired, Ordering::AcqRel, Ordering::Acquire)
@@ -572,6 +575,22 @@ impl PageEntry {
     /// 标记页面已被引用（clock eviction 的 second-chance 位）
     fn mark_referenced(&self) {
         self.flags.fetch_or(PG_REFERENCED, Ordering::Release);
+    }
+
+    fn mark_filemap_readahead(&self) {
+        self.set_flag(PG_FILEMAP_READAHEAD);
+    }
+
+    fn consume_filemap_readahead(&self) {
+        if self.test_and_clear_flag(PG_FILEMAP_READAHEAD) {
+            crate::task::perf::record_filemap_fault_around_useful_hit();
+        }
+    }
+
+    fn discard_filemap_readahead(&self) {
+        if self.test_and_clear_flag(PG_FILEMAP_READAHEAD) {
+            crate::task::perf::record_filemap_fault_around_unused_discard();
+        }
     }
 
     /// 在 data 读锁存续期间向闭包提供页字节；借用不能逃出闭包。
@@ -732,6 +751,7 @@ pub struct PageCache {
 struct PageCacheFaultWait {
     cache: Arc<PageCache>,
     page_index: usize,
+    fault_around_pages: usize,
 }
 
 /// 写入路径各阶段（lookup/lease/copy/commit）的周期累计，用于 perf 分阶段计时。
@@ -760,7 +780,17 @@ impl RetryWait for PageCacheFaultWait {
             crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         // 此处由 trap/uaccess 外层保证已经释放 VM 锁。I/O 仍可在 op_gate
         // 读侧完成，但任何睡眠都必须发生在释放 op_gate 之后。
+        let mut fault_around_attempted = false;
         loop {
+            if !fault_around_attempted && self.fault_around_pages > 1 {
+                fault_around_attempted = true;
+                // Speculative failures must not turn a valid demand fault into
+                // an error. The single-page path below remains authoritative.
+                let _ = self.cache.sync_filemap_fault_around(
+                    self.page_index,
+                    self.fault_around_pages,
+                );
+            }
             let observed = self.cache.state_wait_generation.load(Ordering::Acquire);
             let may_load = self
                 .cache
@@ -839,6 +869,7 @@ impl PageCache {
         Arc::new(PageCacheFaultWait {
             cache: Arc::clone(self),
             page_index,
+            fault_around_pages: 1,
         })
     }
 
@@ -1093,6 +1124,7 @@ impl PageCache {
             }
 
             // Safe to evict
+            entry.discard_filemap_readahead();
             entries[idx] = None;
             removed_indices.push(idx);
             crate::task::perf::record_clock_evicted(1);
@@ -1323,7 +1355,9 @@ impl PageCache {
     /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
-        self.get_or_create_entry(page_index, true, None)
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        entry.consume_filemap_readahead();
+        Ok(entry)
     }
 
     /// 获取页面用于写入，可选择是否从后端 populate。
@@ -1345,6 +1379,7 @@ impl PageCache {
             .unwrap_or(false);
         let populate = !full_overwrite && !beyond_eof;
         let entry = self.get_or_create_entry(page_index, populate, old_file_size)?;
+        entry.consume_filemap_readahead();
         Ok(entry)
     }
 
@@ -1398,7 +1433,10 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
         match state {
-            PageState::UpToDate | PageState::Dirty => Ok(entry.page.clone()),
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                Ok(entry.page.clone())
+            }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
         }
@@ -1419,6 +1457,7 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
                     let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
@@ -1439,10 +1478,24 @@ impl PageCache {
         page_index: usize,
         authoritative_eof: usize,
     ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        self.try_frame_for_filemap_read_ahead(page_index, authoritative_eof, 1)
+    }
+
+    /// VM-lock-safe filemap read admission with a bounded forward window.
+    /// The current page is always first; speculative pages are only loaded by
+    /// the Retry token after the address-space lock has been released.
+    pub(crate) fn try_frame_for_filemap_read_ahead(
+        self: &Arc<Self>,
+        page_index: usize,
+        authoritative_eof: usize,
+        fault_around_pages: usize,
+    ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        let fault_around_pages = fault_around_pages.clamp(1, MAX_DEMAND_READ_PAGES);
         let retry = || {
             PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages,
             }))
         };
         let Some(_op) = self.op_gate.try_read() else {
@@ -1464,6 +1517,7 @@ impl PageCache {
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
                     let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
@@ -1494,6 +1548,7 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 entry.with_bytes(|src| dst.copy_from_slice(src));
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
@@ -1523,6 +1578,7 @@ impl PageCache {
             PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             }))
         };
         let Some(_op) = self.op_gate.try_read() else {
@@ -1544,6 +1600,7 @@ impl PageCache {
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 entry.with_bytes(|src| dst.copy_from_slice(src));
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
@@ -1578,6 +1635,7 @@ impl PageCache {
             PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             }))
         };
         let Some(_op) = self.op_gate.try_read() else {
@@ -1599,6 +1657,7 @@ impl PageCache {
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 entry.with_bytes(|src| dst.copy_from_slice(&src[page_offset..range_end]));
                 Ok(())
             }
@@ -1635,6 +1694,7 @@ impl PageCache {
                 _ => Err(SyscallErr::EIO),
             };
         }
+        entry.consume_filemap_readahead();
         self.mark_dirty_after_copy(page_index, &entry);
         Ok(entry.page.clone())
     }
@@ -1649,6 +1709,7 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         };
         let entry = self
@@ -1661,6 +1722,7 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         };
         if !entry.is_fully_valid()
@@ -1670,10 +1732,12 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 self.mark_dirty_after_copy(page_index, &entry);
                 Ok(entry.page.clone())
             }
@@ -2744,6 +2808,35 @@ impl PageCache {
             return Ok(read);
         }
 
+        self.sync_batch_read_pages_inner(start_page, count, None)
+    }
+
+    /// Populate one bounded forward filemap window. The demand page remains
+    /// authoritative; all pages after it are tagged until first use so the
+    /// diagnostic stream can distinguish useful fault-around from waste.
+    fn sync_filemap_fault_around(
+        &self,
+        start_page: usize,
+        count: usize,
+    ) -> Result<usize, SyscallErr> {
+        let count = count.clamp(1, MAX_DEMAND_READ_PAGES);
+        crate::task::perf::record_filemap_fault_around_start(count);
+        let result = self.sync_batch_read_pages_inner(start_page, count, Some(start_page));
+        if result.is_err() {
+            crate::task::perf::record_filemap_fault_around_abort();
+        }
+        result
+    }
+
+    fn sync_batch_read_pages_inner(
+        &self,
+        start_page: usize,
+        count: usize,
+        filemap_demand_page: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        debug_assert!(count <= MAX_BATCH_READ_PAGES);
+        let end_page = start_page.checked_add(count).ok_or(SyscallErr::EFBIG)?;
+
         // Readahead uses the same lock-free backend phase as batch misses so
         // a backend callback can re-enter this cache.  Generation validation
         // prevents stale pages from being published after truncate.
@@ -2763,7 +2856,7 @@ impl PageCache {
         let mut pending: Vec<PendingPage> = Vec::new();
         {
             let entries = self.entries.lock();
-            for page_index in start_page..start_page + count {
+            for page_index in start_page..end_page {
                 // 跳过已缓存的页面
                 if page_index < entries.len() && entries[page_index].is_some() {
                     continue;
@@ -2779,6 +2872,10 @@ impl PageCache {
                     entry,
                 });
             }
+        }
+
+        if filemap_demand_page.is_some() {
+            crate::task::perf::record_filemap_fault_around_missing(pending.len());
         }
 
         if pending.is_empty() {
@@ -2811,7 +2908,21 @@ impl PageCache {
                 .map_err(|_| SyscallErr::ENOMEM)?;
             staging.resize(run_len * PAGE_SIZE, 0);
             let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
-            backend.read_pages(pending[run_begin].index, &mut buffers)?;
+            let backend_start = crate::task::perf::perf_time_now_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            );
+            let backend_result = backend.read_pages(pending[run_begin].index, &mut buffers);
+            if filemap_demand_page.is_some() {
+                crate::task::perf::record_filemap_backend_read(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .wrapping_sub(backend_start),
+                    false,
+                );
+                crate::task::perf::record_filemap_fault_around_backend_run();
+            }
+            backend_result?;
             drop(buffers);
             for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
                 let start = offset * PAGE_SIZE;
@@ -2826,8 +2937,21 @@ impl PageCache {
         }
 
         // Phase 4: 标记 UpToDate 并插入到 entries
+        let mut published_pages = 0;
+        let mut prefetched_pages = 0;
+        let track_use = filemap_demand_page.is_some()
+            && crate::task::perf::stats_enabled_for(
+                crate::task::perf::STATS_PROFILE_MEMORY_IO,
+            );
         {
             let mut entries = self.entries.lock();
+            // Revalidate while holding the publication lock. A truncate that
+            // increments the generation before waiting for `entries` must win;
+            // one that increments after this point will subsequently remove
+            // any pages published in this critical section.
+            if generation != self.mutation_generation.load(Ordering::Acquire) {
+                return Err(SyscallErr::EAGAIN);
+            }
             let mut inner = self.inner.lock();
             for p in &pending {
                 // 扩展 entries 数组
@@ -2841,10 +2965,21 @@ impl PageCache {
                 // dirty accounting pointed at this index.
                 if entries[p.index].is_none() {
                     p.entry.set_state(PageState::UpToDate);
+                    if track_use && filemap_demand_page != Some(p.index) {
+                        p.entry.mark_filemap_readahead();
+                        prefetched_pages += 1;
+                    }
                     entries[p.index] = Some(p.entry.clone());
                     inner.pages.insert(p.index);
+                    published_pages += 1;
                 }
             }
+        }
+        if filemap_demand_page.is_some() {
+            crate::task::perf::record_filemap_fault_around_publish(
+                published_pages,
+                prefetched_pages,
+            );
         }
         self.notify_state_progress();
 
@@ -3333,6 +3468,7 @@ impl PageCache {
             let mut inner = self.inner.lock();
             for page_index in hole_start_page..entries.len() {
                 if let Some(entry) = entries[page_index].take() {
+                    entry.discard_filemap_readahead();
                     if entry.state() == PageState::Dirty {
                         GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -3378,6 +3514,7 @@ impl PageCache {
                 continue;
             }
             if let Some(entry) = entries[page_index].take() {
+                entry.discard_filemap_readahead();
                 if entry.state() == PageState::Dirty {
                     GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 }
@@ -3428,8 +3565,8 @@ impl PageCache {
 
         let end = core::cmp::min(end_index, entries.len());
         for page_index in start_index..end {
-            if entries[page_index].is_some() {
-                entries[page_index] = None;
+            if let Some(entry) = entries[page_index].take() {
+                entry.discard_filemap_readahead();
                 inner.pages.remove(&page_index);
                 invalidated += 1;
             }

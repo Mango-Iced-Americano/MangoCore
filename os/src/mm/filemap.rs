@@ -15,7 +15,7 @@ use super::vma::Vma;
 use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
-use crate::fs::{PageCache, PageCacheFault};
+use crate::fs::{PageCache, PageCacheFault, MAX_DEMAND_READ_PAGES};
 use crate::mm::FaultOutcome;
 use crate::utils::error::SyscallErr;
 use alloc::sync::Arc;
@@ -113,6 +113,20 @@ impl ElfLazyBacking {
 
 fn round_up_page(size: usize) -> usize {
     size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
+}
+
+/// Bound a forward filemap fault-around window by both the current VMA and
+/// the authoritative file size. This prevents a short/random mapping from
+/// admitting pages that it can never address.
+fn bounded_fault_around_pages(
+    area: &Vma,
+    ctx: FaultContext,
+    file_offset: usize,
+    file_size: usize,
+) -> usize {
+    let vma_pages = area.vm_end().0.saturating_sub(ctx.vpn.0);
+    let file_pages = file_size.saturating_sub(file_offset).div_ceil(PAGE_SIZE);
+    vma_pages.min(file_pages).min(MAX_DEMAND_READ_PAGES).max(1)
 }
 
 fn check_within_file(inode: &dyn IndexNode, file_offset: usize) -> Result<usize, MemoryError> {
@@ -311,7 +325,12 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         None => return FaultOutcome::Error(MemoryError::BackingStoreFailure),
     };
     let page_index = file_offset >> PAGE_SIZE_BITS;
-    let cache_frame = match pc.try_frame_for_filemap_read(page_index, file_size) {
+    let fault_around_pages = bounded_fault_around_pages(area, ctx, file_offset, file_size);
+    let cache_frame = match pc.try_frame_for_filemap_read_ahead(
+        page_index,
+        file_size,
+        fault_around_pages,
+    ) {
         Ok(frame) => {
             crate::task::perf::record_filemap_ready_hit();
             frame

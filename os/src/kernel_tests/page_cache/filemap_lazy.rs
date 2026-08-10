@@ -3,7 +3,7 @@ use alloc::vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PAGE_SIZE;
-use crate::fs::{PageCache, PageCacheBackend, PageCacheFault};
+use crate::fs::{PageCache, PageCacheBackend, PageCacheFault, MAX_DEMAND_READ_PAGES};
 use crate::utils::error::SyscallErr;
 
 struct CountingBackend {
@@ -63,6 +63,72 @@ pub(super) fn test_filemap_admission_defers_backend_io() -> Result<(), &'static 
         .map_err(|_| "private fault did not copy after lock-outside load")?;
     if backend.reads.load(Ordering::SeqCst) != 2 || private[0] != 0x41 {
         return Err("private lock-outside read returned an invalid page");
+    }
+    Ok(())
+}
+
+struct FaultAroundBackend {
+    calls: AtomicUsize,
+    pages: AtomicUsize,
+}
+
+impl PageCacheBackend for FaultAroundBackend {
+    fn read_page(&self, index: usize, buf: &mut [u8]) -> Result<usize, SyscallErr> {
+        buf.fill(index as u8);
+        Ok(buf.len())
+    }
+
+    fn read_pages(&self, start: usize, pages: &mut [&mut [u8]]) -> Result<usize, SyscallErr> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.pages.fetch_add(pages.len(), Ordering::SeqCst);
+        for (offset, page) in pages.iter_mut().enumerate() {
+            page.fill((start + offset) as u8);
+        }
+        Ok(pages.len() * PAGE_SIZE)
+    }
+
+    fn write_page(&self, _index: usize, buf: &[u8]) -> Result<usize, SyscallErr> {
+        Ok(buf.len())
+    }
+
+    fn npages(&self) -> usize {
+        MAX_DEMAND_READ_PAGES * 2
+    }
+}
+
+pub(super) fn test_filemap_fault_around_is_bounded_and_lock_outside() -> Result<(), &'static str> {
+    let cache = PageCache::new();
+    let backend = Arc::new(FaultAroundBackend {
+        calls: AtomicUsize::new(0),
+        pages: AtomicUsize::new(0),
+    });
+    cache.set_backend(backend.clone());
+
+    let wait = match cache.try_frame_for_filemap_read_ahead(
+        0,
+        MAX_DEMAND_READ_PAGES * PAGE_SIZE,
+        usize::MAX,
+    ) {
+        Err(PageCacheFault::Retry(wait)) => wait,
+        _ => return Err("cold filemap fault-around did not return a retry token"),
+    };
+    if backend.calls.load(Ordering::SeqCst) != 0 {
+        return Err("filemap fault-around performed I/O during VM-lock admission");
+    }
+    wait.wait();
+    if backend.calls.load(Ordering::SeqCst) != 1
+        || backend.pages.load(Ordering::SeqCst) != MAX_DEMAND_READ_PAGES
+    {
+        return Err("filemap fault-around did not issue one bounded contiguous read");
+    }
+
+    let last = MAX_DEMAND_READ_PAGES - 1;
+    let frame = cache
+        .try_frame_for_filemap_read(last, MAX_DEMAND_READ_PAGES * PAGE_SIZE)
+        .map_err(|_| "last fault-around page was not resident")?;
+    let byte = unsafe { frame.ppn.with_bytes(|bytes| bytes[0]) };
+    if byte != last as u8 {
+        return Err("fault-around page payload did not match its file offset");
     }
     Ok(())
 }
