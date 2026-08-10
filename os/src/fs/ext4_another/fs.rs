@@ -17,6 +17,7 @@ use super::inode::Ext4Inode;
 use super::lifetime::{CachedTimestamps, InodeKey, InodeLifetime};
 
 static NEXT_FS_ID: AtomicUsize = AtomicUsize::new(1);
+const METADATA_MUTATION_WAKE_BATCH: usize = 4;
 
 struct MetadataMutationWait {
     generation: AtomicUsize,
@@ -61,7 +62,14 @@ impl another_ext4::MetadataMutationNotifier for MetadataMutationWait {
     fn notify(&self) {
         self.generation.fetch_add(1, Ordering::Release);
         if self.waiter_count.load(Ordering::Acquire) != 0 {
-            self.waiters.lock().wake_all();
+            // Admission is retried after every completed metadata guard. Wake
+            // a small cohort instead of every waiter: one can acquire the
+            // exclusive journal gate while the remainder preserve enough
+            // parallelism for compatible direct writers without a full
+            // runqueue/cacheline stampede.
+            self.waiters
+                .lock()
+                .wake_at_most(METADATA_MUTATION_WAKE_BATCH);
         }
     }
 }
