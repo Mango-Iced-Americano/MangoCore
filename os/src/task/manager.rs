@@ -332,7 +332,15 @@ fn select_wake_cpu(task: &TaskControlBlock) -> usize {
     let target = super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu));
     let load = super::run_queue::nr_running(target)
         + super::processor::cpu_current_count(target);
-    crate::task::perf::record_wake_selection(target == last_cpu, load == 0);
+    let last_busy = super::run_queue::nr_running(last_cpu)
+        + super::processor::cpu_current_count(last_cpu)
+        != 0;
+    let idle_available = super::run_queue::has_idle_runnable_cpu(task.cpus_allowed());
+    crate::task::perf::record_wake_selection(
+        target == last_cpu,
+        load == 0,
+        last_busy && idle_available,
+    );
     target
 }
 

@@ -120,14 +120,6 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         _reason: another_ext4::JournalCommitReason,
     ) {
         perf::record_wb_tx_journal_commit(transaction_id, staged_blocks, cycles);
-        #[cfg(feature = "perf_diag")]
-        crate::println!(
-            "[wb_txn] commit tx={} reason={:?} staged_blocks={} ticks={}",
-            transaction_id,
-            _reason,
-            staged_blocks,
-            cycles,
-        );
     }
 
     fn record_writeback_journal_flush(
@@ -137,13 +129,6 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         cycles: usize,
     ) {
         perf::record_wb_tx_journal_flush(cycles);
-        #[cfg(feature = "perf_diag")]
-        crate::println!(
-            "[wb_txn] flush tx={} phase={:?} ticks={}",
-            _transaction_id,
-            _phase,
-            cycles,
-        );
     }
 
     fn record_writeback_flush_boundary(
@@ -152,11 +137,5 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         cycles: usize,
     ) {
         perf::record_wb_tx_boundary_flush(cycles);
-        #[cfg(feature = "perf_diag")]
-        crate::println!(
-            "[wb_txn] boundary_flush reason={:?} ticks={}",
-            _reason,
-            cycles
-        );
     }
 }

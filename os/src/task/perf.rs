@@ -23,7 +23,7 @@ pub const STATS_PROFILE_ALL: usize =
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
-pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 3;
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 4;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -269,6 +269,7 @@ mod enabled {
     pub static WAKE_KEEP_LAST_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_IDLE_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_LEAST_LOADED: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_LAST_BUSY_IDLE_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
     pub static NEW_TASK_IDLE_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
     pub static NEW_TASK_SELECTED_IDLE: AtomicUsize = AtomicUsize::new(0);
     pub static NEW_TASK_KEPT_BUSY_PARENT: AtomicUsize = AtomicUsize::new(0);
@@ -664,9 +665,12 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_wake_selection(keep_last: bool, idle: bool) {
+    pub fn record_wake_selection(keep_last: bool, idle: bool, last_busy_idle_available: bool) {
         if !stats_enabled() {
             return;
+        }
+        if last_busy_idle_available {
+            WAKE_LAST_BUSY_IDLE_AVAILABLE.fetch_add(1, Ordering::Relaxed);
         }
         if keep_last {
             WAKE_KEEP_LAST_CPU.fetch_add(1, Ordering::Relaxed);
@@ -2788,6 +2792,7 @@ mod enabled {
         WAKE_KEEP_LAST_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_IDLE_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_LEAST_LOADED.store(0, Ordering::Relaxed);
+        WAKE_LAST_BUSY_IDLE_AVAILABLE.store(0, Ordering::Relaxed);
         NEW_TASK_IDLE_AVAILABLE.store(0, Ordering::Relaxed);
         NEW_TASK_SELECTED_IDLE.store(0, Ordering::Relaxed);
         NEW_TASK_KEPT_BUSY_PARENT.store(0, Ordering::Relaxed);
@@ -3722,7 +3727,12 @@ pub fn record_wake_remote() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_wake_selection(_keep_last: bool, _idle: bool) {}
+pub fn record_wake_selection(
+    _keep_last: bool,
+    _idle: bool,
+    _last_busy_idle_available: bool,
+) {
+}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3859,6 +3869,7 @@ perf_stub_counter!(WAKE_REMOTE);
 perf_stub_counter!(WAKE_KEEP_LAST_CPU);
 perf_stub_counter!(WAKE_SELECT_IDLE_CPU);
 perf_stub_counter!(WAKE_SELECT_LEAST_LOADED);
+perf_stub_counter!(WAKE_LAST_BUSY_IDLE_AVAILABLE);
 perf_stub_counter!(NEW_TASK_IDLE_AVAILABLE);
 perf_stub_counter!(NEW_TASK_SELECTED_IDLE);
 perf_stub_counter!(NEW_TASK_KEPT_BUSY_PARENT);

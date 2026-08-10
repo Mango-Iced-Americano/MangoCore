@@ -147,6 +147,19 @@ fn minimum_runnable_cpu(runnable: usize) -> usize {
         .expect("runnable CPU mask is empty")
 }
 
+/// Returns whether the allowed set contains an actually idle runnable CPU.
+///
+/// This is a diagnostic-only snapshot used to distinguish a legitimate
+/// locality-preserving wake from a wake that kept a busy last CPU while an
+/// idle destination was available. It does not reserve the CPU or affect
+/// placement by itself.
+pub(crate) fn has_idle_runnable_cpu(allowed: usize) -> bool {
+    let runnable = runnable_cpu_mask(allowed);
+    (0..crate::smp::configured_cpu_count()).any(|cpu| {
+        runnable & (1usize << cpu) != 0 && cpu_load(cpu) == 0
+    })
+}
+
 /// 从允许集合中选择一个当前可调度的 CPU。
 ///
 /// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`

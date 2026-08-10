@@ -71,7 +71,8 @@ fn stats_taskq_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(1400);
+    // Leave room for the per-CPU current/runqueue snapshot appended below.
+    let mut s = String::with_capacity(4096);
     let _ = writeln!(
         s,
         "scheduler_counter_schema_version={}",
@@ -157,6 +158,7 @@ fn stats_taskq_content(
     let _ = writeln!(s, "wake_keep_last_cpu={}", read_counter(&crate::task::perf::WAKE_KEEP_LAST_CPU));
     let _ = writeln!(s, "wake_select_idle_cpu={}", read_counter(&crate::task::perf::WAKE_SELECT_IDLE_CPU));
     let _ = writeln!(s, "wake_select_least_loaded={}", read_counter(&crate::task::perf::WAKE_SELECT_LEAST_LOADED));
+    let _ = writeln!(s, "wake_last_busy_idle_available={}", read_counter(&crate::task::perf::WAKE_LAST_BUSY_IDLE_AVAILABLE));
     let _ = writeln!(s, "new_task_idle_available={}", read_counter(&crate::task::perf::NEW_TASK_IDLE_AVAILABLE));
     let _ = writeln!(s, "new_task_selected_idle={}", read_counter(&crate::task::perf::NEW_TASK_SELECTED_IDLE));
     let _ = writeln!(s, "new_task_kept_busy_parent={}", read_counter(&crate::task::perf::NEW_TASK_KEPT_BUSY_PARENT));
@@ -172,6 +174,21 @@ fn stats_taskq_content(
     let _ = writeln!(s, "steal_ktlb_sync_calls={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_CALLS));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_total={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_TOTAL));
     let _ = writeln!(s, "steal_ktlb_sync_ticks_max={}", read_counter(&crate::task::perf::STEAL_KTLB_SYNC_TICKS_MAX));
+    for cpu in 0..crate::smp::configured_cpu_count() {
+        let snapshot = crate::smp::task_state(cpu).read_diagnostics();
+        let _ = writeln!(
+            s,
+            "cpu{}_current_present={} cpu{}_nr_running={} cpu{}_current_pid={} cpu{}_steals={}",
+            cpu,
+            usize::from(snapshot.current_present),
+            cpu,
+            snapshot.nr_running,
+            cpu,
+            snapshot.current_pid,
+            cpu,
+            snapshot.steals,
+        );
+    }
     for cpu in 0..crate::smp::MAX_CPUS {
         let _ = writeln!(
             s,
