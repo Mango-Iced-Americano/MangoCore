@@ -215,6 +215,8 @@ echo 1 > /sys/kernel/tracing/clear
 | `virtio_dma_share_{header,status,indirect}_pool` | counter | block VirtIO 请求头、状态字节、间接描述符从小池复用的次数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
+| `ext4_pc_readpages_{calls,pages}` | counter | PageCache 后端批量读取的调用数与页数；another_ext4 demand miss 每次最多 16 页（64 KiB） |
+| `ext4_pc_readpages_runs` | counter | legacy ext4 后端按物理连续块合并的读取 run 数（another_ext4 不使用该字段） |
 | `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |
 | `wb_tx_alloc_extent_{calls,pages,ticks}` | counter | data write 路径中 alloc/extent 准备的次数、页数与累计 ticks |
 | `wb_tx_journal_{commit_ticks,staged_blocks,tx_first,tx_last}` | counter/gauge | 已提交 journal transaction 的累计 ticks、staged block 数及本窗口 transaction id 范围 |

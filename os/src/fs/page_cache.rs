@@ -222,6 +222,9 @@ pub const MIN_RA_PAGES: usize = 4;
 pub const MAX_RA_PAGES: usize = 128;
 /// Backend staging has one MiB maximum, including explicit ELF prefetches.
 pub const MAX_BATCH_READ_PAGES: usize = 256;
+/// Demand faults use a bounded contiguous staging window.  Keeping this at
+/// 64 KiB limits transient memory while still amortizing backend request setup.
+pub const MAX_DEMAND_READ_PAGES: usize = 16;
 
 impl RaState {
     pub fn new() -> Self {
@@ -267,6 +270,24 @@ pub trait PageCacheBackend: Send + Sync {
             self.read_page(start_index + i, *page)?;
         }
         Ok(pages.len() * PAGE_SIZE)
+    }
+
+    /// 批量读取一段页对齐的连续字节。
+    ///
+    /// 默认实现按页回退，后端可以覆盖此方法把整段读取直接交给文件系统
+    /// 或块设备。`buffer` 长度必须是 PAGE_SIZE 的整数倍。
+    fn read_contiguous(
+        &self,
+        start_index: usize,
+        buffer: &mut [u8],
+    ) -> Result<usize, SyscallErr> {
+        if buffer.len() % PAGE_SIZE != 0 {
+            return Err(SyscallErr::ENOBUFS);
+        }
+        for (i, page) in buffer.chunks_exact_mut(PAGE_SIZE).enumerate() {
+            self.read_page(start_index + i, page)?;
+        }
+        Ok(buffer.len())
     }
 
     /// 返回后端的页数
@@ -1611,7 +1632,7 @@ impl PageCache {
         plan
     }
 
-    /// Fill contiguous missing page runs using backend.read_page().
+    /// Fill contiguous missing page runs using bounded contiguous backend reads.
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
         // Backend I/O runs outside op_gate so a backend can re-enter this
@@ -1633,14 +1654,39 @@ impl PageCache {
                 ));
             }
 
-            // 2. 未发布 entry 的字节仍必须经 data 写锁初始化；不能把裸 slice
-            // 暴露给批量 I/O API 后跨越锁作用域。
-            for (page_index, entry) in &new_entries {
-                if *page_index < backend_npages {
-                    entry.with_bytes_mut(|buf| backend.read_page(*page_index, buf))?;
+            // 2. Read at most 64 KiB at a time. The staging buffer is owned by
+            // this scope, so backend I/O remains outside PageEntry locks and
+            // no raw page slices escape into a re-entrant backend callback.
+            let mut offset = 0;
+            while offset < run.count {
+                let chunk_pages = (run.count - offset).min(MAX_DEMAND_READ_PAGES);
+                let first_page = run.start_page + offset;
+                let readable_pages = if first_page < backend_npages {
+                    chunk_pages.min(backend_npages - first_page)
+                } else {
+                    0
+                };
+                let mut staging = Vec::new();
+                staging
+                    .try_reserve_exact(chunk_pages * PAGE_SIZE)
+                    .map_err(|_| SyscallErr::ENOMEM)?;
+                staging.resize(chunk_pages * PAGE_SIZE, 0);
+                if readable_pages != 0 {
+                    backend.read_contiguous(
+                        first_page,
+                        &mut staging[..readable_pages * PAGE_SIZE],
+                    )?;
                 }
-                entry.valid_mask.store(VALID_ALL, Ordering::Release);
-                perf::record_pc_miss();
+                for index in 0..chunk_pages {
+                    let entry = &new_entries[offset + index].1;
+                    let start = index * PAGE_SIZE;
+                    entry.with_bytes_mut(|buf| {
+                        buf.copy_from_slice(&staging[start..start + PAGE_SIZE]);
+                    });
+                    entry.valid_mask.store(VALID_ALL, Ordering::Release);
+                    perf::record_pc_miss();
+                }
+                offset += chunk_pages;
             }
 
             if generation != self.mutation_generation.load(Ordering::Acquire) {
