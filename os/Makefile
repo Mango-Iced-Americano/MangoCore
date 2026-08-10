@@ -53,6 +53,7 @@ toolchain-setup:
 env: toolchain-preflight
 
 prepare-cargo-config: toolchain-preflight
+	@if [ -d ../.git ]; then git -C .. submodule update --init --recursive; fi
 
 ifeq ($(CANONICAL_BUILD_FIXTURE),second-stage-failure)
 rv64_all: prepare-cargo-config

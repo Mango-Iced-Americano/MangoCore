@@ -52,6 +52,7 @@ build:
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
 
 prepare-cargo-config:
+	@if [ -d .git ]; then git submodule update --init --recursive; fi
 
 toolchain-setup:
 	@sh scripts/rustup-setup.sh
