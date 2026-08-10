@@ -1537,3 +1537,22 @@
   “弱候选快照→昂贵准备→二次复核”的路径。
 - **相关文件**：`os/src/task/run_queue.rs`、`os/src/task/perf.rs`、
   `os/src/kernel_tests/smp.rs`
+
+## 构建网络：cargo libgit2 的 git 依赖代理机制（2026-08-10 实测）
+
+- **根因**：cargo 拉取 git 依赖（如 `os/Cargo.toml` 的 `fdt = { git = ... }`）用内置
+  libgit2，**不读取 `GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n` 环境变量**；
+  只读取 gitconfig **文件**（`~/.gitconfig`、`/etc/gitconfig`）中的 `url.<base>.insteadOf`。
+  用环境变量方式配置代理对 cargo 无效（实测：屏蔽 github.com 后 cargo fetch 仍直连失败）。
+- **修复**：把 insteadOf 写入 `~/.gitconfig`（先 `mkdir -p $HOME`，fresh HOME 下目录可能不存在，
+  `git config --global` 会报 "could not lock config file ... No such file or directory"）。
+  git CLI（submodule 等）则两者皆可，用 `git -c "url.<proxy>.insteadOf=..."` 最干净。
+- **教训**：验证代理是否真正生效，用 `/etc/hosts` 屏蔽目标域名做对照组，不要依赖
+  "fetch 成功"（github 直连时段性可用时会假阳性）。cargo 的 git db 缓存可能部分成功但
+  revision 缺失（`revision xxx not found`），预热后必须 `git cat-file -t <rev>` 验证。
+- **国内 GitHub 代理 2026-08 实测（容器内 git 协议）**：ghproxy.net 3-4s 稳定可用、
+  gh-proxy.com 可用但 12-34s 波动；gitclone.com 502、ghfast.top 403、gh-proxy.com(curl) 403、
+  moeyy/ghps/mirror.ghproxy TLS 阻断或超时。rustup 镜像：rsproxy.cn 容器内 ~5MB/s，
+  USTC（mirrors.ustc.edu.cn/rust-static）容器内被限速至 ~160B/s（宿主机直连却 2MB/s）。
+- **相关文件**：`scripts/rustup-setup.sh`、`Makefile`（prepare-cargo-config）、
+  `os/make/common/orchestration.mk`

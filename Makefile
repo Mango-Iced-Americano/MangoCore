@@ -52,7 +52,13 @@ build:
 	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=$(PROFILE)" "BUILD_ROOT=$(BUILD_ROOT)" arch-build
 
 prepare-cargo-config:
-	@if [ -d .git ]; then git submodule update --init --recursive; fi
+	@if [ -d .git ]; then \
+		if [ -n "$${GIT_SUBMODULE_PROXY:-}" ]; then \
+			git -c "url.$$GIT_SUBMODULE_PROXY.insteadOf=https://github.com/" submodule update --init --recursive; \
+		else \
+			git submodule update --init --recursive; \
+		fi; \
+	fi
 
 toolchain-setup:
 	@sh scripts/rustup-setup.sh

@@ -37,7 +37,7 @@ make run ARCH=rv64 PROFILE=normal
 
 进入容器后，首次构建需编译内核、用户态程序并打包文件系统镜像，耗时约 1-2 分钟。后续迭代可使用快速编译命令。
 
-根目录 `make all` 会为评测派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在工具链缺失时自动执行 setup 和 preflight。全新容器上的首次 `make all` 可能访问网络。直接执行 `make -C os`、用户态或架构目标不会自动安装工具链，须先运行 `make toolchain-preflight`；需要手动准备时仍可运行 `make toolchain-setup`。
+根目录 `make all` 会为评测派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在工具链缺失时自动执行 setup 和 preflight。全新容器上的首次 `make all` 可能访问网络：rustup 默认从 rsproxy.cn 镜像下载 pinned nightly（可用 `RUSTUP_DIST_SERVER` 覆盖）；GitHub submodule 与 cargo git 依赖默认直连，网络受限时设置 `GIT_SUBMODULE_PROXY=<代理前缀>`（如 `https://ghproxy.net/https://github.com/`）即可统一走代理，无需修改文件。直接执行 `make -C os`、用户态或架构目标不会自动安装工具链，须先运行 `make toolchain-preflight`；需要手动准备时仍可运行 `make toolchain-setup`。
 
 **LA64 版本：** 使用 `ARCH=la64`；与 RV64 共用根目录工具链和生成状态，必须在 RV64 完成后串行执行。
 

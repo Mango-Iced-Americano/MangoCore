@@ -1,3 +1,8 @@
+# cargo 网络健壮性：放宽 git 依赖拉取超时并增加重试（libgit2 内置，不依赖系统 git CLI），
+# 避免 github 慢连接下默认 30s 阈值造成偶发构建失败。
+export CARGO_HTTP_TIMEOUT := 600
+export CARGO_NET_RETRY := 10
+
 ARCHS = rv64
 CURR_ARCH ?= la64
 BUILD_ROOT ?= $(abspath ../build)

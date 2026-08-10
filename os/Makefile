@@ -8,6 +8,10 @@ RUSTUP_HOME ?= $(HOME)/.rustup
 CARGO_HOME ?= $(HOME)/.cargo
 export RUSTUP_HOME CARGO_HOME
 
+# submission 交付分支默认不制作 tools 盘，消除 Alpine 包下载等额外网络依赖；
+# 本地需要工具盘时显式 make BUILD_TOOLS_DISK=1 开启。
+BUILD_TOOLS_DISK ?= 0
+
 .PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint buildstorm ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 .NOTPARALLEL:
 
@@ -53,7 +57,13 @@ toolchain-setup:
 env: toolchain-preflight
 
 prepare-cargo-config: toolchain-preflight
-	@if [ -d ../.git ]; then git -C .. submodule update --init --recursive; fi
+	@if [ -d ../.git ]; then \
+		if [ -n "$${GIT_SUBMODULE_PROXY:-}" ]; then \
+			git -C .. -c "url.$$GIT_SUBMODULE_PROXY.insteadOf=https://github.com/" submodule update --init --recursive; \
+		else \
+			git -C .. submodule update --init --recursive; \
+		fi; \
+	fi
 
 ifeq ($(CANONICAL_BUILD_FIXTURE),second-stage-failure)
 rv64_all: prepare-cargo-config
@@ -64,11 +74,11 @@ la64_all: prepare-cargo-config
 	@echo "[fixture] forcing LA64 stage failure"
 	@exit 1
 else
-rv64_all: prepare-cargo-config tools-disk-rv
+rv64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-rv)
 	@echo "Building rv64"
 	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
 
-la64_all: prepare-cargo-config tools-disk-la
+la64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-la)
 	@echo "Building la64"
 	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
 endif
@@ -78,8 +88,12 @@ publish-compatibility:
 	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
 	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
 	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
-	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"
-	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"
+	@if [ -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" ]; then \
+		cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"; \
+	fi
+	@if [ -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" ]; then \
+		cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"; \
+	fi
 
 rv64-kernel-build-only: prepare-cargo-config
 	$(MAKE) ARCH=rv64 PROFILE=$(PROFILE) -f make/rv64.mk build MODE=$(MODE) LOG=$(LOG) INITRAMFS_PROFILE=$(PROFILE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/$(PROFILE)/user"

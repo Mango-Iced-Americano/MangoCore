@@ -18,7 +18,7 @@
 ## 不可违反的规则
 
 1. **Docker 优先** — 所有编译/运行/调试在 Docker 容器内：`make docker`
-2. **工具链 provisioning** — 根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME`/`CARGO_HOME`，并在需要时自动执行 setup 和 preflight；全新容器首次运行可能使用网络。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可在容器内运行 `make toolchain-setup`
+2. **工具链 provisioning** — 根目录评测入口 `make all` 会派生 HOME 对应的 `RUSTUP_HOME`/`CARGO_HOME`，并在需要时自动执行 setup 和 preflight；全新容器首次运行可能使用网络（rustup 默认 rsproxy.cn 镜像，可用 `RUSTUP_DIST_SERVER` 覆盖；GitHub 访问可用 `GIT_SUBMODULE_PROXY` 统一走代理）。直接执行 OS、用户态或架构目标前，先运行只读的 `make toolchain-preflight`，这些入口不会自动 provisioning。手动流程仍可在容器内运行 `make toolchain-setup`
 3. **不要并行编译双架构** — rv64 和 la64 共用单一根目录 `nightly-2026-05-10`，并写入共享的架构生成状态；必须分开命令行串行执行
 4. **`lang_items.rs` 使用单文件 cfg 分支** — 内核的架构差异由 `#[cfg(target_arch = ...)]` 选择；不要再复制、生成或寻找 `.rv`/`.la` 变体
 5. **验证强度匹配风险** — 文档/注释不编译；架构专用代码先验证受影响架构；共享生产代码在工作包或提交前串行完成双架构编译。SMP 代码按 [SMP Agent 执行规范](docs/10_plan/smp-agent-execution-spec.md) 的 T0-T3 分级执行
