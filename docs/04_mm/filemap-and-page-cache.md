@@ -3,7 +3,7 @@ title: "文件映射缺页与 PageCache 交互"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-10
+last_update: 2026-08-11
 tags: [mm, mmap, filemap, page-cache, mmu-gather]
 ---
 
@@ -145,6 +145,13 @@ filemap_read_fault(area, page_table, ctx)
 private 首次 store 或 shared 首次 store 的 admission。批量读取仍按真正连续的 miss run
 拆分，缓存洞不会被错误地拼成一段后端 I/O；truncate/invalidate 代际变化时放弃发布，
 由单页 demand 路径兜底。
+
+并发 fault-around 在后端 I/O 前先把缺页登记到 `batch_read_claims`。该登记只表达
+I/O 所有权，不把尚未初始化的 `PageEntry` 暴露给普通读路径；其他缺页线程命中同一
+claim 后等待统一的 page-state generation。所有成功、分配失败、I/O 错误和 truncate
+代际冲突出口都会释放 claim 并唤醒等待者，因此相同窗口只由一个 owner 发起后端读取，
+也不会遗留永久 in-flight 状态。schema v3 的 `filemap_fault_around_claim_conflicts`
+用于量化被合并掉的重复读取竞争。
 
 预取页在首次被 filemap、ELF 或普通 PageCache 读写路径消费时清除 readahead 标记；
 若在消费前被 clock、truncate 或 invalidate 丢弃，则记录为 unused discard。该标记只

@@ -2198,6 +2198,7 @@ fn stats_vm_content(
     let _ = writeln!(s, "filemap_fault_around_calls={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CALLS));
     let _ = writeln!(s, "filemap_fault_around_pages_requested={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_REQUESTED));
     let _ = writeln!(s, "filemap_fault_around_pages_missing={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_MISSING));
+    let _ = writeln!(s, "filemap_fault_around_claim_conflicts={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS));
     let _ = writeln!(s, "filemap_fault_around_pages_published={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PUBLISHED));
     let _ = writeln!(s, "filemap_fault_around_pages_prefetched={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_PAGES_PREFETCHED));
     let _ = writeln!(s, "filemap_fault_around_backend_runs={}", read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_BACKEND_RUNS));

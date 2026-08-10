@@ -25,7 +25,7 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
-pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 2;
+pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 3;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -187,6 +187,7 @@ mod enabled {
     pub static FILEMAP_FAULT_AROUND_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_PAGES_REQUESTED: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_PAGES_MISSING: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_PAGES_PUBLISHED: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_PAGES_PREFETCHED: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_BACKEND_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -574,6 +575,13 @@ mod enabled {
     pub fn record_filemap_fault_around_missing(missing_pages: usize) {
         if memory_io_stats_enabled() {
             FILEMAP_FAULT_AROUND_PAGES_MISSING.fetch_add(missing_pages, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_claim_conflict(conflicts: usize) {
+        if memory_io_stats_enabled() && conflicts != 0 {
+            FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS.fetch_add(conflicts, Ordering::Relaxed);
         }
     }
 
@@ -2781,6 +2789,7 @@ mod enabled {
         FILEMAP_FAULT_AROUND_CALLS.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_PAGES_REQUESTED.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_PAGES_MISSING.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_PAGES_PUBLISHED.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_PAGES_PREFETCHED.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_BACKEND_RUNS.store(0, Ordering::Relaxed);
@@ -3768,6 +3777,10 @@ pub fn record_filemap_fault_around_missing(_missing_pages: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_filemap_fault_around_claim_conflict(_conflicts: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_filemap_fault_around_backend_run() {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -4014,6 +4027,7 @@ perf_stub_counter!(FILEMAP_REVALIDATE_EOF_CHANGED);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_CALLS);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_REQUESTED);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_MISSING);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PUBLISHED);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PREFETCHED);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_BACKEND_RUNS);

@@ -728,6 +728,13 @@ pub struct PageCache {
     inode: Mutex<Option<Weak<dyn IndexNode>>>,
     /// 缓存的页面条目
     entries: Mutex<Vec<Option<Arc<PageEntry>>>>,
+    /// Pages claimed by a lock-outside batch read but not published yet.
+    ///
+    /// This ownership directory is intentionally separate from `entries`:
+    /// ordinary PageCache readers must never observe an uninitialised frame.
+    /// Concurrent fault-around workers use it to coalesce the same miss and
+    /// sleep on `state_wait_generation` until the owner publishes or aborts.
+    batch_read_claims: Mutex<BTreeSet<usize>>,
     /// true = 页不可回收（用于 tmpfs/shmem，数据无持久化后端）
     unevictable: AtomicBool,
     /// Clock sweep 光标（second-chance eviction）
@@ -792,6 +799,28 @@ impl RetryWait for PageCacheFaultWait {
                 );
             }
             let observed = self.cache.state_wait_generation.load(Ordering::Acquire);
+            // Another fault-around worker may own this miss while its backend
+            // I/O is deliberately outside PageCache locks.  Do not fall
+            // through to the authoritative single-page loader and duplicate
+            // that read; the owner always publishes or releases before
+            // advancing the shared state generation.
+            if self
+                .cache
+                .batch_read_claims
+                .lock()
+                .contains(&self.page_index)
+            {
+                if self.cache.wait_for_state_progress(observed).is_err() {
+                    crate::task::perf::record_filemap_retry_wait(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(wait_start),
+                    );
+                    return;
+                }
+                continue;
+            }
             let may_load = self
                 .cache
                 .entries
@@ -883,6 +912,7 @@ impl PageCache {
             backend: Mutex::new(None),
             inode: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
+            batch_read_claims: Mutex::new(BTreeSet::new()),
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
             async_writeback_requested: AtomicBool::new(false),
@@ -919,6 +949,18 @@ impl PageCache {
         };
         self.state_waiter_count.fetch_sub(1, Ordering::AcqRel);
         result
+    }
+
+    fn release_batch_read_claims(&self, claimed: &[usize]) {
+        if claimed.is_empty() {
+            return;
+        }
+        let mut claims = self.batch_read_claims.lock();
+        for page_index in claimed {
+            claims.remove(page_index);
+        }
+        drop(claims);
+        self.notify_state_progress();
     }
 
     fn wait_for_write_lease(&self, entry: &PageEntry) -> Result<(), SyscallErr> {
@@ -2848,141 +2890,148 @@ impl PageCache {
         };
         let backend_npages = backend.npages();
 
-        // Phase 1: 收集需要新建的页面，已缓存的跳过
+        // Phase 1: atomically claim cache misses before allocating frames or
+        // starting backend I/O.  A second batch reader skips claimed pages;
+        // its demand fault waits for state progress instead of issuing the
+        // same read again.
+        let mut claimed = Vec::new();
+        let mut claim_conflicts = 0usize;
+        {
+            let entries = self.entries.lock();
+            let mut claims = self.batch_read_claims.lock();
+            for page_index in start_page..end_page {
+                if page_index < entries.len() && entries[page_index].is_some() {
+                    continue;
+                }
+                if claims.insert(page_index) {
+                    claimed.push(page_index);
+                } else {
+                    claim_conflicts += 1;
+                }
+            }
+        }
+        if filemap_demand_page.is_some() {
+            crate::task::perf::record_filemap_fault_around_missing(claimed.len());
+            crate::task::perf::record_filemap_fault_around_claim_conflict(claim_conflicts);
+        }
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+
         struct PendingPage {
             index: usize, // absolute page index
             entry: Arc<PageEntry>,
         }
-        let mut pending: Vec<PendingPage> = Vec::new();
-        {
-            let entries = self.entries.lock();
-            for page_index in start_page..end_page {
-                // 跳过已缓存的页面
-                if page_index < entries.len() && entries[page_index].is_some() {
-                    continue;
-                }
-                // 分配新帧（frame_alloc 返回零填充页）
-                let frame = match frame_alloc() {
-                    Some(f) => f,
-                    None => return Err(SyscallErr::ENOMEM),
-                };
-                let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
+        let result = (|| -> Result<(usize, usize), SyscallErr> {
+            let mut pending: Vec<PendingPage> = Vec::new();
+            pending
+                .try_reserve_exact(claimed.len())
+                .map_err(|_| SyscallErr::ENOMEM)?;
+            for &page_index in &claimed {
+                let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
                 pending.push(PendingPage {
                     index: page_index,
-                    entry,
+                    entry: Arc::new(PageEntry::new(frame, PageState::Loading)),
                 });
             }
-        }
 
-        if filemap_demand_page.is_some() {
-            crate::task::perf::record_filemap_fault_around_missing(pending.len());
-        }
-
-        if pending.is_empty() {
-            return Ok(0);
-        }
-
-        // Phase 2: group contiguous misses and let the backend perform one
-        // logical read_pages call per run. The temporary staging buffer keeps
-        // PageEntry data locks short and permits the backend I/O to remain
-        // outside op_gate/entries locks.
-        let mut cursor = 0;
-        while cursor < pending.len() {
-            if pending[cursor].index >= backend_npages {
-                pending[cursor].entry.with_bytes_mut(|bytes| bytes.fill(0));
+            // Phase 2: group contiguous claimed misses and let the backend
+            // perform one logical read_pages call per run.  Staging keeps
+            // backend callbacks outside PageEntry and PageCache locks.
+            let mut cursor = 0;
+            while cursor < pending.len() {
+                if pending[cursor].index >= backend_npages {
+                    pending[cursor].entry.with_bytes_mut(|bytes| bytes.fill(0));
+                    cursor += 1;
+                    continue;
+                }
+                let run_begin = cursor;
                 cursor += 1;
-                continue;
-            }
-            let run_begin = cursor;
-            cursor += 1;
-            while cursor < pending.len()
-                && pending[cursor].index < backend_npages
-                && pending[cursor].index == pending[cursor - 1].index + 1
-            {
-                cursor += 1;
-            }
-            let run_len = cursor - run_begin;
-            let mut staging = Vec::new();
-            staging
-                .try_reserve_exact(run_len * PAGE_SIZE)
-                .map_err(|_| SyscallErr::ENOMEM)?;
-            staging.resize(run_len * PAGE_SIZE, 0);
-            let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
-            let backend_start = crate::task::perf::perf_time_now_for(
-                crate::task::perf::STATS_PROFILE_MEMORY_IO,
-            );
-            let backend_result = backend.read_pages(pending[run_begin].index, &mut buffers);
-            if filemap_demand_page.is_some() {
-                crate::task::perf::record_filemap_backend_read(
-                    crate::task::perf::perf_time_now_for(
-                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-                    )
-                    .wrapping_sub(backend_start),
-                    false,
+                while cursor < pending.len()
+                    && pending[cursor].index < backend_npages
+                    && pending[cursor].index == pending[cursor - 1].index + 1
+                {
+                    cursor += 1;
+                }
+                let run_len = cursor - run_begin;
+                let mut staging = Vec::new();
+                staging
+                    .try_reserve_exact(run_len * PAGE_SIZE)
+                    .map_err(|_| SyscallErr::ENOMEM)?;
+                staging.resize(run_len * PAGE_SIZE, 0);
+                let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
+                let backend_start = crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
                 );
-                crate::task::perf::record_filemap_fault_around_backend_run();
+                let backend_result = backend.read_pages(pending[run_begin].index, &mut buffers);
+                if filemap_demand_page.is_some() {
+                    crate::task::perf::record_filemap_backend_read(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(backend_start),
+                        false,
+                    );
+                    crate::task::perf::record_filemap_fault_around_backend_run();
+                }
+                backend_result?;
+                drop(buffers);
+                for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
+                    let start = offset * PAGE_SIZE;
+                    pending_page.entry.with_bytes_mut(|buf| {
+                        buf.copy_from_slice(&staging[start..start + PAGE_SIZE])
+                    });
+                }
             }
-            backend_result?;
-            drop(buffers);
-            for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
-                let start = offset * PAGE_SIZE;
-                pending_page
-                    .entry
-                    .with_bytes_mut(|buf| buf.copy_from_slice(&staging[start..start + PAGE_SIZE]));
-            }
-        }
 
-        if generation != self.mutation_generation.load(Ordering::Acquire) {
-            return Err(SyscallErr::EAGAIN);
-        }
-
-        // Phase 4: 标记 UpToDate 并插入到 entries
-        let mut published_pages = 0;
-        let mut prefetched_pages = 0;
-        let track_use = filemap_demand_page.is_some()
-            && crate::task::perf::stats_enabled_for(
-                crate::task::perf::STATS_PROFILE_MEMORY_IO,
-            );
-        {
-            let mut entries = self.entries.lock();
-            // Revalidate while holding the publication lock. A truncate that
-            // increments the generation before waiting for `entries` must win;
-            // one that increments after this point will subsequently remove
-            // any pages published in this critical section.
             if generation != self.mutation_generation.load(Ordering::Acquire) {
                 return Err(SyscallErr::EAGAIN);
             }
-            let mut inner = self.inner.lock();
-            for p in &pending {
-                // 扩展 entries 数组
-                while entries.len() <= p.index {
-                    entries.push(None);
+
+            // Phase 3: publish only while the mutation generation remains
+            // stable.  A direct reader that won independently remains
+            // authoritative; the claimed batch never overwrites it.
+            let mut published_pages = 0;
+            let mut prefetched_pages = 0;
+            let track_use = filemap_demand_page.is_some()
+                && crate::task::perf::stats_enabled_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                );
+            {
+                let mut entries = self.entries.lock();
+                if generation != self.mutation_generation.load(Ordering::Acquire) {
+                    return Err(SyscallErr::EAGAIN);
                 }
-                // A fault/direct reader can populate (and even dirty) this
-                // slot while readahead I/O is in flight only after op_gate
-                // is released. Never overwrite that
-                // winner: doing so would detach its dirty data while leaving
-                // dirty accounting pointed at this index.
-                if entries[p.index].is_none() {
-                    p.entry.set_state(PageState::UpToDate);
-                    if track_use && filemap_demand_page != Some(p.index) {
-                        p.entry.mark_filemap_readahead();
-                        prefetched_pages += 1;
+                let mut inner = self.inner.lock();
+                for p in &pending {
+                    while entries.len() <= p.index {
+                        entries.push(None);
                     }
-                    entries[p.index] = Some(p.entry.clone());
-                    inner.pages.insert(p.index);
-                    published_pages += 1;
+                    if entries[p.index].is_none() {
+                        p.entry.set_state(PageState::UpToDate);
+                        if track_use && filemap_demand_page != Some(p.index) {
+                            p.entry.mark_filemap_readahead();
+                            prefetched_pages += 1;
+                        }
+                        entries[p.index] = Some(p.entry.clone());
+                        inner.pages.insert(p.index);
+                        published_pages += 1;
+                    }
                 }
             }
-        }
+            Ok((published_pages, prefetched_pages))
+        })();
+
+        // Every exit after claiming pages must release ownership and wake
+        // waiters, including allocation/backend errors and generation races.
+        self.release_batch_read_claims(&claimed);
+        let (published_pages, prefetched_pages) = result?;
         if filemap_demand_page.is_some() {
             crate::task::perf::record_filemap_fault_around_publish(
                 published_pages,
                 prefetched_pages,
             );
         }
-        self.notify_state_progress();
-
         Ok(count * PAGE_SIZE)
     }
 
