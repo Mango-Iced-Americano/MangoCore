@@ -12,6 +12,10 @@ export RUSTUP_HOME CARGO_HOME
 # 本地需要工具盘时显式 make BUILD_TOOLS_DISK=1 开启。
 BUILD_TOOLS_DISK ?= 0
 
+# 评测不需要 rootfs 盘（make all 只产出内核/initramfs），默认跳过；
+# 本地需要时显式 make BUILD_ROOTFS=1 开启。
+BUILD_ROOTFS ?= 0
+
 .PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint buildstorm ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
 .NOTPARALLEL:
 

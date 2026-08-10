@@ -55,7 +55,7 @@ $(LWEXT4_RV_LIB): $(LWEXT4_RV_PREPARED)
 clean-lwext4-rv:
 	@rm -rf $(LWEXT4_RV_OUTPUT_DIR)
 
-all: toolchain-preflight fs-img build
+all: toolchain-preflight $(if $(filter 1,$(BUILD_ROOTFS)),fs-img,) build
 
 debug: build mv-debug
 

@@ -66,7 +66,7 @@ $(LWEXT4_LA_LIB): $(LWEXT4_LA_PREPARED)
 # Targets (symmetric with rv64.mk)
 # ============================================================
 
-all: toolchain-preflight fs-img build
+all: toolchain-preflight $(if $(filter 1,$(BUILD_ROOTFS)),fs-img,) build
 
 debug: build mv-debug
 

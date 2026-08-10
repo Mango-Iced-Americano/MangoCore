@@ -1,0 +1,41 @@
+[package]
+name = "buddy_system_allocator"
+description = "A bare metal allocator that uses buddy system."
+documentation = "https://docs.rs/buddy_system_allocator"
+homepage = "https://github.com/rcore-os/buddy_system_allocator"
+repository = "https://github.com/rcore-os/buddy_system_allocator"
+keywords = ["allocator", "no_std", "heap"]
+version = "0.13.0"
+authors = [
+  "Jiajie Chen <c@jia.je>",
+  "Vinay Chandra Dommeti <github@vinay.vc>",
+  "Andrew Walbran <qwandor@google.com>",
+]
+edition = "2021"
+license = "MIT"
+
+[features]
+default = ["alloc", "use_spin"]
+alloc = []
+use_spin = ["spin"]
+metadata_heap = []
+
+[dependencies.spin]
+version = "0.12.1"
+optional = true
+default-features = false
+features = ["spin_mutex"]
+
+[dev-dependencies]
+criterion = "0.8.1"
+ctor = "1.0.7"
+rand = "0.10.0"
+rand_chacha = "0.10.0"
+
+[[bench]]
+name = "memory_allocator_benchmark"
+harness = false
+
+[[bench]]
+name = "heap_dealloc_scan"
+harness = false

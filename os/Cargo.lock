@@ -154,7 +154,6 @@ dependencies = [
 [[package]]
 name = "fdt"
 version = "0.2.0-alpha2"
-source = "git+https://github.com/Mango-Iced-Americano/fdt#a75f941561c1afddbd3bc6c891210a448d285ccd"
 
 [[package]]
 name = "hash32"

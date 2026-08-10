@@ -1,9 +1,0 @@
-[submodule "dependency/buddy_system_allocator"]
-	path = dependency/buddy_system_allocator
-	url = https://github.com/Mango-Iced-Americano/buddy_system_allocator
-[submodule "dependency/lwext4_rust"]
-	path = dependency/lwext4_rust
-	url = https://github.com/Mango-Iced-Americano/lwext4_rust
-[submodule "dependency/another_ext4"]
-	path = dependency/another_ext4
-	url = https://github.com/Mango-Iced-Americano/another_ext4.git

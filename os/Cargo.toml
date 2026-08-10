@@ -28,7 +28,7 @@ virtio-drivers = { path = "../dependency/virtio-drivers", default-features = fal
 lwext4_rust = { path = "../dependency/lwext4_rust", default-features = false, optional = true }
 another_ext4 = { path = "../dependency/another_ext4", optional = true }
 rustsbi = { path = "../dependency/rustsbi" }
-fdt = { git = "https://github.com/Mango-Iced-Americano/fdt", default-features = false }
+fdt = { path = "../dependency/fdt", default-features = false }
 
 # [target.'cfg(target_arch = "loongarch64")'.dependencies]
 pci = {  path = "../dependency/dep_pci/pci"  }

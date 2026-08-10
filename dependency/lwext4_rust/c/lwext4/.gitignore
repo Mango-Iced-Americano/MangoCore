@@ -1,0 +1,12 @@
+build_*/
+liblwext4-*.a
+ext_images/
+
+.cproject
+.project
+.settings/
+
+.atom-gdb.json
+.build-tools.cson
+.gdbinit
+tags

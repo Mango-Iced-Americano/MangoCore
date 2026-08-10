@@ -1,0 +1,20 @@
+[package]
+name = "fdt"
+version = "0.2.0-alpha2"
+authors = ["Wesley Norris <repnop@repnop.dev>"]
+edition = "2021"
+
+repository = "https://github.com/repnop/fdt"
+
+license = "MPL-2.0"
+
+description = "A pure-Rust `#![no_std]` crate for parsing Flattened Devicetrees"
+keywords = ["devicetree", "fdt", "dt"]
+categories = ["embedded", "no-std"]
+readme = "README.md"
+
+[features]
+pretty-printing = []
+linux-dt-bindings = []
+
+[dependencies]
