@@ -6,8 +6,8 @@ use core::arch::naked_asm;
 
 use crate::config::BOOT_STACK_SIZE;
 
-// Phase 1 固定支持最多 8 个连续 CPUID，并为每个 CPU 预留独立启动栈。
-const MAX_CPUS: usize = 8;
+// Phase 1 固定支持最多 16 个连续 CPUID，并为每个 CPU 预留独立启动栈。
+const MAX_CPUS: usize = 16;
 
 // SAFETY: 固件在尚无 Rust 栈和引用时进入这里。汇编只配置 DMW、校验本地
 // CPUID、选择边界内的启动栈，最后跳转到 `rust_main`。

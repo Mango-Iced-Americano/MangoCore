@@ -12,7 +12,9 @@ use core::{
 };
 
 pub const BOOT_CPU_ID: usize = 0;
-pub const MAX_CPUS: usize = 8;
+/// 编译期 CPU 上限（Linux NR_CPUS 语义）。评测机 rv64 用 8 核、la64 用 12 核，
+/// 统一放宽到 16 覆盖两种评测配置；运行时实际核数仍由 FDT `/cpus` 决定并截断到该上限。
+pub const MAX_CPUS: usize = 16;
 /// 精确 shootdown 在 hard IRQ 中可执行的最大连续页数。
 ///
 /// 超过该跨度时上层改用全用户 TLB 失效，从而为软件 IPI
@@ -339,6 +341,14 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(5),
     PerCpu::new(6),
     PerCpu::new(7),
+    PerCpu::new(8),
+    PerCpu::new(9),
+    PerCpu::new(10),
+    PerCpu::new(11),
+    PerCpu::new(12),
+    PerCpu::new(13),
+    PerCpu::new(14),
+    PerCpu::new(15),
 ];
 
 // build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
