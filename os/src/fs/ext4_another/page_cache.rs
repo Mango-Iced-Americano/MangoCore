@@ -279,17 +279,6 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 0,
                 _t1.wrapping_sub(_t0),
             );
-            let _t2 = perf::perf_time_now();
-            #[cfg(feature = "perf_diag")]
-            crate::println!(
-                "[ext4_another] write_pages ino={} pages={} total_bytes={} prepare_cycles={} commit_cycles={} direct={}",
-                inode_id,
-                pages.len(),
-                total_bytes,
-                _t1.wrapping_sub(_t0),
-                _t2.wrapping_sub(_t1),
-                _data_written,
-            );
             Ok(total_bytes)
         })();
         // BuildStorm creates many short-lived inodes. Retaining each batch's
