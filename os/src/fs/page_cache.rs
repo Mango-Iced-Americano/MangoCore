@@ -765,6 +765,15 @@ impl RetryWait for PageCacheFaultWait {
         // 读侧完成，但任何睡眠都必须发生在释放 op_gate 之后。
         loop {
             let observed = self.cache.state_wait_generation.load(Ordering::Acquire);
+            let may_load = self
+                .cache
+                .entries
+                .lock()
+                .get(self.page_index)
+                .and_then(Option::as_ref)
+                .map_or(true, |entry| !entry.is_fully_valid());
+            let backend_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             let result = {
                 let _op = self.cache.op_gate.read();
                 self.cache
@@ -778,6 +787,15 @@ impl RetryWait for PageCacheFaultWait {
                         }
                     })
             };
+            if may_load {
+                crate::task::perf::record_filemap_backend_read(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .wrapping_sub(backend_start),
+                    false,
+                );
+            }
             match result {
                 Ok(()) | Err(SyscallErr::EIO) => {
                     crate::task::perf::record_filemap_retry_wait(
@@ -1410,6 +1428,51 @@ impl PageCache {
         }
     }
 
+    /// VM-lock-safe filemap read admission. This path never starts backend
+    /// I/O: a missing, partial or transient page becomes a Retry token whose
+    /// `wait()` method runs after the address-space lock is released.
+    pub(crate) fn try_frame_for_filemap_read(
+        self: &Arc<Self>,
+        page_index: usize,
+        authoritative_eof: usize,
+    ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    entry.with_bytes_mut(|bytes| bytes[tail_start..].fill(0));
+                }
+                Ok(entry.page.clone())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
+        }
+    }
+
     /// 在 source `PageEntry.data` 读锁内将文件页复制到私有目标帧。
     ///
     /// `dst` 只由尚未发布到用户页表的新匿名页持有；EOF 后的字节也在同一快照中
@@ -1438,6 +1501,56 @@ impl PageCache {
             }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// VM-lock-safe private-fault copy. Like the shared read admission above,
+    /// it copies only an already-resident page and delegates all loading to a
+    /// lock-outside Retry token.
+    pub(crate) fn try_copy_page_for_private(
+        self: &Arc<Self>,
+        page_index: usize,
+        dst: &mut [u8],
+        authoritative_eof: usize,
+    ) -> Result<(), PageCacheFault> {
+        if dst.len() != PAGE_SIZE {
+            return Err(PageCacheFault::Error(SyscallErr::EINVAL));
+        }
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.with_bytes(|src| dst.copy_from_slice(src));
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    dst[tail_start..].fill(0);
+                }
+                Ok(())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
         }
     }
 

@@ -15,9 +15,9 @@ use super::vma::Vma;
 use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
-use crate::utils::error::SyscallErr;
 use crate::fs::PageCacheFault;
 use crate::mm::FaultOutcome;
+use crate::utils::error::SyscallErr;
 
 fn round_up_page(size: usize) -> usize {
     size.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -110,29 +110,22 @@ pub(super) fn filemap_private_fault<T: PageTable>(
         Err(error) => return FaultOutcome::Error(error),
     };
     let _copy_start = crate::task::perf::perf_time_now();
-    let backend_start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
     let copy_result = unsafe {
         // Safety: frame 已登记在当前 VMA，但尚未安装 PTE；地址空间写锁保证
         // 没有其它 fault 路径取得它，因此本路径独占目标页。
-        allocated_ppn.with_bytes_mut(|dst| {
-            pc.copy_page_for_private(page_index, dst, file_size)
-        })
+        allocated_ppn.with_bytes_mut(|dst| pc.try_copy_page_for_private(page_index, dst, file_size))
     };
-    crate::task::perf::record_filemap_backend_read(
-        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-            .wrapping_sub(backend_start),
-        true,
-    );
-    if let Err(error) = copy_result {
-        area.remove_unmapped_frame(ctx.vpn);
-        return if error == SyscallErr::EAGAIN {
+    match copy_result {
+        Ok(()) => {}
+        Err(PageCacheFault::Retry(wait)) => {
+            area.remove_unmapped_frame(ctx.vpn);
             crate::task::perf::record_filemap_not_ready_retry();
-            FaultOutcome::Retry(pc.filemap_fault_wait(page_index))
-        } else {
-            FaultOutcome::Error(map_pc_error(error))
-        };
+            return FaultOutcome::Retry(wait);
+        }
+        Err(PageCacheFault::Error(error)) => {
+            area.remove_unmapped_frame(ctx.vpn);
+            return FaultOutcome::Error(map_pc_error(error));
+        }
     }
     if let Err(error) = area.map_existing_in_memory(mapper, ctx.vpn) {
         area.remove_unmapped_frame(ctx.vpn);
@@ -182,25 +175,16 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         None => return FaultOutcome::Error(MemoryError::BackingStoreFailure),
     };
     let page_index = file_offset >> PAGE_SIZE_BITS;
-    let backend_start = crate::task::perf::perf_time_now_for(
-        crate::task::perf::STATS_PROFILE_MEMORY_IO,
-    );
-    let cache_result = pc.frame_for_filemap_read(page_index, file_size);
-    crate::task::perf::record_filemap_backend_read(
-        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO)
-            .wrapping_sub(backend_start),
-        true,
-    );
-    let cache_frame = match cache_result {
+    let cache_frame = match pc.try_frame_for_filemap_read(page_index, file_size) {
         Ok(frame) => {
             crate::task::perf::record_filemap_ready_hit();
             frame
         }
-        Err(SyscallErr::EAGAIN) => {
+        Err(PageCacheFault::Retry(wait)) => {
             crate::task::perf::record_filemap_not_ready_retry();
-            return FaultOutcome::Retry(pc.filemap_fault_wait(page_index));
+            return FaultOutcome::Retry(wait);
         }
-        Err(error) => return FaultOutcome::Error(map_pc_error(error)),
+        Err(PageCacheFault::Error(error)) => return FaultOutcome::Error(map_pc_error(error)),
     };
     let cache_ppn = cache_frame.ppn;
     crate::task::perf::FILEMAP_FAULT_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
