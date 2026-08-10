@@ -1,10 +1,14 @@
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::fs::{page_cache::PageCache, vfs::InodeFlags};
+use crate::fs::{
+    page_cache::PageCache,
+    vfs::{FileType, InodeFlags, InodeId},
+};
 use crate::timer::TimeSpec;
 use crate::utils::error::SyscallErr;
 
@@ -62,6 +66,45 @@ pub(crate) struct InodeLifetime {
     /// Incremented after each page-cache copy; reset only if a size commit
     /// observes the same generation throughout its transaction.
     pub(crate) size_generation: AtomicUsize,
+    /// Namespace generation and complete directory snapshot shared by every
+    /// VFS wrapper of the same ext4 inode generation.
+    directory_generation: AtomicUsize,
+    directory_snapshot: Mutex<Option<Arc<DirectorySnapshot>>>,
+}
+
+pub(crate) struct DirectorySnapshot {
+    generation: usize,
+    entries: Vec<(String, InodeId, FileType)>,
+}
+
+impl DirectorySnapshot {
+    pub(crate) fn new(
+        generation: usize,
+        entries: Vec<(String, InodeId, FileType)>,
+    ) -> Self {
+        Self {
+            generation,
+            entries,
+        }
+    }
+
+    pub(crate) fn find(&self, name: &str) -> Option<(InodeId, FileType)> {
+        self.entries
+            .iter()
+            .find(|(entry_name, _, _)| entry_name == name)
+            .map(|(_, inode_id, file_type)| (*inode_id, *file_type))
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect()
+    }
+
+    pub(crate) fn entries(&self) -> Vec<(String, InodeId, FileType)> {
+        self.entries.clone()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -100,7 +143,49 @@ impl InodeLifetime {
             reclaim_error: Mutex::new(None),
             pins: AtomicUsize::new(0),
             size_generation: AtomicUsize::new(0),
+            directory_generation: AtomicUsize::new(0),
+            directory_snapshot: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn directory_generation(&self) -> usize {
+        self.directory_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cached_directory_snapshot(&self) -> Option<Arc<DirectorySnapshot>> {
+        let generation = self.directory_generation();
+        self.directory_snapshot
+            .lock()
+            .as_ref()
+            .filter(|snapshot| snapshot.generation == generation)
+            .cloned()
+    }
+
+    pub(crate) fn publish_directory_snapshot(
+        &self,
+        generation: usize,
+        snapshot: Arc<DirectorySnapshot>,
+    ) -> Option<Arc<DirectorySnapshot>> {
+        if self.directory_generation() != generation {
+            return None;
+        }
+        let mut cached = self.directory_snapshot.lock();
+        if self.directory_generation() != generation {
+            return None;
+        }
+        if let Some(existing) = cached
+            .as_ref()
+            .filter(|existing| existing.generation == generation)
+        {
+            return Some(existing.clone());
+        }
+        *cached = Some(snapshot.clone());
+        Some(snapshot)
+    }
+
+    pub(crate) fn invalidate_directory_snapshot(&self) {
+        self.directory_generation.fetch_add(1, Ordering::AcqRel);
+        self.directory_snapshot.lock().take();
     }
 
     pub(crate) fn cache_modified_time(&self, now: TimeSpec) {
@@ -456,7 +541,10 @@ impl Ext4FileSystem {
 
 #[cfg(test)]
 mod tests {
-    use super::InodeLifetime;
+    use alloc::{string::String, sync::Arc, vec};
+
+    use super::{DirectorySnapshot, InodeLifetime};
+    use crate::fs::vfs::FileType;
     use crate::timer::TimeSpec;
 
     #[test]
@@ -480,5 +568,22 @@ mod tests {
         lifetime.finish_timestamp_commit(snapshot);
         assert_eq!(lifetime.cached_mtime(), None);
         assert_eq!(lifetime.cached_ctime(), None);
+    }
+
+    #[test]
+    fn stale_directory_scan_cannot_publish_after_invalidation() {
+        let lifetime = InodeLifetime::new(0, TimeSpec::new(), TimeSpec::new());
+        let generation = lifetime.directory_generation();
+        let stale = Arc::new(DirectorySnapshot::new(
+            generation,
+            vec![(String::from("old"), 7, FileType::File)],
+        ));
+
+        lifetime.invalidate_directory_snapshot();
+
+        assert!(lifetime
+            .publish_directory_snapshot(generation, stale)
+            .is_none());
+        assert!(lifetime.cached_directory_snapshot().is_none());
     }
 }

@@ -4,7 +4,7 @@ module: fs
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-07-23"
+last_updated: "2026-08-11"
 code_paths:
   - "os/src/fs/"
 entry_points:
@@ -96,6 +96,12 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 **PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。单个 packed `PG_*` 原子位负责每页写入、回写和截断之间的序列化；正常 write 仅发布每页脏位，后台写回从 32 MiB 水位开始按空闲帧比例协作执行，`fsync`/最后一次 `close` 负责持久化，`reclaim.rs` 周期性探测并回收。
 
 **another_ext4 时间戳缓存：** regular-file 写成功后只在 `InodeLifetime` 更新 mtime/ctime 原子缓存，不读取或修改 ext4 inode 块。`metadata()` 在缓存 dirty 时返回新时间戳；`fsync`、`syncfs` 与全局 `sync` 在数据回写后将两个时间戳合并为一次 `setattr`，仅在最终设备 flush 成功后清除 dirty 标记。
+
+**another_ext4 目录查询缓存：** 同一 `(filesystem, inode, inode-generation)` 的所有
+VFS wrapper 通过 `InodeLifetime` 共享完整目录快照，`find()`、`list()` 和
+`list_dirents()` 复用同一次 `listdir()`。create/link/unlink/rename 等命名空间事务成功后
+递增目录 generation 并清除相关父目录快照；后台扫描只有在 generation 前后一致时才能
+发布，因此与修改并发的旧扫描不会重新安装 stale dentry。
 
 ### 特殊文件描述符
 
