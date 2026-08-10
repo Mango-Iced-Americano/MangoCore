@@ -1430,3 +1430,15 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**: 对"X syscall 开销是基准差距根因"的假设，动手优化前先用 `perf_diag`（仅看 count 列，不用于吞吐）验证：① 该 syscall 在目标 workload 中确实被调用；② 其单次成本在每记录总成本中的占比；③ 每次调用的固定脚手架成本（进程内锁/表锁/trap）是否已被其他路径覆盖。微优化若只移除廉价部分，吞吐基准不会移动。
 - **教训**: 基准归因必须以"每记录成本构成"而非"syscall 次数"为准；微优化验收前先估算可移除成本占总成本的比例。优化方向应从最贵项开始（此处为 `process.files()` 进程内锁与 fd-table 锁），而非 Arc clone。
 - **相关文件**: `os/src/syscall/fs/sys_lseek.rs`, `os/src/task/process.rs` (`files()`), `docs/Work_Log/evidence/2026-08-02/lseek-fastpath-rv64/`
+
+## 评测分数：cagent 差异化权重+时间奖励 与 buildstorm baseline 时间分
+
+- **现象**: 想确认 buildstorm/cagent 评测能否拿到满分，手工按"每 pass 10 分"估算 cagent 只有 100 分，与记忆中"199 分"不符；buildstorm 只跑到 TOOLCHAIN/MINIBUILD ok 就以为环境分不够。
+- **根因**: 评分脚本在评测机侧（`oscomp/testsuits-for-oskernel/judge/judge_{cagent,buildstorm}-glibc.py`），镜像内 `/glibc/*_testcode.sh` 注释只列了部分分值，且 cagent 脚本本身不输出权重——必须直接拿官方 judge 脚本喂完整串口日志才能得真实分数。
+- **修复/规则**:
+  - **cagent**: 差异化权重 + 时间奖励。easy=13.5 / medium=20 / hard(fs-search)=27，`elapsed < timeout_ms/2` 时再 +10% 权重。10 用例满分 199.1（非 100）。实测 1.7-3.0s 远小于阈值 → 满奖励。
+  - **buildstorm**: TOOLCHAIN ok=8 + MINIBUILD ok=12 + COMPILE ok=true=40 + time=120×clamp((2B−t)/B,0,1)，B 为 per-arch baseline（rv≈1616s / la≈1985s，按 8/12 核参考）。t ≤ B 拿满 120，t ≥ 2B 归零。
+  - judge 只按行前缀匹配（`BUILDSTORM_*`、`testcase cagent ...`），START/END marker、进度行、tail dump 均不影响评分。
+  - **本地 4 核 TCG 双实例共享 CPU 时编译时间远超 2B，time 分必然为 0；要验 time 分需 8 核单实例。**
+- **教训**: 评测分数必须以官方 judge 脚本对完整串口日志的输出为准，不要按脚本注释或印象估算；验证 buildstorm time 分前先确认 CPU 核数满足 baseline 前提。
+- **相关文件**: `oscomp/testsuits-for-oskernel/judge/judge_cagent-glibc.py`, `judge_buildstorm-glibc.py`；`docs/Work_Log/2026-08-10.md`
