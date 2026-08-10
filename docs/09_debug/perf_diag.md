@@ -71,7 +71,7 @@ cat /sys/kernel/stats/features
 | `profile` | rw | `core` / `memory_io` / `network_runtime`；诊断窗口一次只启用一组 |
 | `reset` | wo | 重置所有 delta 计数器 |
 | `boot` | ro | 从 Rust 入口起算的 console/MM/driver/net/FS/initproc/scheduler 累计 ticks；不随 `reset` 清零 |
-| `taskq` | ro | 调度队列指标（15 项） |
+| `taskq` | ro | 调度队列、wake/steal 与新任务放置指标（schema v3） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
 | `vm` | ro | filemap、VM 锁/TLB、exec 路径和 MM 切换归因 |
@@ -162,6 +162,9 @@ echo 1 > /sys/kernel/tracing/clear
 | `zombie_drain_calls` | counter | zombie drain 调用次数 |
 | `zombie_drain_removed` | counter | zombie drain 移除总数 |
 | `ready_nonzero_nice_cur` | gauge | 当前 nice≠0 任务数 |
+| `new_task_idle_available` | counter | 新任务发布时允许集合中存在空闲 CPU 的次数 |
+| `new_task_selected_idle` | counter | 新任务发布实际选择空闲 CPU 的次数 |
+| `new_task_kept_busy_parent` | counter | 所有允许 CPU 都忙时仍保留创建者 CPU 的次数 |
 
 ### timer（内核计时器）
 

@@ -157,6 +157,9 @@ fn stats_taskq_content(
     let _ = writeln!(s, "wake_keep_last_cpu={}", read_counter(&crate::task::perf::WAKE_KEEP_LAST_CPU));
     let _ = writeln!(s, "wake_select_idle_cpu={}", read_counter(&crate::task::perf::WAKE_SELECT_IDLE_CPU));
     let _ = writeln!(s, "wake_select_least_loaded={}", read_counter(&crate::task::perf::WAKE_SELECT_LEAST_LOADED));
+    let _ = writeln!(s, "new_task_idle_available={}", read_counter(&crate::task::perf::NEW_TASK_IDLE_AVAILABLE));
+    let _ = writeln!(s, "new_task_selected_idle={}", read_counter(&crate::task::perf::NEW_TASK_SELECTED_IDLE));
+    let _ = writeln!(s, "new_task_kept_busy_parent={}", read_counter(&crate::task::perf::NEW_TASK_KEPT_BUSY_PARENT));
     let _ = writeln!(s, "wake_to_run_ticks_total={}", read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_TOTAL));
     let _ = writeln!(s, "wake_to_run_ticks_max={}", read_counter(&crate::task::perf::WAKE_TO_RUN_TICKS_MAX));
     let _ = writeln!(s, "task_run_slice_ticks_total={}", read_counter(&crate::task::perf::TASK_RUN_SLICE_TICKS_TOTAL));

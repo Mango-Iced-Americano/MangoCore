@@ -417,8 +417,9 @@ pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
 
 /// 按任务 affinity 和当前负载尝试发布普通新任务。
 ///
-/// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。调用 CPU 仅作为
-/// locality 提示；若它不在 mask 中或明显过载，选择器会返回其它合法 CPU。
+/// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。新任务没有最近运行
+/// 的 cache locality，允许集合存在 idle CPU 时优先唤醒该 CPU；所有 CPU 都忙
+/// 时才把调用 CPU 作为 fallback locality 提示。
 pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize> {
     // 启动期的 init/ktest runner 在 CPU0 首次进入 run_tasks() 前发布，此时
     // 本 CPU 还没有 current，scheduler-entered mask 也尚未包含 bit0。
@@ -427,7 +428,7 @@ pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize>
         return try_publish_task_on(task, crate::smp::BOOT_CPU_ID);
     }
     let target =
-        super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(crate::smp::cpu_id()));
+        super::run_queue::select_new_task_cpu(task.cpus_allowed(), Some(crate::smp::cpu_id()));
     try_publish_task_on(task, target)
 }
 

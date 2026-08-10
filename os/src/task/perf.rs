@@ -23,7 +23,7 @@ pub const STATS_PROFILE_ALL: usize =
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
-pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 2;
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 3;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -269,6 +269,9 @@ mod enabled {
     pub static WAKE_KEEP_LAST_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_IDLE_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_LEAST_LOADED: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_IDLE_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_SELECTED_IDLE: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_KEPT_BUSY_PARENT: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_TO_RUN_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_TO_RUN_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static TASK_RUN_SLICE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -671,6 +674,26 @@ mod enabled {
             WAKE_SELECT_IDLE_CPU.fetch_add(1, Ordering::Relaxed);
         } else {
             WAKE_SELECT_LEAST_LOADED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_new_task_placement(
+        idle_available: bool,
+        selected_idle: bool,
+        kept_busy_parent: bool,
+    ) {
+        if !stats_enabled() {
+            return;
+        }
+        if idle_available {
+            NEW_TASK_IDLE_AVAILABLE.fetch_add(1, Ordering::Relaxed);
+        }
+        if selected_idle {
+            NEW_TASK_SELECTED_IDLE.fetch_add(1, Ordering::Relaxed);
+        }
+        if kept_busy_parent {
+            NEW_TASK_KEPT_BUSY_PARENT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2755,6 +2778,9 @@ mod enabled {
         WAKE_KEEP_LAST_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_IDLE_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_LEAST_LOADED.store(0, Ordering::Relaxed);
+        NEW_TASK_IDLE_AVAILABLE.store(0, Ordering::Relaxed);
+        NEW_TASK_SELECTED_IDLE.store(0, Ordering::Relaxed);
+        NEW_TASK_KEPT_BUSY_PARENT.store(0, Ordering::Relaxed);
         WAKE_TO_RUN_TICKS_TOTAL.store(0, Ordering::Relaxed);
         WAKE_TO_RUN_TICKS_MAX.store(0, Ordering::Relaxed);
         TASK_RUN_SLICE_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -3690,6 +3716,15 @@ pub fn record_wake_selection(_keep_last: bool, _idle: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_new_task_placement(
+    _idle_available: bool,
+    _selected_idle: bool,
+    _kept_busy_parent: bool,
+) {
+}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_wake_to_run(_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3814,6 +3849,9 @@ perf_stub_counter!(WAKE_REMOTE);
 perf_stub_counter!(WAKE_KEEP_LAST_CPU);
 perf_stub_counter!(WAKE_SELECT_IDLE_CPU);
 perf_stub_counter!(WAKE_SELECT_LEAST_LOADED);
+perf_stub_counter!(NEW_TASK_IDLE_AVAILABLE);
+perf_stub_counter!(NEW_TASK_SELECTED_IDLE);
+perf_stub_counter!(NEW_TASK_KEPT_BUSY_PARENT);
 perf_stub_counter!(WAKE_TO_RUN_TICKS_TOTAL);
 perf_stub_counter!(WAKE_TO_RUN_TICKS_MAX);
 perf_stub_counter!(TASK_RUN_SLICE_TICKS_TOTAL);

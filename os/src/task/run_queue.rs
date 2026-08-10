@@ -122,12 +122,7 @@ fn sub_running(cpu: usize, count: usize) {
     }
 }
 
-/// 从允许集合中选择一个当前可调度的 CPU。
-///
-/// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`
-/// 时保留原 CPU；否则选择近似负载最小、编号最小的 CPU。所有计数都是无锁
-/// 快照，只影响放置质量，真正 owner 仍由后续 runqueue 临界区提交。
-pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+fn runnable_cpu_mask(allowed: usize) -> usize {
     let online = crate::smp::online_cpu_mask();
     let schedulers = crate::smp::scheduler_cpu_mask();
     let stopped = crate::smp::stopped_cpu_mask();
@@ -137,20 +132,60 @@ pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> u
         "task has no runnable CPU: allowed={:#x} online={:#x} schedulers={:#x} stopped={:#x}",
         allowed, online, schedulers, stopped
     );
+    runnable
+}
 
-    let load = |cpu| nr_running(cpu) + super::processor::cpu_current_count(cpu);
-    let minimum = (0..crate::smp::configured_cpu_count())
+#[inline(always)]
+fn cpu_load(cpu: usize) -> usize {
+    nr_running(cpu) + super::processor::cpu_current_count(cpu)
+}
+
+fn minimum_runnable_cpu(runnable: usize) -> usize {
+    (0..crate::smp::configured_cpu_count())
         .filter(|cpu| runnable & (1usize << cpu) != 0)
-        .min_by_key(|cpu| (load(*cpu), *cpu))
-        .expect("runnable CPU mask is empty");
+        .min_by_key(|cpu| (cpu_load(*cpu), *cpu))
+        .expect("runnable CPU mask is empty")
+}
+
+/// 从允许集合中选择一个当前可调度的 CPU。
+///
+/// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`
+/// 时保留原 CPU；否则选择近似负载最小、编号最小的 CPU。所有计数都是无锁
+/// 快照，只影响放置质量，真正 owner 仍由后续 runqueue 临界区提交。
+pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+    let runnable = runnable_cpu_mask(allowed);
+    let minimum = minimum_runnable_cpu(runnable);
 
     preferred
         .filter(|cpu| {
             *cpu < crate::smp::configured_cpu_count()
                 && runnable & (1usize << *cpu) != 0
-                && load(*cpu) <= load(minimum).saturating_add(1)
+                && cpu_load(*cpu) <= cpu_load(minimum).saturating_add(1)
         })
         .unwrap_or(minimum)
+}
+
+/// Select the initial CPU for a newly created task.
+///
+/// A new task has no cache-local wake history to preserve. If any allowed CPU
+/// is genuinely idle, place the task there so a sleeping CPU can take useful
+/// work immediately. Only when every allowed CPU is busy do we fall back to
+/// the ordinary load-plus-locality selector used by blocked-task wakeups.
+pub(crate) fn select_new_task_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+    let runnable = runnable_cpu_mask(allowed);
+    let idle_cpu = (0..crate::smp::configured_cpu_count())
+        .filter(|cpu| runnable & (1usize << cpu) != 0)
+        .filter(|cpu| cpu_load(*cpu) == 0)
+        .min();
+    let idle_available = idle_cpu.is_some();
+    let target = idle_cpu.unwrap_or_else(|| select_runnable_cpu(allowed, preferred));
+    let kept_busy_parent = !idle_available && preferred == Some(target) && cpu_load(target) != 0;
+    crate::task::perf::record_new_task_placement(
+        idle_available,
+        idle_available && idle_cpu == Some(target),
+        kept_busy_parent,
+    );
+    target
 }
 
 /// 首次把构造完成的任务发布到目标 CPU。
