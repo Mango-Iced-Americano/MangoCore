@@ -211,6 +211,8 @@ echo 1 > /sys/kernel/tracing/clear
 | `device_flush_count` | counter | 实际提交到 VirtIO 块设备的 flush 请求数 |
 | `virtio_write_{requests,bytes}` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的写请求数及字节数 |
 | `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
+| `virtio_dma_small_pool_enabled` | gauge | 固定小描述符 DMA 池是否成功初始化 |
+| `virtio_dma_share_{header,status,indirect}_pool` | counter | block VirtIO 请求头、状态字节、间接描述符从小池复用的次数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
 | `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |

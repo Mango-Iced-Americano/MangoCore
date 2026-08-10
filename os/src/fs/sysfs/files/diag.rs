@@ -1464,6 +1464,11 @@ fn stats_blockio_content(
         "virtio_dma_pool_enabled={}",
         crate::drivers::block::virtio_dma_pool::dma_pool_is_enabled()
     );
+    let _ = writeln!(
+        s,
+        "virtio_dma_small_pool_enabled={}",
+        crate::drivers::block::virtio_dma_pool::dma_small_pool_is_enabled()
+    );
     let _ = writeln!(s, "virtio_blk_read_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_CHUNKS));
     let _ = writeln!(s, "virtio_blk_read_bytes={}", read_counter(&crate::task::perf::VIRTIO_BLK_READ_BYTES));
     let _ = writeln!(s, "virtio_blk_write_chunks={}", read_counter(&crate::task::perf::VIRTIO_BLK_WRITE_CHUNKS));
@@ -1480,6 +1485,9 @@ fn stats_blockio_content(
     let _ = writeln!(s, "virtio_dma_share_status_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_FALLBACK));
     let _ = writeln!(s, "virtio_dma_share_indirect_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_FALLBACK));
     let _ = writeln!(s, "virtio_dma_share_other_fallback={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_OTHER_FALLBACK));
+    let _ = writeln!(s, "virtio_dma_share_header_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_HEADER_POOL));
+    let _ = writeln!(s, "virtio_dma_share_status_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_STATUS_POOL));
+    let _ = writeln!(s, "virtio_dma_share_indirect_pool={}", read_counter(&crate::task::perf::VIRTIO_DMA_SHARE_INDIRECT_POOL));
     let _ = writeln!(s, "virtio_dma_bridge_lock_wait_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL));
     let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_total={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL));
     let _ = writeln!(s, "virtio_dma_bridge_lock_hold_ticks_max={}", read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX));

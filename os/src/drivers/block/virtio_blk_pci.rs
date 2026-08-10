@@ -28,6 +28,16 @@ use crate::hal::{
 use crate::task::perf;
 const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
+
+#[inline(always)]
+fn small_dma_share_kind(len: usize) -> Option<usize> {
+    match len {
+        16 => Some(6),      // request header pool
+        1 => Some(7),       // response status pool
+        32 | 48 => Some(8), // indirect descriptor pool
+        _ => None,
+    }
+}
 #[cfg(not(target_arch = "riscv64"))]
 const PCI_ECAM_BASE: usize = 0x2000_0000; // loongarch64 qemu
 #[cfg(target_arch = "riscv64")]
@@ -388,6 +398,19 @@ unsafe impl Hal for VirtioHal {
             *pending = Some((slot, gen));
         }
         drop(pending);
+
+        // Reuse fixed single-page slots for block request descriptors. Keep
+        // arbitrary one-page users on the old fallback path.
+        if let Some(pool_kind) = small_dma_share_kind(buffer.len()) {
+            if let Some((_slot, pa)) = virtio_dma_pool::dma_pool_try_alloc_small() {
+                perf::record_virtio_dma_share(pool_kind);
+                if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
+                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                        .copy_from_slice(buffer);
+                }
+                return pa;
+            }
+        }
 
         assert_eq!(pages, 1, "share: multi-page DMA without pool reservation");
         let share_kind = if buffer.len() >= BLOCK_SZ {

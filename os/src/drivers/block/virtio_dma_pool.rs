@@ -32,6 +32,8 @@ pub const DMA_POOL_SLOT_PAGES: usize = 16;
 pub const DMA_POOL_SLOTS: usize = 4;
 /// 每槽位字节数。
 pub const DMA_POOL_BUF_BYTES: usize = DMA_POOL_SLOT_PAGES * PAGE_SIZE;
+/// 小型 VirtIO 描述符槽位总数。
+pub const DMA_SMALL_POOL_SLOTS: usize = 32;
 
 // ── 公开类型 ────────────────────────────────────────────────────────────
 
@@ -42,6 +44,13 @@ pub const DMA_POOL_BUF_BYTES: usize = DMA_POOL_SLOT_PAGES * PAGE_SIZE;
 pub struct DmaReservation {
     pub slot: usize,
     pub gen: usize,
+}
+
+/// DMA 池中一次 share 返回的槽位类型。
+#[derive(Debug, Clone, Copy)]
+pub enum DmaPoolSlot {
+    Data(usize),
+    Small(usize),
 }
 
 // ── 内部类型 ────────────────────────────────────────────────────────────
@@ -67,13 +76,23 @@ struct DmaSlot {
     gen: usize,
 }
 
+/// 一个固定大小的单页描述符槽位。
+struct SmallDmaSlot {
+    pa: usize,
+    #[allow(unused)]
+    frames: Vec<Arc<FrameTracker>>,
+    in_use: bool,
+}
+
 /// DMA 池全局状态。
 struct DmaPool {
     enabled: bool,
     init_attempted: bool,
     slots: Vec<DmaSlot>,
+    small_slots: Vec<SmallDmaSlot>,
     /// Round-robin 搜索起点。
     next: usize,
+    small_next: usize,
 }
 
 lazy_static::lazy_static! {
@@ -81,7 +100,9 @@ lazy_static::lazy_static! {
         enabled: false,
         init_attempted: false,
         slots: Vec::new(),
+        small_slots: Vec::new(),
         next: 0,
+        small_next: 0,
     });
 }
 
@@ -181,10 +202,31 @@ pub fn dma_pool_init_once() {
         });
     }
 
+    // The descriptor pool is independent from the large data pool. If it
+    // cannot be allocated, keep the data pool enabled and use the existing
+    // correctness-preserving fallback for small share() buffers.
+    let mut small_slots = Vec::new();
+    if small_slots.try_reserve(DMA_SMALL_POOL_SLOTS).is_ok() {
+        for _ in 0..DMA_SMALL_POOL_SLOTS {
+            let Some(frames) = frames_alloc_fresh_contiguous(1) else {
+                small_slots.clear();
+                break;
+            };
+            let pa = frames[0].ppn.0 * PAGE_SIZE;
+            small_slots.push(SmallDmaSlot {
+                pa,
+                frames,
+                in_use: false,
+            });
+        }
+    }
+
     let mut pool = DMA_POOL.lock();
     pool.slots = slots;
+    pool.small_slots = small_slots;
     pool.enabled = true;
     pool.next = 0;
+    pool.small_next = 0;
 }
 
 /// 预约一个能容纳 `pages` 页的槽位。
@@ -265,8 +307,40 @@ pub fn dma_pool_cancel_reservation(slot: usize, gen: usize) {
     }
 }
 
-/// 查询物理地址是否属于某槽位，返回槽位索引。
-pub fn dma_pool_lookup(pa: usize) -> Option<usize> {
+/// Return whether the optional single-page descriptor pool is available.
+pub fn dma_small_pool_is_enabled() -> bool {
+    let pool = DMA_POOL.lock();
+    pool.enabled && !pool.small_slots.is_empty()
+}
+
+/// Allocate one fixed single-page slot for a known block descriptor buffer.
+pub fn dma_pool_try_alloc_small() -> Option<(DmaPoolSlot, usize)> {
+    let mut pool = DMA_POOL.lock();
+    if !pool.enabled || pool.small_slots.is_empty() {
+        return None;
+    }
+    let n = pool.small_slots.len();
+    let start = pool.small_next;
+    for offset in 0..n {
+        let idx = (start + offset) % n;
+        let pa = {
+            let slot = &mut pool.small_slots[idx];
+            if slot.in_use {
+                continue;
+            }
+            slot.in_use = true;
+            slot.pa
+        };
+        {
+            pool.small_next = (idx + 1) % n;
+        }
+        return Some((DmaPoolSlot::Small(idx), pa));
+    }
+    None
+}
+
+/// 查询物理地址是否属于某槽位。
+pub fn dma_pool_lookup(pa: usize) -> Option<DmaPoolSlot> {
     let pool = DMA_POOL.lock();
     if !pool.enabled {
         return None;
@@ -274,7 +348,12 @@ pub fn dma_pool_lookup(pa: usize) -> Option<usize> {
     for (i, slot) in pool.slots.iter().enumerate() {
         let end = slot.pa + DMA_POOL_BUF_BYTES;
         if pa >= slot.pa && pa < end {
-            return Some(i);
+            return Some(DmaPoolSlot::Data(i));
+        }
+    }
+    for (i, slot) in pool.small_slots.iter().enumerate() {
+        if pa == slot.pa {
+            return Some(DmaPoolSlot::Small(i));
         }
     }
     None
@@ -289,21 +368,39 @@ pub fn dma_pool_is_enabled() -> bool {
 ///
 /// 调用者必须已完成数据拷贝（device → driver 方向）。
 /// 仅当槽位处于 InUse 状态时生效。
-pub fn dma_pool_finish_unshare(slot: usize) {
+pub fn dma_pool_finish_unshare(slot: DmaPoolSlot) {
     let mut pool = DMA_POOL.lock();
-    if let Some(entry) = pool.slots.get_mut(slot) {
-        match entry.state {
-            SlotState::InUse { .. } => {
-                entry.state = SlotState::Free;
-                drop(pool);
-                crate::task::perf::record_virtio_dma_pool_finish();
+    match slot {
+        DmaPoolSlot::Data(index) => {
+            if let Some(entry) = pool.slots.get_mut(index) {
+                match entry.state {
+                    SlotState::InUse { .. } => {
+                        entry.state = SlotState::Free;
+                        drop(pool);
+                        crate::task::perf::record_virtio_dma_pool_finish();
+                    }
+                    _ => {
+                        log::warn!(
+                            "dma_pool_finish_unshare: data slot {} not InUse ({:?})",
+                            index,
+                            entry.state
+                        );
+                    }
+                }
             }
-            _ => {
-                log::warn!(
-                    "dma_pool_finish_unshare: slot {} not InUse ({:?})",
-                    slot,
-                    entry.state
-                );
+        }
+        DmaPoolSlot::Small(index) => {
+            if let Some(entry) = pool.small_slots.get_mut(index) {
+                if entry.in_use {
+                    entry.in_use = false;
+                    drop(pool);
+                    crate::task::perf::record_virtio_dma_pool_finish();
+                } else {
+                    log::warn!(
+                        "dma_pool_finish_unshare: small slot {} not in use",
+                        index
+                    );
+                }
             }
         }
     }

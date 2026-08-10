@@ -1032,6 +1032,9 @@ mod enabled {
     pub static VIRTIO_DMA_SHARE_STATUS_FALLBACK: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_SHARE_INDIRECT_FALLBACK: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_SHARE_OTHER_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_HEADER_POOL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_STATUS_POOL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_INDIRECT_POOL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
@@ -2070,7 +2073,8 @@ mod enabled {
     }
 
     /// `kind`: 0=data pool, 1=data fallback, 2=header, 3=status,
-    /// 4=indirect descriptor table, 5=other fallback.
+    /// 4=indirect descriptor table, 5=other fallback, 6=header pool,
+    /// 7=status pool, 8=indirect descriptor pool.
     #[inline(always)]
     pub fn record_virtio_dma_share(kind: usize) {
         if !memory_io_stats_enabled() {
@@ -2083,6 +2087,9 @@ mod enabled {
             2 => VIRTIO_DMA_SHARE_HEADER_FALLBACK.fetch_add(1, Ordering::Relaxed),
             3 => VIRTIO_DMA_SHARE_STATUS_FALLBACK.fetch_add(1, Ordering::Relaxed),
             4 => VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            6 => VIRTIO_DMA_SHARE_HEADER_POOL.fetch_add(1, Ordering::Relaxed),
+            7 => VIRTIO_DMA_SHARE_STATUS_POOL.fetch_add(1, Ordering::Relaxed),
+            8 => VIRTIO_DMA_SHARE_INDIRECT_POOL.fetch_add(1, Ordering::Relaxed),
             _ => VIRTIO_DMA_SHARE_OTHER_FALLBACK.fetch_add(1, Ordering::Relaxed),
         };
     }
@@ -2603,6 +2610,9 @@ mod enabled {
         VIRTIO_DMA_SHARE_STATUS_FALLBACK.store(0, Ordering::Relaxed);
         VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.store(0, Ordering::Relaxed);
         VIRTIO_DMA_SHARE_OTHER_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_HEADER_POOL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_STATUS_POOL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_INDIRECT_POOL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
@@ -4964,6 +4974,9 @@ perf_stub_counter!(VIRTIO_DMA_SHARE_HEADER_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_STATUS_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_OTHER_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_HEADER_POOL);
+perf_stub_counter!(VIRTIO_DMA_SHARE_STATUS_POOL);
+perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_POOL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX);
