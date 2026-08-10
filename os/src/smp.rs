@@ -353,6 +353,11 @@ const STOP_TIMEOUT_SECONDS: usize = 1;
 // those protocols, but give this sequence/ack protocol its own budget so a
 // slow emulated vCPU is not mistaken for a lost mapping publication.
 const KERNEL_TLB_TIMEOUT_SECONDS: usize = 5;
+// User shootdowns use the same level-triggered mailbox protocol as kernel
+// shootdowns.  Under MTTCG a target vCPU can retain the published reason while
+// its one-shot hardware doorbell is coalesced, so allow delivery retries before
+// treating a still-live CPU as a correctness failure.
+const USER_TLB_TIMEOUT_SECONDS: usize = 5;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 
 /// CPU0 等待 AP 停止时唯一可能返回的错误。
@@ -1223,14 +1228,17 @@ pub(crate) fn synchronize_user_tlb(
                     context.mark_cpu_observed(generation, self::cpu_id());
                 }
             }
-            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
+            let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
             let _irq_guard = IpiWaitIrqGuard::enter();
-            let deadline = crate::hal::get_time().saturating_add(
-                crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
-            );
+            let clock_freq = crate::hal::get_clock_freq();
+            let deadline = crate::hal::get_time()
+                .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+            let kick_interval = (clock_freq / 100).max(1);
+            let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
             loop {
                 let acknowledged = slot.acknowledged();
-                let missing = remote & !stopped_cpu_mask() & !acknowledged;
+                let stopped = stopped_cpu_mask();
+                let missing = remote & !stopped & !acknowledged;
                 if missing == 0 {
                     slot.release();
                     record_tlb_shootdown(
@@ -1241,7 +1249,19 @@ pub(crate) fn synchronize_user_tlb(
                     );
                     return Ok(());
                 }
-                if crate::hal::get_time() >= deadline {
+                let now = crate::hal::get_time();
+                if now >= next_kick {
+                    // The slot payload and target bits remain unchanged until
+                    // every target acks. Re-publishing the idempotent reason
+                    // only repairs a delayed/coalesced LA64 QEMU doorbell.
+                    if let Err(error) = send_ipi_mask(missing, IpiReason::USER_TLB_RANGE_SYNC) {
+                        if send_error.is_none() {
+                            send_error = Some(error);
+                        }
+                    }
+                    next_kick = now.saturating_add(kick_interval);
+                }
+                if now >= deadline {
                     // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
                     // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
                     record_tlb_shootdown(
@@ -1276,13 +1296,16 @@ pub(crate) fn synchronize_user_tlb(
     if live_targets & current_bit != 0 {
         crate::hal::user_tlb_invalidate();
     }
-    let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
+    let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
 
     // 等待者本身也可能同时成为另一轮 user/kernel shootdown 的目标。临时开放
     // 本地中断后双方都能进入只做原子操作的 handler，不会形成 ack 环形等待。
     let _irq_guard = IpiWaitIrqGuard::enter();
+    let clock_freq = crate::hal::get_clock_freq();
     let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+        .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+    let kick_interval = (clock_freq / 100).max(1);
+    let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
     let result = loop {
         let stopped = stopped_cpu_mask();
         let mut missing = None;
@@ -1299,7 +1322,29 @@ pub(crate) fn synchronize_user_tlb(
         let Some((cpu_id, observed)) = missing else {
             break Ok(());
         };
-        if crate::hal::get_time() >= deadline {
+        let now = crate::hal::get_time();
+        if now >= next_kick {
+            let mut kick_targets = 0usize;
+            for target in 0..runtime_cpu_count() {
+                let bit = 1usize << target;
+                if remote & bit != 0
+                    && stopped & bit == 0
+                    && PER_CPUS[target].user_tlb_ack.load(Ordering::Acquire)
+                        < expected[target]
+                {
+                    kick_targets |= bit;
+                }
+            }
+            if kick_targets != 0 {
+                if let Err(error) = send_ipi_mask(kick_targets, IpiReason::USER_TLB_SYNC) {
+                    if send_error.is_none() {
+                        send_error = Some(error);
+                    }
+                }
+            }
+            next_kick = now.saturating_add(kick_interval);
+        }
+        if now >= deadline {
             break Err(UserTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],

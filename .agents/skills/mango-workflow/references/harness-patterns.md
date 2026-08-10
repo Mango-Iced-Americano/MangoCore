@@ -1439,3 +1439,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **扰动边界**：不逐事件打印；精确等待域使用编译期诊断门控和任务原子字段，正式构建不执行 `current_task()` 克隆。原始日志、pcap、overlay 和镜像永不提交。
 - **进程归属门禁**：停止后台 QEMU 时不能只在 `/proc/<pid>/cmdline` 搜索 kernel/overlay token；launcher shell 的 cmdline 同样包含整条 QEMU 命令，先杀 shell 会遗留孤儿 QEMU。遍历进程树时还必须解析 `/proc/<pid>/exe`，只接受 basename 与目标 `qemu-system-*` 完全一致且 kernel/overlay 同时匹配的进程，再发送信号并复查该 PID 已退出。
 - **相关文件**：`user/src/bin/init.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/task/task.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## MTTCG 下 mailbox pending 不等于 IPI payload 丢失
+
+- **现象**：SMP 压力下 shootdown 等待超时；首次 `send_ipi` 没有报错，目标 CPU 仍在线，超时快照中目标 CPU 的 mailbox reason bit 仍保持 pending，但对应 ack 未推进。
+- **判定**：如果 payload/sequence 已经发布、reason bit 仍在且发送 API 无错误，应优先判断为 QEMU MTTCG 对一次性硬件 doorbell 的延迟或合并，而不是覆盖 payload、丢失 request 或目标 CPU 停止。三类故障要用 pending reason、ack sequence、online/stopped mask 和 send error 联合区分。
+- **修复模式**：在原 payload 和 request sequence 保持不变期间，只向 `targets & !stopped & !acknowledged` 周期性重发幂等 doorbell；使用子系统独立且有界的超时预算。目标 handler 依据 mailbox bit 和 sequence 幂等执行，全部确认前不得复用 slot、回滚 generation 或提前释放待退休 frame。
+- **安全边界**：重试只能修复通知交付，不能掩盖真实 handler 卡死；超出预算仍需 fail-stop 并打印 missing/ack/pending 快照。不要通过不断改写 payload 或无限等待规避同步错误。
+- **相关文件**：`os/src/smp.rs`
