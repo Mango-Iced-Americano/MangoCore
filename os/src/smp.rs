@@ -374,10 +374,12 @@ const STOP_TIMEOUT_SECONDS: usize = 1;
 // slow emulated vCPU is not mistaken for a lost mapping publication.
 const KERNEL_TLB_TIMEOUT_SECONDS: usize = 5;
 // User shootdowns use the same level-triggered mailbox protocol as kernel
-// shootdowns.  Under MTTCG a target vCPU can retain the published reason while
-// its one-shot hardware doorbell is coalesced, so allow delivery retries before
-// treating a still-live CPU as a correctness failure.
-const USER_TLB_TIMEOUT_SECONDS: usize = 5;
+// shootdowns. Under MTTCG a target vCPU can retain the published reason while
+// its one-shot hardware doorbell is coalesced. LA64's 12-vCPU evaluator shape
+// can delay an otherwise valid acknowledgement well beyond the 5-second
+// budget used by the 8-vCPU bring-up, so retain the immutable request and its
+// 10 ms delivery retries for a bounded 30 seconds before failing closed.
+const USER_TLB_TIMEOUT_SECONDS: usize = 30;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 
 /// CPU0 等待 AP 停止时唯一可能返回的错误。
