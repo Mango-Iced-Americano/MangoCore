@@ -90,8 +90,9 @@ endif
 publish-compatibility:
 	@echo "[publish-compatibility] publishing both completed architecture products"
 	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
-	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
 	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
+	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
 	@if [ -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" ]; then \
 		cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"; \
 	fi
