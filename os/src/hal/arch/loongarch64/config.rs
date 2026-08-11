@@ -49,7 +49,12 @@ pub const KERNEL_STACK_SLOT_SIZE: usize = KERNEL_STACK_SIZE + PAGE_SIZE;
 pub const KERNEL_STACK_MAX_SLOTS: usize = 1024;
 pub const BOOT_STACK_SIZE: usize = PAGE_SIZE * 0x40;
 /// Bootstrap-only heap used before FRAME_ALLOCATOR can reserve runtime backing.
-pub const KERNEL_BOOTSTRAP_HEAP_SIZE: usize = 8 * 1024 * 1024;
+///
+/// 必须容纳 36G 内存时 frame allocator 的 `FrameRegion::recycled_flags`
+/// （`Vec<bool>`，每页 1 字节，buddy 圆整到 order 12 = 16 MiB 连续块）以及
+/// `laflex::IdentityDirtyMap`（36G 时约 1.19 MiB，圆整到 order 9）。32 MiB
+/// 为双架构统一余量，避免大内存启动早期在 runtime heap 建立前 OOM。
+pub const KERNEL_BOOTSTRAP_HEAP_SIZE: usize = 32 * 1024 * 1024;
 
 // Addresses
 /// QEMU 提供 48 位物理/虚拟地址模型。
