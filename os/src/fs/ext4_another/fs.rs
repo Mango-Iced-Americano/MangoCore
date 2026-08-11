@@ -193,20 +193,42 @@ impl Ext4FileSystem {
         }
     }
 
-    /// Flush all Mango-owned regular-file data before the final device barrier.
+    /// Consume a handle which is still the head of one previously validated
+    /// orphan-chain snapshot. A changed head is a transient admission failure;
+    /// ownership of the one-shot handle remains with the caller for retry.
+    pub(crate) fn reclaim_inode_from_validated_head(
+        &self,
+        handle: another_ext4::InodeReclaimHandle,
+    ) -> Result<(), (SyscallErr, another_ext4::InodeReclaimHandle)> {
+        match self.inner().reclaim_inode_from_validated_head(handle) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let (error, handle) = failure.into_parts();
+                Err((from_another(error.code()), handle))
+            }
+        }
+    }
+
+    /// Flush this filesystem's retained regular-file data and metadata before
+    /// the final device barrier.
     pub(crate) fn sync_all(&self) -> Result<(), SyscallErr> {
         if self.read_only {
             return Ok(());
         }
-        // A page cache can outlive the VFS inode that first installed its
-        // lifetime record (for example, a compiler closes the file between
-        // its final write and sync(2)).  Drain the global cache registry
-        // before committing inode sizes/timestamps so such a cache cannot be
-        // omitted from the instance-local lifetime snapshot.  The subsequent
-        // lifetime pass still performs the authoritative metadata commit and
-        // device barrier.
-        crate::fs::page_cache::flush_all_page_caches()?;
+        // Dirty caches are strongly retained by their generation-aware inode
+        // lifetime. A global PageCache sweep here would make syncfs(fd) write
+        // unrelated mounts and would duplicate the VFS global-sync pass.
         self.sync_lifetimes()
+    }
+
+    fn has_pending_sync_work(&self) -> bool {
+        !self.read_only
+            && (self.inner().has_deferred_journal()
+                || self
+                    .lifetimes
+                    .lock()
+                    .values()
+                    .any(|lifetime| lifetime.needs_sync()))
     }
 
     pub(crate) fn flush_device(&self) -> Result<(), SyscallErr> {
@@ -243,7 +265,11 @@ impl Ext4FileSystem {
     }
 }
 
-/// Sync every live another_ext4 instance without exposing per-instance errors to `sync(2)`.
+/// Sync dirty live instances not represented by the VFS lifecycle registry.
+///
+/// Mounted instances have already been visited by `sync_all_backends()`. The
+/// pending-work predicate makes this compatibility pass a no-op for them while
+/// preserving global sync semantics for directly opened test/utility views.
 pub(crate) fn sync_all_instances() {
     let live = {
         let mut registry = EXT4_REGISTRY.lock();
@@ -252,7 +278,7 @@ pub(crate) fn sync_all_instances() {
         live
     };
 
-    for fs in live {
+    for fs in live.into_iter().filter(|fs| fs.has_pending_sync_work()) {
         if let Err(error) = fs.sync_all() {
             log::error!(
                 "another_ext4: global sync failed for filesystem {}: {:?}",

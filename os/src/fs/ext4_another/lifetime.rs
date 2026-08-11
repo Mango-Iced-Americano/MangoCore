@@ -78,10 +78,7 @@ pub(crate) struct DirectorySnapshot {
 }
 
 impl DirectorySnapshot {
-    pub(crate) fn new(
-        generation: usize,
-        entries: Vec<(String, InodeId, FileType)>,
-    ) -> Self {
+    pub(crate) fn new(generation: usize, entries: Vec<(String, InodeId, FileType)>) -> Self {
         Self {
             generation,
             entries,
@@ -198,9 +195,7 @@ impl InodeLifetime {
     }
 
     pub(crate) fn dirty_timestamps(&self) -> Option<CachedTimestamps> {
-        if !self.mtime_dirty.load(Ordering::Acquire)
-            && !self.ctime_dirty.load(Ordering::Acquire)
-        {
+        if !self.mtime_dirty.load(Ordering::Acquire) && !self.ctime_dirty.load(Ordering::Acquire) {
             return None;
         }
         Some(CachedTimestamps {
@@ -308,6 +303,16 @@ impl InodeLifetime {
         }
     }
 
+    /// Fast, filesystem-local predicate used to avoid replaying a clean
+    /// instance during the compatibility registry pass of global sync(2).
+    pub(crate) fn needs_sync(&self) -> bool {
+        self.size_generation.load(Ordering::Acquire) != 0
+            || self.dirty_timestamps().is_some()
+            || self.dirty_cache_pinned.load(Ordering::Acquire)
+            || self.reclaim.lock().is_some()
+            || self.reclaim_error.lock().is_some()
+    }
+
     pub(crate) fn pin(&self) {
         self.pins.fetch_add(1, Ordering::AcqRel);
     }
@@ -410,7 +415,10 @@ impl Ext4FileSystem {
         let result = Self::complete_lifetime_sync(
             || {
                 for (maybe_cache, key, lifetime) in &all {
-                    let cache = maybe_cache.as_ref().cloned().or_else(|| lifetime.page_cache());
+                    let cache = maybe_cache
+                        .as_ref()
+                        .cloned()
+                        .or_else(|| lifetime.page_cache());
                     let mut commit_size = || {
                         let generation = lifetime.size_generation.load(Ordering::Acquire);
                         let timestamps = lifetime.dirty_timestamps();
@@ -495,7 +503,21 @@ impl Ext4FileSystem {
     }
 
     fn drain_reclaims(&self) -> Result<(), SyscallErr> {
-        let ready: Vec<(
+        // Validate the persistent chain once and consume a contiguous ready
+        // prefix in head order. This turns the common final-sync case from one
+        // full orphan walk per inode into one O(N) validation plus O(1) head
+        // removals. Missing/open heads fall back to the generic safe path.
+        let orphan_order = self
+            .inner()
+            .validated_orphan_reclaim_order()
+            .map_err(|error| super::errno::from_another(error.code()))?;
+        let orphan_rank: alloc::collections::BTreeMap<u32, usize> = orphan_order
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(rank, inode)| (inode, rank))
+            .collect();
+        let mut ready: Vec<(
             InodeKey,
             Arc<InodeLifetime>,
             another_ext4::InodeReclaimHandle,
@@ -509,8 +531,15 @@ impl Ext4FileSystem {
                     .map(|handle| (*key, lifetime.clone(), handle))
             })
             .collect();
+        ready.sort_by_key(|(_, _, handle)| {
+            orphan_rank
+                .get(&handle.inode_id())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         let mut reclaimed = Vec::new();
         let mut failure = None;
+        let mut expected_head = 0usize;
         for (key, lifetime, handle) in ready {
             if failure.is_some() {
                 if let Some(error) = failure {
@@ -518,8 +547,24 @@ impl Ext4FileSystem {
                 }
                 continue;
             }
-            match self.reclaim_inode(handle) {
-                Ok(()) => reclaimed.push(key),
+            let head_fast_path =
+                orphan_order.get(expected_head).copied() == Some(handle.inode_id());
+            let mut result = if head_fast_path {
+                self.reclaim_inode_from_validated_head(handle)
+            } else {
+                self.reclaim_inode(handle)
+            };
+            if matches!(&result, Err((SyscallErr::EAGAIN, _))) {
+                let (_, handle) = result.expect_err("checked reclaim result is an error");
+                result = self.reclaim_inode(handle);
+            }
+            match result {
+                Ok(()) => {
+                    reclaimed.push(key);
+                    if head_fast_path {
+                        expected_head += 1;
+                    }
+                }
                 Err((error, handle)) => {
                     lifetime.restore_reclaim(handle, error);
                     failure = Some(error);

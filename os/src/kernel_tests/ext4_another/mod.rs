@@ -179,6 +179,14 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
                 sync::test_consecutive_unlinks_batch_until_sync,
             ),
             KernelTest::new(
+                "ext4_another::regular_namespace_mutations_share_one_sync_batch",
+                sync::test_regular_namespace_mutations_share_one_sync_batch,
+            ),
+            KernelTest::new(
+                "ext4_another::failed_fsync_retains_dirty_generation_for_retry",
+                sync::test_failed_fsync_retains_dirty_generation_for_retry,
+            ),
+            KernelTest::new(
                 "ext4_another::global_sys_sync_persists_across_unwrapped_device_view",
                 sync::test_global_sys_sync_persists_across_unwrapped_device_view,
             ),
