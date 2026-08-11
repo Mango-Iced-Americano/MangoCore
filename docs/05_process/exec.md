@@ -3,7 +3,7 @@ title: "execve 与 execveat"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-02
+last_update: 2026-08-10
 tags: [process, exec, elf, shebang]
 ---
 
@@ -26,7 +26,7 @@ sys_execveat()
         ├── ELF magic 或 shebang
         ├── validate_exec_stack_usage()
         ├── task.load_elf()
-        └── mark_execed / set_exe_path / complete_vfork
+        └── mark_execed / set_exec_comm / set_exec_identity / complete_vfork
 ```
 
 ## 2. 路径与文件校验
@@ -143,7 +143,7 @@ fallback 顺序：
 
 1. 目录直接 `EISDIR`。
 2. 保留旧 `AddressSpace`，但不提前回收其用户页。
-3. 将 ELF 临时映射到内核空间，由 `AddressSpaceInner::from_elf()` 构造未发布的新地址空间。
+3. 优先由 `AddressSpaceInner::from_elf_inode()` 解析 inode，只保留 PT_LOAD VMA 和不可变后备配方，不预读、分配或复制所有目标页。
 4. 准备新 heap、用户栈、argv/envp/auxv、user resource 和 trap context。
 5. 调用 `install_exec_image()` 建立临时 exec 会话，关闭同 PCB 的 clone 发布门。
 6. 请求 sibling 在各自 owner CPU 的任务安全点退出，并等待 live-thread 计数收缩为 1。
@@ -165,6 +165,13 @@ exe inode、部分 signal/futex/fd 状态；进程 PID、父子关系、进程�
 身份不变。这一点解释了为什么 shell fork 后 child exec，父进程 wait 的仍是同一个 child
 pid。线程身份有一个 Linux 兼容例外：若调用者不是线程组 leader，成功提交后该 TCB
 接管稳定的进程 PID，因此新的唯一线程满足 `gettid() == getpid()`。
+
+PT_LOAD 首次 load/store/execute fault 会先分配一个尚未发布的私有页，再按 program-header
+顺序覆盖与该页相交的文件字节；BSS 和页尾保持为零，重叠段权限按页取并集。
+若源 PageCache 页尚未 resident，fault 先回滚未发布目标页，在释放 VM 锁后执行 I/O，
+然后重试。主程序和 `PT_INTERP` 动态解释器均使用该路径；后备对象同时保持
+inode/ETXTBSY 生命周期，并在 VMA 分裂、fork 和解释器映射中继续有效。仅文件系统无
+PageCache 时返回 `ENOSYS`，回退到旧的内核临时映射 eager loader。PID1 `/init` 也优先使用同一按需路径。
 
 ## 9. 多线程 exec 语义
 
@@ -239,7 +246,8 @@ exec 成功后：
 
 ```rust
 task.process.mark_execed();
-task.process.set_exe_path(abs_path);
+task.set_exec_comm(&abs_path);
+task.process.set_exec_identity(abs_path, &argv_vec);
 task.process.complete_vfork();
 ```
 

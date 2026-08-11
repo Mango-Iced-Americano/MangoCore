@@ -99,11 +99,19 @@ fn main() {
     // CORE_NUM is a build-time topology contract. Tracking it here prevents
     // Cargo from reusing a kernel compiled for a different QEMU CPU count.
     println!("cargo:rerun-if-env-changed=MANGO_CORE_NUM");
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+        .expect("Cargo must provide the target architecture to the build script");
     let core_num = std::env::var("MANGO_CORE_NUM").unwrap_or_else(|_| String::from("1"));
+    let core_num_valid = match target_arch.as_str() {
+        "riscv64" => matches!(core_num.as_str(), "1" | "2" | "4" | "8"),
+        "loongarch64" => matches!(core_num.as_str(), "1" | "2" | "4" | "8" | "12"),
+        _ => false,
+    };
     assert!(
-        matches!(core_num.as_str(), "1" | "2" | "4" | "8"),
-        "MANGO_CORE_NUM must be one of 1, 2, 4, or 8; got {:?}",
-        core_num
+        core_num_valid,
+        "MANGO_CORE_NUM={:?} is invalid for {}",
+        core_num,
+        target_arch
     );
     println!("cargo:rustc-env=MANGO_CORE_NUM={core_num}");
 
@@ -111,15 +119,13 @@ fn main() {
     let cmdline =
         std::env::var("MANGO_CMDLINE").unwrap_or_else(|_| String::from("mango.mode=normal"));
 
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
-        .expect("Cargo must provide the target architecture to the build script");
     if target_arch == "riscv64" {
         let linker_script = "src/hal/arch/riscv/linker.ld";
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
     } else if target_arch == "loongarch64" {
     } else {
-        panic!("unsupported kernel target architecture: {target_arch}");
+        panic!("unsupported kernel target architecture: {}", target_arch);
     }
 
     // Safety: no newlines allowed in bootargs (would break parsing)

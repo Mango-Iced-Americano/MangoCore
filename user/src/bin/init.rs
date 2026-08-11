@@ -8,7 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
 use user_lib::{
     chdir, close, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction,
-    sleep, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
+    sleep, sleep_blocking, waitpid, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT,
+    SIGKILL, SIGTERM,
 };
 
 #[path = "init/mounts.rs"]
@@ -23,6 +24,22 @@ const BUILDSTORM_INIT: &str = "/sbin/init\0";
 const BUILDSTORM_FALLBACK_INIT: &str = "/init\0";
 const BUILDSTORM_SCRIPT: &str = "/glibc/buildstorm_testcode.sh\0";
 const BUILDSTORM_SHELL: &str = "/bin/sh\0";
+const BUILDSTORM_SHELL_C: &str = "-c\0";
+const BUILDSTORM_PRECLEAN: &str = concat!(
+    r#"case "$(uname -m 2>/dev/null)" in
+  riscv64) AXTGT=riscv64gc-unknown-linux-musl ;;
+  loongarch64) AXTGT=loongarch64-unknown-linux-musl ;;
+  *) echo "BUILDSTORM_ARCH fail machine=$(uname -m 2>/dev/null)"; exit 125 ;;
+esac
+cd /work/tgoskits || { echo "BUILDSTORM_PRECLEAN fail reason=missing-worktree"; exit 125; }
+if ! rm -rf "target/$AXTGT" || [ -e "target/$AXTGT" ] || [ -L "target/$AXTGT" ]; then
+  echo "BUILDSTORM_PRECLEAN fail target=$AXTGT"
+  exit 125
+fi
+echo "BUILDSTORM_PRECLEAN ok target=$AXTGT"
+"#,
+    "\0"
+);
 const SIGACTION_RESTART: usize = 0x10000000;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -131,6 +148,44 @@ fn enable_buildstorm_cpus() {
     }
 }
 
+/// Establish a clean-target precondition before the official script starts.
+///
+/// The official runner does not fail when `rm -rf` leaves entries behind.  A
+/// separate child keeps shell expansion out of PID1 and turns that condition
+/// into a hard test-contract failure before any timed marker is emitted.
+fn prepare_buildstorm_target() -> bool {
+    let child = fork();
+    if child == 0 {
+        let env = runner_environment("buildstorm");
+        exec(
+            BUILDSTORM_SHELL,
+            &[
+                BUILDSTORM_SHELL.as_ptr(),
+                BUILDSTORM_SHELL_C.as_ptr(),
+                BUILDSTORM_PRECLEAN.as_ptr(),
+                core::ptr::null(),
+            ],
+            &env,
+        );
+        exit(127);
+    }
+    if child < 0 {
+        println!("[init] BuildStorm preclean fork failed: {}", child);
+        return false;
+    }
+
+    let mut status = 0;
+    let waited = waitpid(child as usize, &mut status);
+    if waited != child || status != 0 {
+        println!(
+            "[init] BuildStorm preclean failed: waited={} status={}",
+            waited, status
+        );
+        return false;
+    }
+    true
+}
+
 fn write_buildstorm_stat_control(path: &str, value: &[u8]) -> bool {
     let fd = open(path, OpenFlags::WRONLY);
     if fd < 0 {
@@ -146,25 +201,62 @@ fn write_buildstorm_stat_control(path: &str, value: &[u8]) -> bool {
     true
 }
 
-fn enable_buildstorm_stats() {
-    let profile_ok = write_buildstorm_stat_control("/sys/kernel/stats/profile\0", b"core\n");
-    let reset_ok = write_buildstorm_stat_control("/sys/kernel/stats/reset\0", b"1\n");
-    let stats_on_ok = write_buildstorm_stat_control("/sys/kernel/stats/stats_on\0", b"1\n");
-    println!(
-        "[init] BuildStorm stats enabled profile=core profile_ok={} reset_ok={} stats_on_ok={}",
-        profile_ok, reset_ok, stats_on_ok
-    );
+fn buildstorm_stats_profile() -> Option<(&'static str, &'static [u8], bool)> {
+    if boot_cmdline_contains(b"buildstorm.stats=all") {
+        Some(("all", b"all\n", true))
+    } else if boot_cmdline_contains(b"buildstorm.stats=core_memory_io") {
+        Some(("core_memory_io", b"core_memory_io\n", true))
+    } else if boot_cmdline_contains(b"buildstorm.stats=memory_io") {
+        Some(("memory_io", b"memory_io\n", true))
+    } else if boot_cmdline_contains(b"buildstorm.stats=core") {
+        Some(("core", b"core\n", false))
+    } else {
+        None
+    }
 }
 
-fn dump_buildstorm_stats(sample: usize) {
-    println!("BUILDSTORM_STATS_BEGIN sample={}", sample);
-    for path in ["/sys/kernel/stats/taskq\0"] {
+fn enable_buildstorm_stats(profile_name: &str, profile_value: &[u8]) -> bool {
+    let profile_ok = write_buildstorm_stat_control("/sys/kernel/stats/profile\0", profile_value);
+    let reset_ok = write_buildstorm_stat_control("/sys/kernel/stats/reset\0", b"1\n");
+    let stats_on_ok = write_buildstorm_stat_control("/sys/kernel/stats/stats_on\0", b"1\n");
+    let enabled = profile_ok && reset_ok && stats_on_ok;
+    println!(
+        "[init] BuildStorm stats enabled profile={} profile_ok={} reset_ok={} stats_on_ok={}",
+        profile_name, profile_ok, reset_ok, stats_on_ok
+    );
+    enabled
+}
+
+fn dump_buildstorm_stats(sample: usize, dump_heavy: bool) -> bool {
+    println!(
+        "BUILDSTORM_STATS_BEGIN sample={} heavy={}",
+        sample,
+        usize::from(dump_heavy)
+    );
+    let paths: &[&str] = if dump_heavy {
+        &[
+            "/sys/kernel/stats/taskq\0",
+            "/sys/kernel/stats/pagecache\0",
+            "/sys/kernel/stats/blockio\0",
+            "/sys/kernel/stats/vm\0",
+            "/sys/kernel/stats/heap\0",
+            "/sys/kernel/stats/pagefault\0",
+            "/sys/kernel/stats/ext4\0",
+            "/sys/kernel/stats/mount\0",
+            "/sys/kernel/stats/net\0",
+        ]
+    } else {
+        &["/sys/kernel/stats/taskq\0"]
+    };
+    let mut available = true;
+    for path in paths {
         let fd = open(path, OpenFlags::RDONLY);
         if fd < 0 {
             println!("[init] BuildStorm stats read {} failed: {}", path, fd);
+            available = false;
             continue;
         }
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 32768];
         let size = read(fd as usize, &mut buf);
         let _ = close(fd as usize);
         if size > 0 {
@@ -172,16 +264,24 @@ fn dump_buildstorm_stats(sample: usize) {
         }
     }
     println!("BUILDSTORM_STATS_END sample={}", sample);
+    available
 }
 
-fn start_buildstorm_stats_collector() {
+fn start_buildstorm_stats_collector(all: bool) {
     let child = fork();
     if child == 0 {
         let mut sample = 0;
         loop {
-            dump_buildstorm_stats(sample);
+            // Task identity and scheduler state must be sampled faster than
+            // Cargo's short parallel waves. Heavy MM/FS/block counters remain
+            // at 30 seconds to keep serial-console perturbation bounded.
+            let dump_heavy = all && sample % 6 == 0;
+            if !dump_buildstorm_stats(sample, dump_heavy) {
+                println!("[init] BuildStorm stats unavailable; collector stopped");
+                exit(0);
+            }
             sample = sample.wrapping_add(1);
-            sleep(60_000);
+            sleep_blocking(5_000);
         }
     }
     if child < 0 {
@@ -321,7 +421,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::prepare_pseudo_fs_framework();
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
-    let buildstorm_stats = profile == "buildstorm" && boot_cmdline_contains(b"buildstorm.stats=core");
+    let buildstorm_stats = if profile == "buildstorm" {
+        buildstorm_stats_profile()
+    } else {
+        None
+    };
     if profile == "buildstorm" {
         // mount_boot_block_devices() already owns the x0 → /sdcard mount.
         // PID1 must reuse it so the chroot does not fail on a second EBUSY mount.
@@ -330,9 +434,16 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             println!("[init] BuildStorm root unavailable; entering rescue");
             rescue_forever();
         }
-        if buildstorm_stats {
-            enable_buildstorm_stats();
-            start_buildstorm_stats_collector();
+        if !prepare_buildstorm_target() {
+            println!("[init] BuildStorm clean-target contract failed; entering rescue");
+            rescue_forever();
+        }
+        if let Some((profile_name, profile_value, all)) = buildstorm_stats {
+            if enable_buildstorm_stats(profile_name, profile_value) {
+                start_buildstorm_stats_collector(all);
+            } else {
+                println!("[init] BuildStorm stats unavailable; collector not started");
+            }
         }
         enable_buildstorm_cpus();
         exec_buildstorm_init();

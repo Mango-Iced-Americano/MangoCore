@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-06
+last_update: 2026-08-10
 tags: [mm, address-space, vma, elf, maps, mmu-gather, membarrier]
 ---
 
@@ -69,6 +69,7 @@ unmap + TLB retire 协议。这个顺序防止同一 MM 的其它 CPU 在 filema
 | `AddressSpaceInner::new_bare()` | `address_space.rs` | 创建空的页表/VMA 数据。 |
 | `AddressSpaceInner::token()` | `address_space.rs` | 返回页表 token。 |
 | `AddressSpaceInner::from_elf()` | `address_space.rs` | 从 ELF 构造尚未发布的用户地址空间。 |
+| `AddressSpaceInner::from_elf_inode()` | `address_space.rs` | 从 inode 构造 PT_LOAD 按需装页的未发布地址空间。 |
 | `AddressSpaceInner::from_existing_user()` | `address_space.rs` | fork/非 `CLONE_VM` clone 复制地址空间，配合 VMA CoW。 |
 | `do_page_fault()` | `address_space.rs:631` | trap/uaccess 共用缺页入口。 |
 | `fault_in_user_va()` | `address_space.rs:659` | syscall 用户指针入口：先检查已映射的 `U+R/W` PTE，未命中才 fault-in 并做权限复核。 |
@@ -78,7 +79,7 @@ unmap + TLB retire 协议。这个顺序防止同一 MM 的其它 CPU 在 filema
 | `munmap()` | `address_space.rs:1130` | 释放映射范围，并同步清理 locked page 标记。 |
 | `mprotect()` | `address_space.rs:1142` | 修改 VMA/PTE 权限。 |
 
-阅读地址空间代码时，先区分入口来自哪里：`execve` 和 initproc 创建走 `from_elf()`，fork 走 `from_existing_user()`，用户触页走 `do_page_fault()`，syscall 用户指针走 `fault_in_user_va()`，显式内存 syscall 走 `mmap()/munmap()/mprotect()/sbrk()`。
+阅读地址空间代码时，先区分入口来自哪里：`execve` 和 initproc 优先走 `from_elf_inode()`，仅在文件系统没有 PageCache 时回退 `from_elf()`；fork 走 `from_existing_user()`，用户触页走 `do_page_fault()`，syscall 用户指针走 `fault_in_user_va()`，显式内存 syscall 走 `mmap()/munmap()/mprotect()/sbrk()`。
 
 ### 1.2 CPU 驻留与 generation
 
@@ -171,6 +172,7 @@ pub struct Vma {
     pub inner: VmPageStore,
     pub map_perm: MapPermission,
     pub map_file: Option<Arc<dyn IndexNode>>,
+    pub(super) elf_lazy: Option<Arc<ElfLazyBacking>>,
     pub map_file_offset: usize,
     pub may_write: bool,
     pub write_sealed: bool,
@@ -188,6 +190,7 @@ pub struct Vma {
 | `inner` | VPN 范围和每页状态 |
 | `map_perm` | VMA 对外权限，包含 `R/W/X/U` |
 | `map_file` | 文件映射后端，匿名映射为 `None` |
+| `elf_lazy` | ELF PT_LOAD 按需页的不可变后备配方，普通 mmap 为 `None` |
 | `map_file_offset` | VMA 起点对应文件偏移 |
 | `may_write` | 文件映射是否允许获得写权限 |
 | `write_sealed` | memfd seal 对写映射的限制 |
@@ -201,7 +204,7 @@ pub struct Vma {
 | 类别 | 字段 | 说明 |
 |------|------|------|
 | 范围和页状态 | `inner` | `VmPageStore` 保存 VPN 范围以及每页是 unallocated、in memory、compressed 还是 swapped。 |
-| 权限和来源 | `map_perm`, `map_file`, `map_file_offset`, `may_write`, `write_sealed` | 决定 fault 能否成功，以及文件映射从哪里取数据。 |
+| 权限和来源 | `map_perm`, `map_file`, `elf_lazy`, `map_file_offset`, `may_write`, `write_sealed` | 决定 fault 能否成功，以及文件或 ELF 映射从哪里取数据。 |
 | fork/mmap 行为 | `flags`, `wipe_on_fork`, `dont_fork`, `fork_inherited` | 决定 shared/private、anonymous/file、growdown、locked 和 fork 继承规则。 |
 
 `Vma::try_new()` 位于 `vma.rs:82`，只创建范围和元数据；除特殊路径外，它不为每一页分配 frame。`Vma::try_clone()` 位于 `vma.rs:57`，会克隆 VMA 元数据和页状态，用于 fork 前的地址空间复制准备。
@@ -438,14 +441,23 @@ VirtAddr
 
 ## 5. ELF 地址空间创建
 
-`AddressSpaceInner::from_elf(elf_data)` 创建尚未发布的用户地址空间数据：
+`AddressSpaceInner::from_elf_inode(file)` 是 exec/initproc 的首选路径：
+
+1. 只读取 ELF header/program header，校验 PT_LOAD 虚拟范围、文件范围与解释器。
+2. 按 VPN 合并重叠段的 `R/W/X/U` 权限，建立连续的 `ElfLazy` VMA，但不分配 PT_LOAD frame。
+3. 所有 VMA 共享 `ElfLazyBacking`，保存 PageCache、可执行 inode 生命周期和按 program-header 顺序的覆盖配方。
+4. `PT_INTERP` 递归使用同一路径，因此动态解释器也不在 exec 时全量装入。
+5. 设置 `heap_bottom = program_break`、`heap_pt = program_break`。
+
+文件系统无 PageCache 时返回 `ENOSYS`，再由 `AddressSpaceInner::from_elf(elf_data)`
+执行兼容 eager 路径：
 
 1. 调用 `AddressSpaceInner::new_bare()` 创建空页表与空 VMA 集合。
 2. 按架构需要映射 trampoline。
 3. 映射 signal trampoline。
 4. 解析 ELF。
 5. `map_elf()` 遍历 program header。
-6. LOAD 段转换成 VMA 并写入初始数据。
+6. LOAD 段转换成 VMA 并立即分配、清零、写入初始数据。
 7. INTERP 段递归加载动态解释器。
 8. 设置 `heap_bottom = program_break`、`heap_pt = program_break`。
 
@@ -459,6 +471,10 @@ LOAD 段权限来自 `MapPermission::from_ph_flags(ph.flags())`。ELF 类型处�
 | 其他或多个解释器 | `ENOEXEC` / `EINVAL` |
 
 相邻 `PT_LOAD` 段允许在同一个向上取整的页中相接或重叠。加载器先验证每段的派生范围与文件范围，再按 VPN 去重并合并 `R/W/X/U` 权限；连续且权限相同的页组成一个 VMA。每页只映射和清零一次，随后仍按 program header 顺序覆盖文件字节，因此后一段在共享页中的字节保持 ELF 规定的顺序。无效范围返回 `ENOEXEC`，页帧或 VMA 容量不足返回 `ENOMEM`。
+
+按需路径保留同样的页级权限和覆盖顺序；差别只在于清零、文件字节覆盖和
+PTE 安装延迟到该页的首次 fault。`elf_lazy` 后备在 `Vma::try_clone()`、`from_another()`
+和 `into_two()` 中保留，因此 fork、VMA 分裂和后续缺页不会丢失源 inode 或段配方。
 
 ## 6. PT_LOAD 共享页映射
 

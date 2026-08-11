@@ -1442,3 +1442,56 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   - **本地 4 核 TCG 双实例共享 CPU 时编译时间远超 2B，time 分必然为 0；要验 time 分需 8 核单实例。**
 - **教训**: 评测分数必须以官方 judge 脚本对完整串口日志的输出为准，不要按脚本注释或印象估算；验证 buildstorm time 分前先确认 CPU 核数满足 baseline 前提。
 - **相关文件**: `oscomp/testsuits-for-oskernel/judge/judge_cagent-glibc.py`, `judge_buildstorm-glibc.py`；`docs/Work_Log/2026-08-10.md`
+## 短并行波诊断必须拆分采样频率并做运行时 schema 握手
+
+- **现象**：宿主机或 guest 的真实并行波只有十几秒，统一 30 秒采样最多捕获一个点；任务已退出或阻塞后，累计 CPU/blocked 时间无法还原波峰为何收缩。更隐蔽的是源码已经增加字段，但 QEMU 仍可能启动旧内核，得到格式合法却缺字段的旧 schema 日志。
+- **做法**：scheduler/current/task identity 使用 5 秒轻快照；PageCache、MM、journal、block 和 VirtIO 使用 30 秒重快照。每任务同时保留 user/kernel/blocked/runnable-wait 累计时间、阻塞类别和阻塞 syscall。启动 monitor 前固定 expected schema，首个完整快照必须同时验证版本和关键字段；不匹配就只终止明确绑定 kernel/overlay/PID 的本轮 QEMU。
+- **判据**：以 workload begin marker 重置 pre-timed 状态；连续两个轻快照 active≥4，或单点 active≥6 且下一窗口平均忙核≥3.5，才算真实峰值。峰后至少保留 36 个 5 秒快照（3 分钟），目标 60 个（5 分钟）；15 分钟无峰值本身就是前置串行放大的证据。
+- **扰动边界**：不逐事件打印；精确等待域使用编译期诊断门控和任务原子字段，正式构建不执行 `current_task()` 克隆。原始日志、pcap、overlay 和镜像永不提交。
+- **进程归属门禁**：停止后台 QEMU 时不能只在 `/proc/<pid>/cmdline` 搜索 kernel/overlay token；launcher shell 的 cmdline 同样包含整条 QEMU 命令，先杀 shell 会遗留孤儿 QEMU。遍历进程树时还必须解析 `/proc/<pid>/exe`，只接受 basename 与目标 `qemu-system-*` 完全一致且 kernel/overlay 同时匹配的进程，再发送信号并复查该 PID 已退出。
+- **相关文件**：`user/src/bin/init.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/task/task.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## MTTCG 下 mailbox pending 不等于 IPI payload 丢失
+
+- **现象**：SMP 压力下 shootdown 等待超时；首次 `send_ipi` 没有报错，目标 CPU 仍在线，超时快照中目标 CPU 的 mailbox reason bit 仍保持 pending，但对应 ack 未推进。
+- **判定**：如果 payload/sequence 已经发布、reason bit 仍在且发送 API 无错误，应优先判断为 QEMU MTTCG 对一次性硬件 doorbell 的延迟或合并，而不是覆盖 payload、丢失 request 或目标 CPU 停止。三类故障要用 pending reason、ack sequence、online/stopped mask 和 send error 联合区分。
+- **修复模式**：在原 payload 和 request sequence 保持不变期间，只向 `targets & !stopped & !acknowledged` 周期性重发幂等 doorbell；使用子系统独立且有界的超时预算。目标 handler 依据 mailbox bit 和 sequence 幂等执行，全部确认前不得复用 slot、回滚 generation 或提前释放待退休 frame。
+- **安全边界**：重试只能修复通知交付，不能掩盖真实 handler 卡死；超出预算仍需 fail-stop 并打印 missing/ack/pending 快照。不要通过不断改写 payload 或无限等待规避同步错误。
+- **相关文件**：`os/src/smp.rs`
+
+## BuildStorm 固定窗口与完成标记必须独立于字段布局和峰值状态
+
+- **现象**：guest 已输出 `BUILDSTORM_COMPILE mode=multi ok=true ...`，monitor 却没有按完成标记停止；用于单变量 A/B 的“900 秒窗口”还可能因峰值状态机提前结束或被峰后延长规则拖长。
+- **根因**：完成检测使用了要求字段相邻的字面子串 `BUILDSTORM_COMPILE ok=true`，插入 `mode=multi` 后静默失配；同一个软超时同时承担“无峰值定因”和“固定 wall-time A/B”两种不同语义。
+- **修复**：完成标记按行首和键值匹配（`^BUILDSTORM_COMPILE\b.*\bok=true\b`），不固定其他字段的位置；固定窗口另设从 `BUILDSTORM_BEGIN` 起算的 hard timeout，其优先级独立于峰值触发与峰后样本数。每个 A/B variant 仍须使用同一 kernel hash、全新 golden overlay、相同 CPU/内存/MTTCG，并在启动时核对被测运行时开关和 schema。
+- **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
+- **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。
+
+## 双架构串行编译要同时校验命令退出和构建进程静默
+
+- **现象**：外层 Docker/Make 命令的输出已经暂停或终端 wrapper 已返回，但 LTO `rustc`
+  仍在容器中运行。此时启动另一架构会违反共享工具链/生成状态的串行约束；在
+  编译期间继续改源码，也会让“编译通过”不再对应一个可确定的源码快照。
+- **门禁**：每个架构必须同时满足：原始 `make kernel` 进程明确退出且 rc=0；目标
+  容器中不再存在该命令对应的 `cargo`/`rustc`。之后才能启动下一架构。最终
+  验证必须在所有源码修改完成后重跑；修改期间产生的早期成功结果只能作为中间
+  smoke，不能列入最终验收。
+- **检查方式**：保留可轮询的 PTY/session，等到 `Finished ...` 与 make 退出；必要时再以
+  容器内精确命令行过滤确认没有对应构建子进程。不使用宽泛 `pgrep cargo`，避免把队友容器或
+  无关 host build 当成本轮进程。
+
+## 跨架构性能测试必须先校验用户态架构合同
+
+- **现象**：双架构 BuildStorm 都能完成，但日志中的 target 相同，原始墙钟差距被误当成内核架构性能差。
+- **根因**：`uname -m` 返回项目内部简称，官方脚本只识别 Linux ABI 名称；未知值又静默回退到某个默认 target。QEMU 核数、target 清洁状态或代码提交不同会进一步污染比较。
+- **修复**：内核返回标准 `riscv64`/`loongarch64`；测试入口对未知架构和残留 target fail-closed；正式启动入口按评分合同选择 RV64 8 核、LA64 12 核，并记录相同的内核、submodule、镜像与脚本哈希。
+- **教训**：跨架构性能数据先验证“架构名 → 编译 target → vCPU 数 → clean target → commit/hash”整条合同，再比较归一化得分。任何 fallback 或清理错误都使该轮数据无效。
+- **相关文件**：`os/src/syscall/process/ids.rs`、`user/src/bin/init.rs`、`user/src/bin/test_runner/groups/execute.rs`、`Makefile`、`os/make/arch/{rv64,la64}-settings.mk`
+
+## 省略调度切换时必须保持运行时间计数连续
+
+- **现象**：优化 timer tick 后，任务在没有本地竞争者时继续原地运行，不再经过 schedule-out；基于 context switch 才结算的 `task_run_slice_ticks_total` 因而停止增长，使区间平均忙核错误地接近零。
+- **根因**：诊断计数器把“任务正在执行的时间”隐含绑定到“任务最终发生切换”。当优化刻意消除切换时，业务行为正确，但观测模型失效。
+- **修复**：在被安全省略的 tick 上，仅在诊断 feature 下把 `now - run_started_ticks` 累计到全局运行时间，并将该任务的 `run_started_ticks` 更新为 `now`；后续真实 schedule-out 只结算新的区间，避免重复计数。同步提升 schema，并要求 monitor 启动时 fail-closed 握手。
+- **教训**：任何消除 context switch、锁获取、I/O completion 或状态迁移的性能优化，都必须审计依赖该事件结算的计数器。先保证可观测量仍表示原概念，再做前后 A/B；不能把计数下降直接解释成工作量下降。
+- **相关文件**：`os/src/task/manager.rs`、`os/src/task/perf.rs`、`scripts/monitor_buildstorm_peak.py`

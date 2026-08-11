@@ -10,6 +10,9 @@ use crate::kernel_tests::runner::KernelTest;
 use crate::mm::{UserBufferReader, UserBufferWriter};
 use crate::utils::error::SyscallErr;
 
+#[path = "page_cache/filemap_lazy.rs"]
+mod filemap_lazy;
+
 fn frame_first_byte(frame: &crate::mm::Frame) -> u8 {
     match frame {
         crate::mm::Frame::InMemory(frame) => unsafe {
@@ -182,6 +185,14 @@ impl PageCacheBackend for TransientBackend {
 
 pub(crate) fn tests() -> alloc::vec::Vec<KernelTest> {
     alloc::vec![
+        KernelTest::new(
+            "page_cache::filemap_admission_defers_backend_io",
+            filemap_lazy::test_filemap_admission_defers_backend_io,
+        ),
+        KernelTest::new(
+            "page_cache::filemap_fault_around_is_bounded_and_lock_outside",
+            filemap_lazy::test_filemap_fault_around_is_bounded_and_lock_outside,
+        ),
         KernelTest::with_timeout(
             "page_cache::global_flush_releases_registry_before_writeback",
             test_global_flush_releases_registry_before_writeback,

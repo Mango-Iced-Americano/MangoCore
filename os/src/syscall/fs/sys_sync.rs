@@ -6,7 +6,9 @@ pub fn sys_sync() -> isize {
     if let Err(error) = crate::fs::vfs::sync_all_backends() {
         log::error!("sys_sync: global filesystem sync failed: {:?}", error);
     }
-    // develop 新增：同步生命周期 registry 之外直开的 another_ext4 实例。
+    // Compatibility registry pass for directly opened another_ext4 instances.
+    // Mounted instances are already clean after sync_all_backends(), so the
+    // backend's pending-work predicate prevents a duplicate device barrier.
     #[cfg(feature = "ext4_another_backend")]
     crate::fs::ext4_another::sync_all_instances();
     SUCCESS

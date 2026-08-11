@@ -47,9 +47,15 @@ pub use address_space::{AddressSpace, AddressSpaceInner, FaultOutcome, MemoryErr
 pub use frame_allocator::{
     frame_alloc, frame_alloc_uninit, frame_dealloc, frame_frag_diag, frame_reclaim_linker_range,
     frame_reserve, frames_alloc, frames_alloc_any, frames_alloc_fresh_contiguous,
-    is_allocatable_ram_phys_addr, is_ram_phys_addr, try_unallocated_frames, unallocated_frames,
-    FrameTracker,
+    idle_prezero_refill, is_allocatable_ram_phys_addr, is_ram_phys_addr, prezero_policy_name,
+    prezero_pool_stats, try_unallocated_frames, unallocated_frames, FrameTracker,
 };
+pub(crate) use frame_allocator::{idle_prezero_refill_batch, take_idle_prezero_refill_request};
+
+/// Whether bounded anonymous fault-around is enabled for this boot.
+pub fn anon_fault_around_enabled() -> bool {
+    page_fault::anon_fault_around_enabled()
+}
 pub use frame_store::Frame;
 pub use heap_allocator::{
     heap_free_histogram, heap_stats, kernel_heap_size, try_heap_stats, KERNEL_HEAP_CURRENT_BYTES,

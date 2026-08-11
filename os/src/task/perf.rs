@@ -13,17 +13,37 @@
 /// read/write it even when `perf_stats` is disabled at compile time.
 pub static STATS_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Runtime counter profiles. Only one profile is selected during a diagnostic
-/// window so unrelated hot paths do not pay counter or timer costs.
+/// Runtime counter profiles. A bounded bitmask may combine the core and
+/// memory/I/O groups during a diagnostic window; unrelated hot paths remain
+/// disabled so they do not pay counter or timer costs.
 pub const STATS_PROFILE_CORE: usize = 1;
 pub const STATS_PROFILE_MEMORY_IO: usize = 1 << 1;
+pub const STATS_PROFILE_CORE_MEMORY_IO: usize = STATS_PROFILE_CORE | STATS_PROFILE_MEMORY_IO;
 pub const STATS_PROFILE_NETWORK_RUNTIME: usize = 1 << 2;
 pub const STATS_PROFILE_ALL: usize =
     STATS_PROFILE_CORE | STATS_PROFILE_MEMORY_IO | STATS_PROFILE_NETWORK_RUNTIME;
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
-pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 2;
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 7;
+/// Scheduler preemption attribution field semantics version.
+pub const SCHED_PREEMPT_COUNTER_SCHEMA_VERSION: usize = 2;
+/// `/sys/kernel/stats/vm` filemap counter field semantics version.
+pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 4;
+/// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
+pub const PAGEFAULT_COUNTER_SCHEMA_VERSION: usize = 4;
+
+#[derive(Clone, Copy)]
+pub enum AnonFaultAroundStopReason {
+    Boundary,
+    PageState,
+    NoPrezeroedPage,
+    MappingError,
+}
+
+/// `/sys/kernel/stats/heap` allocator attribution field semantics version.
+pub const HEAP_COUNTER_SCHEMA_VERSION: usize = 1;
+pub const HEAP_LOCK_HIST_BUCKETS: usize = 6;
 
 /// Read the architecture cycle counter without enabling the diagnostics framework.
 #[inline(always)]
@@ -71,6 +91,7 @@ pub fn stats_enabled_for(_profile: usize) -> bool {
 #[cfg(feature = "perf_stats")]
 mod enabled {
     use super::super::WaitResult;
+    use super::AnonFaultAroundStopReason;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const PRINT_EVERY_CLONES: usize = 512;
@@ -99,6 +120,14 @@ mod enabled {
     static SCHEDULE_FETCH: AtomicUsize = AtomicUsize::new(0);
     static SCHEDULE_IDLE: AtomicUsize = AtomicUsize::new(0);
     static TIMER_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_WITH_IPI: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_SAME_TASK_RESUMES: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPT_LAST_TID: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     /// 最近一次在 deferred 安全点输出 timer 快照时对应的 1024 次分段。
     static TIMER_SNAPSHOT_EPOCH: AtomicUsize = AtomicUsize::new(0);
     static FUTEX_WAIT: AtomicUsize = AtomicUsize::new(0);
@@ -130,19 +159,39 @@ mod enabled {
         [const { AtomicUsize::new(0) }; PERF_SYSCOUNT];
 
     // ── Page fault per-action profile ──
-    // action 0=LazyAlloc 1=FileBackedRead 2=FileBackedSharedWrite
-    //        3=FileBackedWrite 4=SharedWrite 5=Cow 6=Other
-    pub const PF_ACTION_NAMES: [&str; 7] = [
+    // Keep every classifier arm distinct. The old seven-entry table folded
+    // ELF/filemap actions into "Other" and early returns skipped recording.
+    pub const PF_ACTION_NAMES: [&str; 12] = [
         "LazyAlloc",
         "FileBackedRead",
         "FileBackedSharedWrite",
         "FileBackedWrite",
         "SharedWrite",
         "Cow",
-        "Other",
+        "ElfLazy",
+        "Decompress",
+        "SwapIn",
+        "StaleLazyPte",
+        "MappedRead",
+        "ResidentWithoutPte",
     ];
-    static PF_ACTION_COUNT: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
-    static PF_ACTION_TICKS: [AtomicUsize; 7] = [const { AtomicUsize::new(0) }; 7];
+    static PF_ACTION_COUNT: [AtomicUsize; 12] = [const { AtomicUsize::new(0) }; 12];
+    static PF_ACTION_TICKS: [AtomicUsize; 12] = [const { AtomicUsize::new(0) }; 12];
+    static PF_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    static PF_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+    static PF_RETRIES: AtomicUsize = AtomicUsize::new(0);
+    static PF_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static PF_ACCESS_COUNT: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+    pub static ANON_FAULT_LOCALITY_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_FORWARD_1: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_FORWARD_2_4: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_BACKWARD_1: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_OTHER: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_LOCALITY_TASK_SWITCH: AtomicUsize = AtomicUsize::new(0);
+    static LAST_ANON_FAULT_PID: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    static LAST_ANON_FAULT_VPN: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
     // ── Demand page-fault phase profile ──
     pub const PF_STAGE_NAMES: [&str; 8] = [
@@ -153,7 +202,7 @@ mod enabled {
         "zero_copy",
         "tlb_flush",
         "trap_return",
-        "filemap_frame",
+        "frame_store",
     ];
     static PF_STAGE_COUNT: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
     static PF_STAGE_TICKS: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
@@ -182,6 +231,22 @@ mod enabled {
     pub static FILEMAP_REVALIDATE_RETRY: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_REVALIDATE_VMA_CHANGED: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_REVALIDATE_EOF_CHANGED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_MISSING: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_PUBLISHED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_PAGES_PREFETCHED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_BACKEND_RUNS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_USEFUL_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_UNUSED_DISCARDS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_FAULT_AROUND_ABORTS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_PAGES_EXAMINED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_PAGES_MAPPED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_NOT_READY_STOPS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_STATE_CONFLICTS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_CACHE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
     // ── TLB flush cycle counters ──
     pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
@@ -231,6 +296,21 @@ mod enabled {
     pub static FRAME_RESERVE_OOM_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_ALLOC_SOURCE_FRESH: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_ALLOC_SOURCE_RECYCLED: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_ALLOC_SOURCE_PREZEROED: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_POOL_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_POOL_MISSES: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_SKIPPED_POLICY: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_SKIPPED_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_SYNC_ZERO_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_TRIGGERED: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_BOUNDARY: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_STATE: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_NO_PREZERO: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_ERROR: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -243,8 +323,31 @@ mod enabled {
     pub static HEAP_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_LOCK_CALLS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_WAIT_TICKS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_HOLD_TICKS_BY_CPU: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static HEAP_LOCK_WAIT_HIST: [AtomicUsize; super::HEAP_LOCK_HIST_BUCKETS] =
+        [const { AtomicUsize::new(0) }; super::HEAP_LOCK_HIST_BUCKETS];
+    pub static HEAP_LOCK_HOLD_HIST: [AtomicUsize; super::HEAP_LOCK_HIST_BUCKETS] =
+        [const { AtomicUsize::new(0) }; super::HEAP_LOCK_HIST_BUCKETS];
     pub static HEAP_SLAB_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_FAST_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_REFILL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_SLAB_FALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_DIRECT_BUDDY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_DIRECT_BUDDY_FAILURES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_RETRY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_RECOVERY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_RECOVERY_SUCCESSES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_FINAL_FAILURES: AtomicUsize = AtomicUsize::new(0);
+    pub static HEAP_ALLOC_REQUESTED_BYTES: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_8_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_16_CALLS: AtomicUsize = AtomicUsize::new(0);
     pub static HEAP_CLASS_32_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -269,6 +372,10 @@ mod enabled {
     pub static WAKE_KEEP_LAST_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_IDLE_CPU: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_SELECT_LEAST_LOADED: AtomicUsize = AtomicUsize::new(0);
+    pub static WAKE_LAST_BUSY_IDLE_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_IDLE_AVAILABLE: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_SELECTED_IDLE: AtomicUsize = AtomicUsize::new(0);
+    pub static NEW_TASK_KEPT_BUSY_PARENT: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_TO_RUN_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static WAKE_TO_RUN_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static TASK_RUN_SLICE_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -547,6 +654,87 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_filemap_fault_around_start(requested_pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_FAULT_AROUND_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_REQUESTED.fetch_add(requested_pages, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_missing(missing_pages: usize) {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_PAGES_MISSING.fetch_add(missing_pages, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_claim_conflict(conflicts: usize) {
+        if memory_io_stats_enabled() && conflicts != 0 {
+            FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS.fetch_add(conflicts, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_backend_run() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_BACKEND_RUNS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_publish(published_pages: usize, prefetched_pages: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_FAULT_AROUND_PAGES_PUBLISHED.fetch_add(published_pages, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PREFETCHED.fetch_add(prefetched_pages, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_useful_hit() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_USEFUL_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_unused_discard() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_UNUSED_DISCARDS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_fault_around_abort() {
+        if memory_io_stats_enabled() {
+            FILEMAP_FAULT_AROUND_ABORTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_pte_around(
+        examined: usize,
+        mapped: usize,
+        not_ready: bool,
+        state_conflicts: usize,
+        cache_errors: usize,
+    ) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_PTE_AROUND_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_EXAMINED.fetch_add(examined, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_MAPPED.fetch_add(mapped, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_STATE_CONFLICTS.fetch_add(state_conflicts, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CACHE_ERRORS.fetch_add(cache_errors, Ordering::Relaxed);
+        if not_ready {
+            FILEMAP_PTE_AROUND_NOT_READY_STOPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_frame_global_alloc_lock(wait_ticks: usize, hold_ticks: usize) {
         if !memory_io_stats_enabled() {
             return;
@@ -593,6 +781,128 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_frame_alloc_source_prezeroed() {
+        if memory_io_stats_enabled() {
+            FRAME_ALLOC_SOURCE_PREZEROED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_hit() {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_POOL_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_miss() {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_POOL_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_refill(ticks: usize) {
+        if memory_io_stats_enabled() {
+            FRAME_PREZERO_REFILL_PAGES.fetch_add(1, Ordering::Relaxed);
+            FRAME_PREZERO_REFILL_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_refill_skipped(active: bool) {
+        if memory_io_stats_enabled() {
+            if active {
+                FRAME_PREZERO_REFILL_SKIPPED_ACTIVE.fetch_add(1, Ordering::Relaxed);
+            } else {
+                FRAME_PREZERO_REFILL_SKIPPED_POLICY.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_attempt(triggered: bool) {
+        if memory_io_stats_enabled() {
+            ANON_FAULT_AROUND_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            if triggered {
+                ANON_FAULT_AROUND_TRIGGERED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_page() {
+        if memory_io_stats_enabled() {
+            ANON_FAULT_AROUND_PAGES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_stop(reason: AnonFaultAroundStopReason) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        match reason {
+            AnonFaultAroundStopReason::Boundary => {
+                ANON_FAULT_AROUND_STOP_BOUNDARY.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::PageState => {
+                ANON_FAULT_AROUND_STOP_STATE.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::NoPrezeroedPage => {
+                ANON_FAULT_AROUND_STOP_NO_PREZERO.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::MappingError => {
+                ANON_FAULT_AROUND_STOP_ERROR.fetch_add(1, Ordering::Relaxed)
+            }
+        };
+    }
+
+    #[inline(always)]
+    pub fn record_frame_sync_zero() {
+        if memory_io_stats_enabled() {
+            FRAME_SYNC_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Classify spatial locality between consecutive anonymous demand faults
+    /// from the same task on one CPU. This is diagnostic-only and deliberately
+    /// does not pre-map pages or alter VMA residency semantics.
+    #[inline(always)]
+    pub fn record_anon_fault_locality(vpn: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        ANON_FAULT_LOCALITY_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let cpu = crate::smp::cpu_id();
+        if cpu >= crate::smp::MAX_CPUS {
+            ANON_FAULT_LOCALITY_OTHER.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let pid = crate::task::current_task()
+            .map(|task| task.pid())
+            .unwrap_or(usize::MAX);
+        let encoded_pid = pid.wrapping_add(1);
+        let encoded_vpn = vpn.wrapping_add(1);
+        let previous_pid = LAST_ANON_FAULT_PID[cpu].swap(encoded_pid, Ordering::Relaxed);
+        let previous_vpn = LAST_ANON_FAULT_VPN[cpu].swap(encoded_vpn, Ordering::Relaxed);
+        if previous_pid == 0 || previous_vpn == 0 || previous_pid != encoded_pid {
+            ANON_FAULT_LOCALITY_TASK_SWITCH.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let previous_vpn = previous_vpn - 1;
+        if vpn == previous_vpn.wrapping_add(1) {
+            ANON_FAULT_LOCALITY_FORWARD_1.fetch_add(1, Ordering::Relaxed);
+        } else if vpn > previous_vpn && vpn - previous_vpn <= 4 {
+            ANON_FAULT_LOCALITY_FORWARD_2_4.fetch_add(1, Ordering::Relaxed);
+        } else if previous_vpn == vpn.wrapping_add(1) {
+            ANON_FAULT_LOCALITY_BACKWARD_1.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ANON_FAULT_LOCALITY_OTHER.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_frame_contig_lock(wait_ticks: usize, hold_ticks: usize) {
         if !memory_io_stats_enabled() {
             return;
@@ -613,7 +923,7 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_heap_lock(wait_ticks: usize, hold_ticks: usize) {
+    pub fn record_heap_lock(wait_ticks: usize, hold_ticks: usize, is_alloc: bool) {
         if !memory_io_stats_enabled() {
             return;
         }
@@ -621,6 +931,81 @@ mod enabled {
         update_max(&HEAP_LOCK_WAIT_TICKS_MAX, wait_ticks);
         HEAP_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
         update_max(&HEAP_LOCK_HOLD_TICKS_MAX, hold_ticks);
+        if is_alloc {
+            HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        } else {
+            HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
+        }
+        let cpu = crate::smp::cpu_id();
+        if cpu < crate::smp::MAX_CPUS {
+            HEAP_LOCK_CALLS_BY_CPU[cpu].fetch_add(1, Ordering::Relaxed);
+            HEAP_LOCK_WAIT_TICKS_BY_CPU[cpu].fetch_add(wait_ticks, Ordering::Relaxed);
+            HEAP_LOCK_HOLD_TICKS_BY_CPU[cpu].fetch_add(hold_ticks, Ordering::Relaxed);
+        }
+        let bucket = |ticks: usize| match ticks {
+            0 => 0,
+            1..=63 => 1,
+            64..=1023 => 2,
+            1024..=16_383 => 3,
+            16_384..=262_143 => 4,
+            _ => 5,
+        };
+        HEAP_LOCK_WAIT_HIST[bucket(wait_ticks)].fetch_add(1, Ordering::Relaxed);
+        HEAP_LOCK_HOLD_HIST[bucket(hold_ticks)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_heap_alloc_request(bytes: usize) {
+        if memory_io_stats_enabled() {
+            HEAP_ALLOC_REQUESTED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_slab_result(new_page: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        if new_page {
+            HEAP_SLAB_REFILL_CALLS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            HEAP_SLAB_FAST_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_slab_fallback() {
+        if memory_io_stats_enabled() {
+            HEAP_SLAB_FALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_direct_buddy_failure() {
+        if memory_io_stats_enabled() {
+            HEAP_DIRECT_BUDDY_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_recovery(recovered: bool) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        HEAP_RECOVERY_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        if recovered {
+            HEAP_RECOVERY_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            HEAP_ALLOC_RETRY_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_heap_final_failure() {
+        if memory_io_stats_enabled() {
+            HEAP_ALLOC_FINAL_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -661,9 +1046,12 @@ mod enabled {
     }
 
     #[inline(always)]
-    pub fn record_wake_selection(keep_last: bool, idle: bool) {
+    pub fn record_wake_selection(keep_last: bool, idle: bool, last_busy_idle_available: bool) {
         if !stats_enabled() {
             return;
+        }
+        if last_busy_idle_available {
+            WAKE_LAST_BUSY_IDLE_AVAILABLE.fetch_add(1, Ordering::Relaxed);
         }
         if keep_last {
             WAKE_KEEP_LAST_CPU.fetch_add(1, Ordering::Relaxed);
@@ -671,6 +1059,26 @@ mod enabled {
             WAKE_SELECT_IDLE_CPU.fetch_add(1, Ordering::Relaxed);
         } else {
             WAKE_SELECT_LEAST_LOADED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_new_task_placement(
+        idle_available: bool,
+        selected_idle: bool,
+        kept_busy_parent: bool,
+    ) {
+        if !stats_enabled() {
+            return;
+        }
+        if idle_available {
+            NEW_TASK_IDLE_AVAILABLE.fetch_add(1, Ordering::Relaxed);
+        }
+        if selected_idle {
+            NEW_TASK_SELECTED_IDLE.fetch_add(1, Ordering::Relaxed);
+        }
+        if kept_busy_parent {
+            NEW_TASK_KEPT_BUSY_PARENT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -687,6 +1095,54 @@ mod enabled {
     pub fn record_task_run_slice(ticks: usize) {
         if stats_enabled() {
             TASK_RUN_SLICE_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    /// Attribute a scheduler tick that forced the current task through the
+    /// idle stack.  `local_competitor` is sampled from this CPU's runqueue
+    /// before the switch; it is deliberately diagnostic-only and does not
+    /// change scheduling policy.
+    #[inline(always)]
+    pub fn record_timer_preemption(
+        cpu: usize,
+        tid: usize,
+        local_competitor: bool,
+        ipi_pending: bool,
+    ) {
+        if !stats_enabled() {
+            return;
+        }
+        TIMER_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        if local_competitor {
+            TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR.fetch_add(1, Ordering::Relaxed);
+        } else {
+            TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR.fetch_add(1, Ordering::Relaxed);
+        }
+        if ipi_pending {
+            TIMER_PREEMPTIONS_WITH_IPI.fetch_add(1, Ordering::Relaxed);
+        }
+        if cpu < TIMER_PREEMPT_LAST_TID.len() {
+            TIMER_PREEMPT_LAST_TID[cpu].store(tid, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_timer_preemption_elided() {
+        if stats_enabled() {
+            TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_dispatch_after_timer_preemption(cpu: usize, tid: usize) {
+        if !stats_enabled() || cpu >= TIMER_PREEMPT_LAST_TID.len() {
+            return;
+        }
+        if TIMER_PREEMPT_LAST_TID[cpu]
+            .swap(0, Ordering::Relaxed)
+            == tid
+        {
+            TIMER_SAME_TASK_RESUMES.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1009,9 +1465,49 @@ mod enabled {
     pub static VIRTIO_DMA_SHARE_STATUS_FALLBACK: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_SHARE_INDIRECT_FALLBACK: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_SHARE_OTHER_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_HEADER_POOL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_STATUS_POOL: AtomicUsize = AtomicUsize::new(0);
+    pub static VIRTIO_DMA_SHARE_INDIRECT_POOL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    // Stage 1 FS/block attribution.  Arrays are indexed by transport
+    // (0=MMIO, 1=PCI) and request bucket (4K, 8K, 16K, 32K, 64K+).
+    pub static VIRTIO_DEVICE_LOCK_WAIT_TICKS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_DEVICE_LOCK_HOLD_TICKS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_DEVICE_LOCK_CALLS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_REQUEST_SIZE_READ: [[AtomicUsize; 5]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_REQUEST_SIZE_WRITE: [[AtomicUsize; 5]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static JOURNAL_COMMIT_REASON_COUNTS: [AtomicUsize; 5] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static JOURNAL_FLUSH_PHASE_COUNTS: [AtomicUsize; 4] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static DIRECT_FLUSH_REASON_COUNTS: [AtomicUsize; 5] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static EXT4_DIR_SNAPSHOT_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_DIR_SNAPSHOT_MISSES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_DIR_SNAPSHOT_INVALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: 2K1000LA SATA/AHCI ──
     pub static SATA_READ_REQS: AtomicUsize = AtomicUsize::new(0);
@@ -2047,7 +2543,8 @@ mod enabled {
     }
 
     /// `kind`: 0=data pool, 1=data fallback, 2=header, 3=status,
-    /// 4=indirect descriptor table, 5=other fallback.
+    /// 4=indirect descriptor table, 5=other fallback, 6=header pool,
+    /// 7=status pool, 8=indirect descriptor pool.
     #[inline(always)]
     pub fn record_virtio_dma_share(kind: usize) {
         if !memory_io_stats_enabled() {
@@ -2060,6 +2557,9 @@ mod enabled {
             2 => VIRTIO_DMA_SHARE_HEADER_FALLBACK.fetch_add(1, Ordering::Relaxed),
             3 => VIRTIO_DMA_SHARE_STATUS_FALLBACK.fetch_add(1, Ordering::Relaxed),
             4 => VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.fetch_add(1, Ordering::Relaxed),
+            6 => VIRTIO_DMA_SHARE_HEADER_POOL.fetch_add(1, Ordering::Relaxed),
+            7 => VIRTIO_DMA_SHARE_STATUS_POOL.fetch_add(1, Ordering::Relaxed),
+            8 => VIRTIO_DMA_SHARE_INDIRECT_POOL.fetch_add(1, Ordering::Relaxed),
             _ => VIRTIO_DMA_SHARE_OTHER_FALLBACK.fetch_add(1, Ordering::Relaxed),
         };
     }
@@ -2072,6 +2572,95 @@ mod enabled {
         VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.fetch_add(wait_ticks, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.fetch_add(hold_ticks, Ordering::Relaxed);
         update_max(&VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX, hold_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_device_lock(transport: usize, wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let transport = transport.min(1);
+        VIRTIO_DEVICE_LOCK_CALLS[transport][0].fetch_add(1, Ordering::Relaxed);
+        VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport][0].fetch_add(wait_ticks, Ordering::Relaxed);
+        VIRTIO_DEVICE_LOCK_HOLD_TICKS[transport][0].fetch_add(hold_ticks, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_device_lock_wait(transport: usize, wait_ticks: usize) {
+        if memory_io_stats_enabled() {
+            VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport.min(1)][0]
+                .fetch_add(wait_ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_request(transport: usize, write: bool, bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let transport = transport.min(1);
+        let bucket = match bytes {
+            0..=4096 => 0,
+            4097..=8192 => 1,
+            8193..=16384 => 2,
+            16385..=32768 => 3,
+            _ => 4,
+        };
+        let counters = if write {
+            &VIRTIO_REQUEST_SIZE_WRITE[transport]
+        } else {
+            &VIRTIO_REQUEST_SIZE_READ[transport]
+        };
+        counters[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_journal_commit_reason(reason: usize) {
+        if memory_io_stats_enabled() {
+            JOURNAL_COMMIT_REASON_COUNTS[reason.min(4)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_journal_flush_phase(phase: usize) {
+        if memory_io_stats_enabled() {
+            JOURNAL_FLUSH_PHASE_COUNTS[phase.min(3)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_direct_flush_reason(reason: usize) {
+        if memory_io_stats_enabled() {
+            DIRECT_FLUSH_REASON_COUNTS[reason.min(4)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_hit() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_miss() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_invalidation() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_pte_around_speculative_reuse() {
+        if memory_io_stats_enabled() {
+            EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -2338,6 +2927,15 @@ mod enabled {
         SCHEDULE_FETCH.store(0, Ordering::Relaxed);
         SCHEDULE_IDLE.store(0, Ordering::Relaxed);
         TIMER_INTERRUPTS.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_WITH_IPI.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR.store(0, Ordering::Relaxed);
+        TIMER_SAME_TASK_RESUMES.store(0, Ordering::Relaxed);
+        for counter in TIMER_PREEMPT_LAST_TID.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
         TIMER_SNAPSHOT_EPOCH.store(0, Ordering::Relaxed);
         FUTEX_WAIT.store(0, Ordering::Relaxed);
         FUTEX_WAIT_SHARED.store(0, Ordering::Relaxed);
@@ -2580,9 +3178,36 @@ mod enabled {
         VIRTIO_DMA_SHARE_STATUS_FALLBACK.store(0, Ordering::Relaxed);
         VIRTIO_DMA_SHARE_INDIRECT_FALLBACK.store(0, Ordering::Relaxed);
         VIRTIO_DMA_SHARE_OTHER_FALLBACK.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_HEADER_POOL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_STATUS_POOL.store(0, Ordering::Relaxed);
+        VIRTIO_DMA_SHARE_INDIRECT_POOL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        for transport in 0..2 {
+            for op in 0..2 {
+                VIRTIO_DEVICE_LOCK_CALLS[transport][op].store(0, Ordering::Relaxed);
+                VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport][op].store(0, Ordering::Relaxed);
+                VIRTIO_DEVICE_LOCK_HOLD_TICKS[transport][op].store(0, Ordering::Relaxed);
+            }
+            for bucket in 0..5 {
+                VIRTIO_REQUEST_SIZE_READ[transport][bucket].store(0, Ordering::Relaxed);
+                VIRTIO_REQUEST_SIZE_WRITE[transport][bucket].store(0, Ordering::Relaxed);
+            }
+        }
+        for counter in JOURNAL_COMMIT_REASON_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in JOURNAL_FLUSH_PHASE_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in DIRECT_FLUSH_REASON_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        EXT4_DIR_SNAPSHOT_HITS.store(0, Ordering::Relaxed);
+        EXT4_DIR_SNAPSHOT_MISSES.store(0, Ordering::Relaxed);
+        EXT4_DIR_SNAPSHOT_INVALIDATIONS.store(0, Ordering::Relaxed);
+        EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES.store(0, Ordering::Relaxed);
         SATA_READ_REQS.store(0, Ordering::Relaxed);
         SATA_READ_BYTES.store(0, Ordering::Relaxed);
         SATA_READ_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -2649,6 +3274,13 @@ mod enabled {
             PF_ACTION_COUNT[i].store(0, Ordering::Relaxed);
             PF_ACTION_TICKS[i].store(0, Ordering::Relaxed);
         }
+        PF_ATTEMPTS.store(0, Ordering::Relaxed);
+        PF_COMPLETED.store(0, Ordering::Relaxed);
+        PF_RETRIES.store(0, Ordering::Relaxed);
+        PF_ERRORS.store(0, Ordering::Relaxed);
+        for counter in &PF_ACCESS_COUNT {
+            counter.store(0, Ordering::Relaxed);
+        }
         for i in 0..PF_STAGE_COUNT.len() {
             PF_STAGE_COUNT[i].store(0, Ordering::Relaxed);
             PF_STAGE_TICKS[i].store(0, Ordering::Relaxed);
@@ -2677,6 +3309,22 @@ mod enabled {
         FILEMAP_REVALIDATE_RETRY.store(0, Ordering::Relaxed);
         FILEMAP_REVALIDATE_VMA_CHANGED.store(0, Ordering::Relaxed);
         FILEMAP_REVALIDATE_EOF_CHANGED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_REQUESTED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_MISSING.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PUBLISHED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_PAGES_PREFETCHED.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_BACKEND_RUNS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_USEFUL_HITS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_UNUSED_DISCARDS.store(0, Ordering::Relaxed);
+        FILEMAP_FAULT_AROUND_ABORTS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_EXAMINED.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_MAPPED.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_NOT_READY_STOPS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_STATE_CONFLICTS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CACHE_ERRORS.store(0, Ordering::Relaxed);
 
         // ── TLB flush cycles ──
         TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
@@ -2721,6 +3369,33 @@ mod enabled {
         FRAME_RESERVE_OOM_CALLS.store(0, Ordering::Relaxed);
         FRAME_ALLOC_SOURCE_FRESH.store(0, Ordering::Relaxed);
         FRAME_ALLOC_SOURCE_RECYCLED.store(0, Ordering::Relaxed);
+        FRAME_ALLOC_SOURCE_PREZEROED.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_POOL_HITS.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_POOL_MISSES.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_PAGES.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_SKIPPED_POLICY.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_SKIPPED_ACTIVE.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_ATTEMPTS.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_TRIGGERED.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_PAGES.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_BOUNDARY.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_STATE.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_NO_PREZERO.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_ERROR.store(0, Ordering::Relaxed);
+        FRAME_SYNC_ZERO_PAGES.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_TOTAL.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_FORWARD_1.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_FORWARD_2_4.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_BACKWARD_1.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_OTHER.store(0, Ordering::Relaxed);
+        ANON_FAULT_LOCALITY_TASK_SWITCH.store(0, Ordering::Relaxed);
+        for counter in &LAST_ANON_FAULT_PID {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &LAST_ANON_FAULT_VPN {
+            counter.store(0, Ordering::Relaxed);
+        }
         FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
         FRAME_CONTIG_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
         FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -2731,8 +3406,36 @@ mod enabled {
         HEAP_LOCK_WAIT_TICKS_MAX.store(0, Ordering::Relaxed);
         HEAP_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
         HEAP_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        for counter in &HEAP_LOCK_CALLS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_WAIT_TICKS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_HOLD_TICKS_BY_CPU {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_WAIT_HIST {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &HEAP_LOCK_HOLD_HIST {
+            counter.store(0, Ordering::Relaxed);
+        }
         HEAP_SLAB_ALLOC_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_FAST_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_REFILL_CALLS.store(0, Ordering::Relaxed);
+        HEAP_SLAB_FALLBACK_CALLS.store(0, Ordering::Relaxed);
         HEAP_DIRECT_BUDDY_CALLS.store(0, Ordering::Relaxed);
+        HEAP_DIRECT_BUDDY_FAILURES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_RETRY_ATTEMPTS.store(0, Ordering::Relaxed);
+        HEAP_RECOVERY_ATTEMPTS.store(0, Ordering::Relaxed);
+        HEAP_RECOVERY_SUCCESSES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_FINAL_FAILURES.store(0, Ordering::Relaxed);
+        HEAP_ALLOC_REQUESTED_BYTES.store(0, Ordering::Relaxed);
         HEAP_CLASS_8_CALLS.store(0, Ordering::Relaxed);
         HEAP_CLASS_16_CALLS.store(0, Ordering::Relaxed);
         HEAP_CLASS_32_CALLS.store(0, Ordering::Relaxed);
@@ -2755,6 +3458,10 @@ mod enabled {
         WAKE_KEEP_LAST_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_IDLE_CPU.store(0, Ordering::Relaxed);
         WAKE_SELECT_LEAST_LOADED.store(0, Ordering::Relaxed);
+        WAKE_LAST_BUSY_IDLE_AVAILABLE.store(0, Ordering::Relaxed);
+        NEW_TASK_IDLE_AVAILABLE.store(0, Ordering::Relaxed);
+        NEW_TASK_SELECTED_IDLE.store(0, Ordering::Relaxed);
+        NEW_TASK_KEPT_BUSY_PARENT.store(0, Ordering::Relaxed);
         WAKE_TO_RUN_TICKS_TOTAL.store(0, Ordering::Relaxed);
         WAKE_TO_RUN_TICKS_MAX.store(0, Ordering::Relaxed);
         TASK_RUN_SLICE_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -3295,9 +4002,59 @@ mod enabled {
         if !memory_io_stats_enabled() {
             return;
         }
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_COUNT.len() {
             PF_ACTION_COUNT[action_tag].fetch_add(1, Ordering::Relaxed);
             PF_ACTION_TICKS[action_tag].fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_pagefault_attempt(access: crate::mm::FaultAccess) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        PF_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let index = match access {
+            crate::mm::FaultAccess::Load => 0,
+            crate::mm::FaultAccess::Store => 1,
+            crate::mm::FaultAccess::Execute => 2,
+        };
+        PF_ACCESS_COUNT[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_pagefault_outcome(outcome: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        match outcome {
+            0 => PF_COMPLETED.fetch_add(1, Ordering::Relaxed),
+            1 => PF_RETRIES.fetch_add(1, Ordering::Relaxed),
+            _ => PF_ERRORS.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    pub fn pagefault_attempts() -> usize {
+        PF_ATTEMPTS.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_completed() -> usize {
+        PF_COMPLETED.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_retries() -> usize {
+        PF_RETRIES.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_errors() -> usize {
+        PF_ERRORS.load(Ordering::Relaxed)
+    }
+
+    pub fn pagefault_access_count(access: usize) -> usize {
+        if access < PF_ACCESS_COUNT.len() {
+            PF_ACCESS_COUNT[access].load(Ordering::Relaxed)
+        } else {
+            0
         }
     }
 
@@ -3341,7 +4098,7 @@ mod enabled {
     }
 
     pub fn pf_action_count(action_tag: usize) -> usize {
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_COUNT.len() {
             PF_ACTION_COUNT[action_tag].load(Ordering::Relaxed)
         } else {
             0
@@ -3349,7 +4106,7 @@ mod enabled {
     }
 
     pub fn pf_action_ticks(action_tag: usize) -> usize {
-        if action_tag < 7 {
+        if action_tag < PF_ACTION_TICKS.len() {
             PF_ACTION_TICKS[action_tag].load(Ordering::Relaxed)
         } else {
             0
@@ -3511,6 +4268,39 @@ pub fn syscall_ticks(_id: usize) -> usize {
 pub fn record_pagefault_action(_action_tag: usize, _elapsed: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_attempt(_access: crate::mm::FaultAccess) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_pagefault_outcome(_outcome: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_attempts() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_completed() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_retries() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_errors() -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn pagefault_access_count(_access: usize) -> usize {
+    0
+}
+
+#[cfg(not(feature = "perf_stats"))]
 pub fn pf_action_count(_action_tag: usize) -> usize {
     0
 }
@@ -3646,6 +4436,49 @@ pub fn record_filemap_revalidate_retry(_vma_changed: bool, _eof_changed: bool) {
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_filemap_fault_around_start(_requested_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_missing(_missing_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_claim_conflict(_conflicts: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_backend_run() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_publish(_published_pages: usize, _prefetched_pages: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_useful_hit() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_unused_discard() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_fault_around_abort() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_pte_around(
+    _examined: usize,
+    _mapped: usize,
+    _not_ready: bool,
+    _state_conflicts: usize,
+    _cache_errors: usize,
+) {
+}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_global_alloc_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3662,6 +4495,46 @@ pub fn record_frame_alloc_source(_recycled: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_frame_alloc_source_prezeroed() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_hit() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_miss() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_refill(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_prezero_refill_skipped(_active: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_attempt(_triggered: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_page() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_stop(_reason: AnonFaultAroundStopReason) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_frame_sync_zero() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_locality(_vpn: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_contig_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -3670,7 +4543,31 @@ pub fn record_frame_contig_page(_zero_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_heap_lock(_wait_ticks: usize, _hold_ticks: usize) {}
+pub fn record_heap_lock(_wait_ticks: usize, _hold_ticks: usize, _is_alloc: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_alloc_request(_bytes: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_slab_result(_new_page: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_slab_fallback() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_direct_buddy_failure() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_recovery(_recovered: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_heap_final_failure() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3686,7 +4583,16 @@ pub fn record_wake_remote() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
-pub fn record_wake_selection(_keep_last: bool, _idle: bool) {}
+pub fn record_wake_selection(_keep_last: bool, _idle: bool, _last_busy_idle_available: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_new_task_placement(
+    _idle_available: bool,
+    _selected_idle: bool,
+    _kept_busy_parent: bool,
+) {
+}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3695,6 +4601,21 @@ pub fn record_wake_to_run(_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_task_run_slice(_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_timer_preemption(
+    _cpu: usize,
+    _tid: usize,
+    _local_competitor: bool,
+    _ipi_pending: bool,
+) {
+}
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn record_timer_preemption_elided() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_dispatch_after_timer_preemption(_cpu: usize, _tid: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -3756,8 +4677,7 @@ pub static EXEC_PAGECACHE_COPY_TICKS: core::sync::atomic::AtomicUsize =
 macro_rules! perf_stub_counter {
     ($name:ident) => {
         #[cfg(not(feature = "perf_stats"))]
-        pub static $name: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
+        pub static $name: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     };
 }
 perf_stub_counter!(VM_READ_LOCK_WAIT_TICKS_MAX);
@@ -3780,6 +4700,27 @@ perf_stub_counter!(FRAME_RESERVE_CHECK_TICKS_TOTAL);
 perf_stub_counter!(FRAME_RESERVE_OOM_CALLS);
 perf_stub_counter!(FRAME_ALLOC_SOURCE_FRESH);
 perf_stub_counter!(FRAME_ALLOC_SOURCE_RECYCLED);
+perf_stub_counter!(FRAME_ALLOC_SOURCE_PREZEROED);
+perf_stub_counter!(FRAME_PREZERO_POOL_HITS);
+perf_stub_counter!(FRAME_PREZERO_POOL_MISSES);
+perf_stub_counter!(FRAME_PREZERO_REFILL_PAGES);
+perf_stub_counter!(FRAME_PREZERO_REFILL_TICKS_TOTAL);
+perf_stub_counter!(FRAME_PREZERO_REFILL_SKIPPED_POLICY);
+perf_stub_counter!(FRAME_PREZERO_REFILL_SKIPPED_ACTIVE);
+perf_stub_counter!(ANON_FAULT_AROUND_ATTEMPTS);
+perf_stub_counter!(ANON_FAULT_AROUND_TRIGGERED);
+perf_stub_counter!(ANON_FAULT_AROUND_PAGES);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_BOUNDARY);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_STATE);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_NO_PREZERO);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_ERROR);
+perf_stub_counter!(FRAME_SYNC_ZERO_PAGES);
+perf_stub_counter!(ANON_FAULT_LOCALITY_TOTAL);
+perf_stub_counter!(ANON_FAULT_LOCALITY_FORWARD_1);
+perf_stub_counter!(ANON_FAULT_LOCALITY_FORWARD_2_4);
+perf_stub_counter!(ANON_FAULT_LOCALITY_BACKWARD_1);
+perf_stub_counter!(ANON_FAULT_LOCALITY_OTHER);
+perf_stub_counter!(ANON_FAULT_LOCALITY_TASK_SWITCH);
 perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(FRAME_CONTIG_LOCK_WAIT_TICKS_MAX);
 perf_stub_counter!(FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL);
@@ -3790,8 +4731,36 @@ perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(HEAP_LOCK_WAIT_TICKS_MAX);
 perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_TOTAL);
 perf_stub_counter!(HEAP_LOCK_HOLD_TICKS_MAX);
+perf_stub_counter!(HEAP_ALLOC_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(HEAP_ALLOC_LOCK_HOLD_TICKS_TOTAL);
+perf_stub_counter!(HEAP_DEALLOC_LOCK_WAIT_TICKS_TOTAL);
+perf_stub_counter!(HEAP_DEALLOC_LOCK_HOLD_TICKS_TOTAL);
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_CALLS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_WAIT_TICKS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_HOLD_TICKS_BY_CPU: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_WAIT_HIST: [core::sync::atomic::AtomicUsize; HEAP_LOCK_HIST_BUCKETS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; HEAP_LOCK_HIST_BUCKETS];
+#[cfg(not(feature = "perf_stats"))]
+pub static HEAP_LOCK_HOLD_HIST: [core::sync::atomic::AtomicUsize; HEAP_LOCK_HIST_BUCKETS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; HEAP_LOCK_HIST_BUCKETS];
 perf_stub_counter!(HEAP_SLAB_ALLOC_CALLS);
+perf_stub_counter!(HEAP_SLAB_FAST_CALLS);
+perf_stub_counter!(HEAP_SLAB_REFILL_CALLS);
+perf_stub_counter!(HEAP_SLAB_FALLBACK_CALLS);
 perf_stub_counter!(HEAP_DIRECT_BUDDY_CALLS);
+perf_stub_counter!(HEAP_DIRECT_BUDDY_FAILURES);
+perf_stub_counter!(HEAP_ALLOC_RETRY_ATTEMPTS);
+perf_stub_counter!(HEAP_RECOVERY_ATTEMPTS);
+perf_stub_counter!(HEAP_RECOVERY_SUCCESSES);
+perf_stub_counter!(HEAP_ALLOC_FINAL_FAILURES);
+perf_stub_counter!(HEAP_ALLOC_REQUESTED_BYTES);
 perf_stub_counter!(HEAP_CLASS_8_CALLS);
 perf_stub_counter!(HEAP_CLASS_16_CALLS);
 perf_stub_counter!(HEAP_CLASS_32_CALLS);
@@ -3814,6 +4783,10 @@ perf_stub_counter!(WAKE_REMOTE);
 perf_stub_counter!(WAKE_KEEP_LAST_CPU);
 perf_stub_counter!(WAKE_SELECT_IDLE_CPU);
 perf_stub_counter!(WAKE_SELECT_LEAST_LOADED);
+perf_stub_counter!(WAKE_LAST_BUSY_IDLE_AVAILABLE);
+perf_stub_counter!(NEW_TASK_IDLE_AVAILABLE);
+perf_stub_counter!(NEW_TASK_SELECTED_IDLE);
+perf_stub_counter!(NEW_TASK_KEPT_BUSY_PARENT);
 perf_stub_counter!(WAKE_TO_RUN_TICKS_TOTAL);
 perf_stub_counter!(WAKE_TO_RUN_TICKS_MAX);
 perf_stub_counter!(TASK_RUN_SLICE_TICKS_TOTAL);
@@ -3851,6 +4824,22 @@ perf_stub_counter!(FILEMAP_RETRY_WAIT_TICKS_MAX);
 perf_stub_counter!(FILEMAP_REVALIDATE_RETRY);
 perf_stub_counter!(FILEMAP_REVALIDATE_VMA_CHANGED);
 perf_stub_counter!(FILEMAP_REVALIDATE_EOF_CHANGED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_CALLS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_REQUESTED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_MISSING);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_CLAIM_CONFLICTS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PUBLISHED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_PAGES_PREFETCHED);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_BACKEND_RUNS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_USEFUL_HITS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_UNUSED_DISCARDS);
+perf_stub_counter!(FILEMAP_FAULT_AROUND_ABORTS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_CALLS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_PAGES_EXAMINED);
+perf_stub_counter!(FILEMAP_PTE_AROUND_PAGES_MAPPED);
+perf_stub_counter!(FILEMAP_PTE_AROUND_NOT_READY_STOPS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_STATE_CONFLICTS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_CACHE_ERRORS);
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -4296,6 +5285,36 @@ pub fn record_virtio_dma_share(_kind: usize) {}
 pub fn record_virtio_dma_bridge_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_virtio_device_lock(_transport: usize, _wait_ticks: usize, _hold_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_device_lock_wait(_transport: usize, _wait_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_request(_transport: usize, _write: bool, _bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_commit_reason(_reason: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_flush_phase(_phase: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_direct_flush_reason(_reason: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_hit() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_miss() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_invalidation() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_pte_around_speculative_reuse() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_sata_read(_bytes: usize, _ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -4572,6 +5591,21 @@ pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
 #[cfg(not(feature = "perf_stats"))]
 pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_WITH_IPI: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_SAME_TASK_RESUMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPT_LAST_TID: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
 // ── Seccomp stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -4926,9 +5960,53 @@ perf_stub_counter!(VIRTIO_DMA_SHARE_HEADER_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_STATUS_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_FALLBACK);
 perf_stub_counter!(VIRTIO_DMA_SHARE_OTHER_FALLBACK);
+perf_stub_counter!(VIRTIO_DMA_SHARE_HEADER_POOL);
+perf_stub_counter!(VIRTIO_DMA_SHARE_STATUS_POOL);
+perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_POOL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX);
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_WAIT_TICKS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_HOLD_TICKS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_CALLS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_REQUEST_SIZE_READ: [[core::sync::atomic::AtomicUsize; 5]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_REQUEST_SIZE_WRITE: [[core::sync::atomic::AtomicUsize; 5]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_REASON_COUNTS: [core::sync::atomic::AtomicUsize; 5] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_FLUSH_PHASE_COUNTS: [core::sync::atomic::AtomicUsize; 4] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static DIRECT_FLUSH_REASON_COUNTS: [core::sync::atomic::AtomicUsize; 5] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_HITS);
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_MISSES);
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_INVALIDATIONS);
+perf_stub_counter!(EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES);
 
 #[cfg(not(feature = "perf_stats"))]
 pub static SATA_READ_REQS: core::sync::atomic::AtomicUsize =
@@ -5132,23 +6210,32 @@ pub static FILEMAP_FAULT_TICKS: core::sync::atomic::AtomicUsize =
 pub static FILEMAP_PRIVATE_COPY_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_MAP_USER_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_READ_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_READ_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_PRIVATE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_PRIVATE_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_SHARED_WRITE_FAULT_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_READY_HIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_READY_HIT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_NOT_READY_RETRY: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_NOT_READY_RETRY: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static FILEMAP_BACKEND_READ_UNDER_VM_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── TLB flush cycle stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -5175,44 +6262,62 @@ pub static EXECVE_INTERP_TICKS: core::sync::atomic::AtomicUsize =
 pub static EXECVE_STACK_TABLES_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXECVE_TEARDOWN_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_DIRECT_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_DIRECT_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_FALLBACK_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_FALLBACK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static EXEC_DIRECT_ENOSYS_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static EXEC_DIRECT_ENOSYS_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── Stage 0 VM/MM switch stubs ──
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_READ_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_WAIT_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_WRITE_LOCK_HOLD_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static VM_FLUSH_OUTSIDE_LOCK_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TASK_SWITCH_SAME_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TASK_SWITCH_SAME_MM: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
-pub static TASK_SWITCH_DIFFERENT_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static TASK_SWITCH_DIFFERENT_MM: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 // ── PF action names stub ──
 #[cfg(not(feature = "perf_stats"))]
-pub const PF_ACTION_NAMES: [&str; 7] = [
+pub const PF_ACTION_NAMES: [&str; 12] = [
     "LazyAlloc",
     "FileBackedRead",
     "FileBackedSharedWrite",
     "FileBackedWrite",
     "SharedWrite",
     "Cow",
-    "Other",
+    "ElfLazy",
+    "Decompress",
+    "SwapIn",
+    "StaleLazyPte",
+    "MappedRead",
+    "ResidentWithoutPte",
 ];
 
 #[cfg(not(feature = "perf_stats"))]
@@ -5224,5 +6329,5 @@ pub const PF_STAGE_NAMES: [&str; 8] = [
     "zero_copy",
     "tlb_flush",
     "trap_return",
-    "filemap_frame",
+    "frame_store",
 ];

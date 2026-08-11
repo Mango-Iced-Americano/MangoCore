@@ -5,7 +5,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::drivers::block::partition::{probe_mbr, MbrProbe, PartitionBlockDevice};
-use crate::drivers::block::{block_device_name, BlockDevice, BlockDeviceError, BlockDeviceNameStyle};
+use crate::drivers::block::{
+    block_device_name, BlockDevice, BlockDeviceError, BlockDeviceNameStyle,
+};
 use crate::fs::boot_block::partition_name;
 use crate::hal::BLOCK_SZ;
 use crate::kernel_tests::runner::KernelTest;
@@ -52,7 +54,10 @@ struct GptBlockDevice {
 
 impl BlockDevice for GptBlockDevice {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let block = self.blocks.get(block_id).ok_or(BlockDeviceError::OutOfBounds)?;
+        let block = self
+            .blocks
+            .get(block_id)
+            .ok_or(BlockDeviceError::OutOfBounds)?;
         if buf.len() != BLOCK_SZ {
             return Err(BlockDeviceError::OutOfBounds);
         }
@@ -86,8 +91,8 @@ fn protective_mbr_gpt_device(header_signature: [u8; 8]) -> Arc<dyn BlockDevice> 
 
     let entry = &mut blocks[0][1024..1024 + 128];
     entry[..16].copy_from_slice(&[
-        0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47,
-        0x7d, 0xe4,
+        0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d,
+        0xe4,
     ]);
     entry[32..40].copy_from_slice(&2048u64.to_le_bytes());
     entry[40..48].copy_from_slice(&4095u64.to_le_bytes());
@@ -192,7 +197,27 @@ pub fn tests() -> Vec<KernelTest> {
             "block_device::driver_name_styles_and_partition_separators",
             test_driver_name_styles_and_partition_separators,
         ),
+        KernelTest::new(
+            "block_device::virtio_dma_bridge_roundtrips_local_reservation",
+            test_virtio_dma_bridge_roundtrips_local_reservation,
+        ),
     ]
+}
+
+fn test_virtio_dma_bridge_roundtrips_local_reservation() -> Result<(), &'static str> {
+    use crate::drivers::block::virtio_dma_pool;
+
+    let _bridge = virtio_dma_pool::dma_bridge_lock();
+    let reservation = virtio_dma_pool::dma_pool_reserve(1)
+        .ok_or("VirtIO DMA pool unavailable for bridge test")?;
+    virtio_dma_pool::dma_bridge_set_reservation(Some(reservation));
+    let consumed = virtio_dma_pool::dma_bridge_take_data_reservation()
+        .ok_or("per-hart bridge lost its reservation")?;
+    if consumed.slot != reservation.slot || consumed.gen != reservation.gen {
+        return Err("per-hart bridge returned a different reservation");
+    }
+    virtio_dma_pool::dma_pool_cancel_reservation(consumed.slot, consumed.gen);
+    Ok(())
 }
 
 fn test_partition_read_error_propagates() -> Result<(), &'static str> {

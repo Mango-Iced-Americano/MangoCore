@@ -26,6 +26,8 @@ use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::mm::{frame_alloc, FrameTracker};
 use crate::mm::{FileVmaRmap, FileVmaSnapshot, RetryWait};
 use crate::task::perf;
+#[cfg(feature = "perf_stats")]
+use crate::task::BlockedReason;
 use crate::task::{WaitQueue, WaitResult};
 
 // ── Global dirty page accounting ──────────────────────────────────────
@@ -222,6 +224,9 @@ pub const MIN_RA_PAGES: usize = 4;
 pub const MAX_RA_PAGES: usize = 128;
 /// Backend staging has one MiB maximum, including explicit ELF prefetches.
 pub const MAX_BATCH_READ_PAGES: usize = 256;
+/// Demand faults use a bounded contiguous staging window.  Keeping this at
+/// 64 KiB limits transient memory while still amortizing backend request setup.
+pub const MAX_DEMAND_READ_PAGES: usize = 16;
 
 impl RaState {
     pub fn new() -> Self {
@@ -269,6 +274,20 @@ pub trait PageCacheBackend: Send + Sync {
         Ok(pages.len() * PAGE_SIZE)
     }
 
+    /// 批量读取一段页对齐的连续字节。
+    ///
+    /// 默认实现按页回退，后端可以覆盖此方法把整段读取直接交给文件系统
+    /// 或块设备。`buffer` 长度必须是 PAGE_SIZE 的整数倍。
+    fn read_contiguous(&self, start_index: usize, buffer: &mut [u8]) -> Result<usize, SyscallErr> {
+        if buffer.len() % PAGE_SIZE != 0 {
+            return Err(SyscallErr::ENOBUFS);
+        }
+        for (i, page) in buffer.chunks_exact_mut(PAGE_SIZE).enumerate() {
+            self.read_page(start_index + i, page)?;
+        }
+        Ok(buffer.len())
+    }
+
     /// 返回后端的页数
     fn npages(&self) -> usize;
 
@@ -291,6 +310,9 @@ const PG_ERROR: u32 = 1 << 4;
 pub const PG_REFERENCED: u32 = 1 << 5;
 /// 页面在写回期间被再次标记为脏（写回完成后应恢复为 Dirty）
 pub const PG_REDIRTIED: u32 = 1 << 6;
+/// Page admitted speculatively by filemap fault-around and not demanded yet.
+const PG_FILEMAP_READAHEAD: u32 = 1 << 7;
+const PG_ORTHOGONAL: u32 = PG_REFERENCED | PG_REDIRTIED | PG_FILEMAP_READAHEAD;
 
 // ── PageEntry ────────────────────────────────────────────────────────────
 
@@ -345,7 +367,7 @@ impl PageEntry {
         let state_flags = Self::flags_for_state(state);
         let mut old = self.flags.load(Ordering::Acquire);
         loop {
-            let desired = state_flags | (old & (PG_REFERENCED | PG_REDIRTIED));
+            let desired = state_flags | (old & PG_ORTHOGONAL);
             match self
                 .flags
                 .compare_exchange(old, desired, Ordering::AcqRel, Ordering::Acquire)
@@ -396,7 +418,7 @@ impl PageEntry {
             if Self::decode_state(raw) != old {
                 return Err(raw);
             }
-            let desired = Self::flags_for_state(new) | (raw & (PG_REFERENCED | PG_REDIRTIED));
+            let desired = Self::flags_for_state(new) | (raw & PG_ORTHOGONAL);
             match self
                 .flags
                 .compare_exchange(raw, desired, Ordering::AcqRel, Ordering::Acquire)
@@ -555,6 +577,22 @@ impl PageEntry {
         self.flags.fetch_or(PG_REFERENCED, Ordering::Release);
     }
 
+    fn mark_filemap_readahead(&self) {
+        self.set_flag(PG_FILEMAP_READAHEAD);
+    }
+
+    fn consume_filemap_readahead(&self) {
+        if self.test_and_clear_flag(PG_FILEMAP_READAHEAD) {
+            crate::task::perf::record_filemap_fault_around_useful_hit();
+        }
+    }
+
+    fn discard_filemap_readahead(&self) {
+        if self.test_and_clear_flag(PG_FILEMAP_READAHEAD) {
+            crate::task::perf::record_filemap_fault_around_unused_discard();
+        }
+    }
+
     /// 在 data 读锁存续期间向闭包提供页字节；借用不能逃出闭包。
     fn with_bytes<R>(&self, f: impl for<'a> FnOnce(&'a [u8]) -> R) -> R {
         let _data = self.data.read();
@@ -690,6 +728,13 @@ pub struct PageCache {
     inode: Mutex<Option<Weak<dyn IndexNode>>>,
     /// 缓存的页面条目
     entries: Mutex<Vec<Option<Arc<PageEntry>>>>,
+    /// Pages claimed by a lock-outside batch read but not published yet.
+    ///
+    /// This ownership directory is intentionally separate from `entries`:
+    /// ordinary PageCache readers must never observe an uninitialised frame.
+    /// Concurrent fault-around workers use it to coalesce the same miss and
+    /// sleep on `state_wait_generation` until the owner publishes or aborts.
+    batch_read_claims: Mutex<BTreeSet<usize>>,
     /// true = 页不可回收（用于 tmpfs/shmem，数据无持久化后端）
     unevictable: AtomicBool,
     /// Clock sweep 光标（second-chance eviction）
@@ -713,6 +758,7 @@ pub struct PageCache {
 struct PageCacheFaultWait {
     cache: Arc<PageCache>,
     page_index: usize,
+    fault_around_pages: usize,
 }
 
 /// 写入路径各阶段（lookup/lease/copy/commit）的周期累计，用于 perf 分阶段计时。
@@ -737,13 +783,52 @@ impl From<SyscallErr> for WriteAttemptError {
 
 impl RetryWait for PageCacheFaultWait {
     fn wait(&self) {
-        let wait_start = crate::task::perf::perf_time_now_for(
-            crate::task::perf::STATS_PROFILE_MEMORY_IO,
-        );
+        let wait_start =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
         // 此处由 trap/uaccess 外层保证已经释放 VM 锁。I/O 仍可在 op_gate
         // 读侧完成，但任何睡眠都必须发生在释放 op_gate 之后。
+        let mut fault_around_attempted = false;
         loop {
+            if !fault_around_attempted && self.fault_around_pages > 1 {
+                fault_around_attempted = true;
+                // Speculative failures must not turn a valid demand fault into
+                // an error. The single-page path below remains authoritative.
+                let _ = self
+                    .cache
+                    .sync_filemap_fault_around(self.page_index, self.fault_around_pages);
+            }
             let observed = self.cache.state_wait_generation.load(Ordering::Acquire);
+            // Another fault-around worker may own this miss while its backend
+            // I/O is deliberately outside PageCache locks.  Do not fall
+            // through to the authoritative single-page loader and duplicate
+            // that read; the owner always publishes or releases before
+            // advancing the shared state generation.
+            if self
+                .cache
+                .batch_read_claims
+                .lock()
+                .contains(&self.page_index)
+            {
+                if self.cache.wait_for_state_progress(observed).is_err() {
+                    crate::task::perf::record_filemap_retry_wait(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(wait_start),
+                    );
+                    return;
+                }
+                continue;
+            }
+            let may_load = self
+                .cache
+                .entries
+                .lock()
+                .get(self.page_index)
+                .and_then(Option::as_ref)
+                .map_or(true, |entry| !entry.is_fully_valid());
+            let backend_start =
+                crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             let result = {
                 let _op = self.cache.op_gate.read();
                 self.cache
@@ -757,6 +842,15 @@ impl RetryWait for PageCacheFaultWait {
                         }
                     })
             };
+            if may_load {
+                crate::task::perf::record_filemap_backend_read(
+                    crate::task::perf::perf_time_now_for(
+                        crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                    )
+                    .wrapping_sub(backend_start),
+                    false,
+                );
+            }
             match result {
                 Ok(()) | Err(SyscallErr::EIO) => {
                     crate::task::perf::record_filemap_retry_wait(
@@ -803,6 +897,7 @@ impl PageCache {
         Arc::new(PageCacheFaultWait {
             cache: Arc::clone(self),
             page_index,
+            fault_around_pages: 1,
         })
     }
 
@@ -816,6 +911,7 @@ impl PageCache {
             backend: Mutex::new(None),
             inode: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
+            batch_read_claims: Mutex::new(BTreeSet::new()),
             unevictable: AtomicBool::new(false),
             clock_hand: AtomicUsize::new(0),
             async_writeback_requested: AtomicBool::new(false),
@@ -840,6 +936,9 @@ impl PageCache {
             return Err(SyscallErr::EAGAIN);
         }
         self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "perf_stats")]
+        let _blocked_reason = crate::task::current_task()
+            .map(|task| task.blocked_reason_scope(BlockedReason::PageCache));
         let result = match WaitQueue::wait_event(&self.state_waiters, || {
             (self.state_wait_generation.load(Ordering::Acquire) != observed).then_some(0)
         }) {
@@ -851,11 +950,26 @@ impl PageCache {
         result
     }
 
+    fn release_batch_read_claims(&self, claimed: &[usize]) {
+        if claimed.is_empty() {
+            return;
+        }
+        let mut claims = self.batch_read_claims.lock();
+        for page_index in claimed {
+            claims.remove(page_index);
+        }
+        drop(claims);
+        self.notify_state_progress();
+    }
+
     fn wait_for_write_lease(&self, entry: &PageEntry) -> Result<(), SyscallErr> {
         if crate::task::current_task().is_none() {
             return Err(SyscallErr::EAGAIN);
         }
         self.state_waiter_count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(feature = "perf_stats")]
+        let _blocked_reason = crate::task::current_task()
+            .map(|task| task.blocked_reason_scope(BlockedReason::PageCache));
         let result = match WaitQueue::wait_event_interruptible(&self.state_waiters, || {
             entry.write_lease_ready().then_some(0)
         }) {
@@ -1051,6 +1165,7 @@ impl PageCache {
             }
 
             // Safe to evict
+            entry.discard_filemap_readahead();
             entries[idx] = None;
             removed_indices.push(idx);
             crate::task::perf::record_clock_evicted(1);
@@ -1281,7 +1396,9 @@ impl PageCache {
     /// 内存分配失败返回 `ENOMEM`；后端读取失败透传后端错误。
     fn get_page_for_read(&self, page_index: usize) -> Result<Arc<PageEntry>, SyscallErr> {
         // 读取路径：始终 populate（old_file_size=None → 全量从后端加载），后续 ensure_fully_valid 补齐空洞
-        self.get_or_create_entry(page_index, true, None)
+        let entry = self.get_or_create_entry(page_index, true, None)?;
+        entry.consume_filemap_readahead();
+        Ok(entry)
     }
 
     /// 获取页面用于写入，可选择是否从后端 populate。
@@ -1303,6 +1420,7 @@ impl PageCache {
             .unwrap_or(false);
         let populate = !full_overwrite && !beyond_eof;
         let entry = self.get_or_create_entry(page_index, populate, old_file_size)?;
+        entry.consume_filemap_readahead();
         Ok(entry)
     }
 
@@ -1356,7 +1474,10 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         let state = entry.state();
         match state {
-            PageState::UpToDate | PageState::Dirty => Ok(entry.page.clone()),
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                Ok(entry.page.clone())
+            }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
         }
@@ -1377,6 +1498,7 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
                     let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
@@ -1386,6 +1508,113 @@ impl PageCache {
             }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// VM-lock-safe filemap read admission. This path never starts backend
+    /// I/O: a missing, partial or transient page becomes a Retry token whose
+    /// `wait()` method runs after the address-space lock is released.
+    pub(crate) fn try_frame_for_filemap_read(
+        self: &Arc<Self>,
+        page_index: usize,
+        authoritative_eof: usize,
+    ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        self.try_frame_for_filemap_read_ahead(page_index, authoritative_eof, 1)
+    }
+
+    /// VM-lock-safe filemap read admission with a bounded forward window.
+    /// The current page is always first; speculative pages are only loaded by
+    /// the Retry token after the address-space lock has been released.
+    pub(crate) fn try_frame_for_filemap_read_ahead(
+        self: &Arc<Self>,
+        page_index: usize,
+        authoritative_eof: usize,
+        fault_around_pages: usize,
+    ) -> Result<Arc<FrameTracker>, PageCacheFault> {
+        let fault_around_pages = fault_around_pages.clamp(1, MAX_DEMAND_READ_PAGES);
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+                fault_around_pages,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    entry.with_bytes_mut(|bytes| bytes[tail_start..].fill(0));
+                }
+                Ok(entry.page.clone())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
+        }
+    }
+
+    /// Return an already-resident filemap page without creating an entry or
+    /// starting backend I/O.
+    ///
+    /// This is the speculative half of PTE fault-around. The demand page uses
+    /// [`Self::try_frame_for_filemap_read_ahead`] so a miss can return a
+    /// lock-outside retry token; adjacent pages use this method and simply stop
+    /// at the first cache miss/transient state. In particular, this method must
+    /// remain safe while the caller holds its address-space lock.
+    pub(crate) fn try_resident_frame_for_filemap_map(
+        &self,
+        page_index: usize,
+        authoritative_eof: usize,
+    ) -> Result<Option<Arc<FrameTracker>>, SyscallErr> {
+        let Some(_op) = self.op_gate.try_read() else {
+            return Ok(None);
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Ok(None);
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                // Mapping an already resident adjacent page is speculative;
+                // do not classify it as a useful backend readahead hit.
+                crate::task::perf::record_filemap_pte_around_speculative_reuse();
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    entry.with_bytes_mut(|bytes| bytes[tail_start..].fill(0));
+                }
+                Ok(Some(entry.page.clone()))
+            }
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::Loading | PageState::Writeback => Ok(None),
         }
     }
 
@@ -1407,6 +1636,7 @@ impl PageCache {
         self.ensure_fully_valid(page_index)?;
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 entry.with_bytes(|src| dst.copy_from_slice(src));
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
@@ -1417,6 +1647,110 @@ impl PageCache {
             }
             PageState::Error => Err(SyscallErr::EIO),
             PageState::Loading | PageState::Writeback => Err(SyscallErr::EAGAIN),
+        }
+    }
+
+    /// VM-lock-safe private-fault copy. Like the shared read admission above,
+    /// it copies only an already-resident page and delegates all loading to a
+    /// lock-outside Retry token.
+    pub(crate) fn try_copy_page_for_private(
+        self: &Arc<Self>,
+        page_index: usize,
+        dst: &mut [u8],
+        authoritative_eof: usize,
+    ) -> Result<(), PageCacheFault> {
+        if dst.len() != PAGE_SIZE {
+            return Err(PageCacheFault::Error(SyscallErr::EINVAL));
+        }
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+                fault_around_pages: 1,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                entry.with_bytes(|src| dst.copy_from_slice(src));
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    dst[tail_start..].fill(0);
+                }
+                Ok(())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
+        }
+    }
+
+    /// Copy a byte range from an already-resident page without starting I/O.
+    ///
+    /// ELF demand paging uses this while the address-space write lock is held.
+    /// Missing or transient pages therefore return a Retry token; its `wait()`
+    /// performs the backend read after the VM lock has been released.
+    pub(crate) fn try_copy_resident_range(
+        self: &Arc<Self>,
+        page_index: usize,
+        page_offset: usize,
+        dst: &mut [u8],
+    ) -> Result<(), PageCacheFault> {
+        let range_end = page_offset
+            .checked_add(dst.len())
+            .ok_or_else(|| PageCacheFault::Error(SyscallErr::EINVAL))?;
+        if range_end > PAGE_SIZE {
+            return Err(PageCacheFault::Error(SyscallErr::EINVAL));
+        }
+        let retry = || {
+            PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
+                cache: self.clone(),
+                page_index,
+                fault_around_pages: 1,
+            }))
+        };
+        let Some(_op) = self.op_gate.try_read() else {
+            return Err(retry());
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Err(retry());
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Err(retry());
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                entry.with_bytes(|src| dst.copy_from_slice(&src[page_offset..range_end]));
+                Ok(())
+            }
+            PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
+            PageState::Loading | PageState::Writeback => Err(retry()),
         }
     }
 
@@ -1448,6 +1782,7 @@ impl PageCache {
                 _ => Err(SyscallErr::EIO),
             };
         }
+        entry.consume_filemap_readahead();
         self.mark_dirty_after_copy(page_index, &entry);
         Ok(entry.page.clone())
     }
@@ -1462,6 +1797,7 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         };
         let entry = self
@@ -1474,6 +1810,7 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         };
         if !entry.is_fully_valid()
@@ -1483,10 +1820,12 @@ impl PageCache {
             return Err(PageCacheFault::Retry(Arc::new(PageCacheFaultWait {
                 cache: self.clone(),
                 page_index,
+                fault_around_pages: 1,
             })));
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
                 self.mark_dirty_after_copy(page_index, &entry);
                 Ok(entry.page.clone())
             }
@@ -1611,7 +1950,7 @@ impl PageCache {
         plan
     }
 
-    /// Fill contiguous missing page runs using backend.read_page().
+    /// Fill contiguous missing page runs using bounded contiguous backend reads.
     /// Uses publish-after-I/O pattern: create UpToDate entries, fill via I/O, then publish.
     fn fill_miss_runs(&self, runs: &[MissRun]) -> Result<(), SyscallErr> {
         // Backend I/O runs outside op_gate so a backend can re-enter this
@@ -1633,14 +1972,37 @@ impl PageCache {
                 ));
             }
 
-            // 2. 未发布 entry 的字节仍必须经 data 写锁初始化；不能把裸 slice
-            // 暴露给批量 I/O API 后跨越锁作用域。
-            for (page_index, entry) in &new_entries {
-                if *page_index < backend_npages {
-                    entry.with_bytes_mut(|buf| backend.read_page(*page_index, buf))?;
+            // 2. Read at most 64 KiB at a time. The staging buffer is owned by
+            // this scope, so backend I/O remains outside PageEntry locks and
+            // no raw page slices escape into a re-entrant backend callback.
+            let mut offset = 0;
+            while offset < run.count {
+                let chunk_pages = (run.count - offset).min(MAX_DEMAND_READ_PAGES);
+                let first_page = run.start_page + offset;
+                let readable_pages = if first_page < backend_npages {
+                    chunk_pages.min(backend_npages - first_page)
+                } else {
+                    0
+                };
+                let mut staging = Vec::new();
+                staging
+                    .try_reserve_exact(chunk_pages * PAGE_SIZE)
+                    .map_err(|_| SyscallErr::ENOMEM)?;
+                staging.resize(chunk_pages * PAGE_SIZE, 0);
+                if readable_pages != 0 {
+                    backend
+                        .read_contiguous(first_page, &mut staging[..readable_pages * PAGE_SIZE])?;
                 }
-                entry.valid_mask.store(VALID_ALL, Ordering::Release);
-                perf::record_pc_miss();
+                for index in 0..chunk_pages {
+                    let entry = &new_entries[offset + index].1;
+                    let start = index * PAGE_SIZE;
+                    entry.with_bytes_mut(|buf| {
+                        buf.copy_from_slice(&staging[start..start + PAGE_SIZE]);
+                    });
+                    entry.valid_mask.store(VALID_ALL, Ordering::Release);
+                    perf::record_pc_miss();
+                }
+                offset += chunk_pages;
             }
 
             if generation != self.mutation_generation.load(Ordering::Acquire) {
@@ -2534,6 +2896,35 @@ impl PageCache {
             return Ok(read);
         }
 
+        self.sync_batch_read_pages_inner(start_page, count, None)
+    }
+
+    /// Populate one bounded forward filemap window. The demand page remains
+    /// authoritative; all pages after it are tagged until first use so the
+    /// diagnostic stream can distinguish useful fault-around from waste.
+    fn sync_filemap_fault_around(
+        &self,
+        start_page: usize,
+        count: usize,
+    ) -> Result<usize, SyscallErr> {
+        let count = count.clamp(1, MAX_DEMAND_READ_PAGES);
+        crate::task::perf::record_filemap_fault_around_start(count);
+        let result = self.sync_batch_read_pages_inner(start_page, count, Some(start_page));
+        if result.is_err() {
+            crate::task::perf::record_filemap_fault_around_abort();
+        }
+        result
+    }
+
+    fn sync_batch_read_pages_inner(
+        &self,
+        start_page: usize,
+        count: usize,
+        filemap_demand_page: Option<usize>,
+    ) -> Result<usize, SyscallErr> {
+        debug_assert!(count <= MAX_BATCH_READ_PAGES);
+        let end_page = start_page.checked_add(count).ok_or(SyscallErr::EFBIG)?;
+
         // Readahead uses the same lock-free backend phase as batch misses so
         // a backend callback can re-enter this cache.  Generation validation
         // prevents stale pages from being published after truncate.
@@ -2545,99 +2936,146 @@ impl PageCache {
         };
         let backend_npages = backend.npages();
 
-        // Phase 1: 收集需要新建的页面，已缓存的跳过
+        // Phase 1: atomically claim cache misses before allocating frames or
+        // starting backend I/O.  A second batch reader skips claimed pages;
+        // its demand fault waits for state progress instead of issuing the
+        // same read again.
+        let mut claimed = Vec::new();
+        let mut claim_conflicts = 0usize;
+        {
+            let entries = self.entries.lock();
+            let mut claims = self.batch_read_claims.lock();
+            for page_index in start_page..end_page {
+                if page_index < entries.len() && entries[page_index].is_some() {
+                    continue;
+                }
+                if claims.insert(page_index) {
+                    claimed.push(page_index);
+                } else {
+                    claim_conflicts += 1;
+                }
+            }
+        }
+        if filemap_demand_page.is_some() {
+            crate::task::perf::record_filemap_fault_around_missing(claimed.len());
+            crate::task::perf::record_filemap_fault_around_claim_conflict(claim_conflicts);
+        }
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+
         struct PendingPage {
             index: usize, // absolute page index
             entry: Arc<PageEntry>,
         }
-        let mut pending: Vec<PendingPage> = Vec::new();
-        {
-            let entries = self.entries.lock();
-            for page_index in start_page..start_page + count {
-                // 跳过已缓存的页面
-                if page_index < entries.len() && entries[page_index].is_some() {
-                    continue;
-                }
-                // 分配新帧（frame_alloc 返回零填充页）
-                let frame = match frame_alloc() {
-                    Some(f) => f,
-                    None => return Err(SyscallErr::ENOMEM),
-                };
-                let entry = Arc::new(PageEntry::new(frame, PageState::Loading));
+        let result = (|| -> Result<(usize, usize), SyscallErr> {
+            let mut pending: Vec<PendingPage> = Vec::new();
+            pending
+                .try_reserve_exact(claimed.len())
+                .map_err(|_| SyscallErr::ENOMEM)?;
+            for &page_index in &claimed {
+                let frame = frame_alloc().ok_or(SyscallErr::ENOMEM)?;
                 pending.push(PendingPage {
                     index: page_index,
-                    entry,
+                    entry: Arc::new(PageEntry::new(frame, PageState::Loading)),
                 });
             }
-        }
 
-        if pending.is_empty() {
-            return Ok(0);
-        }
-
-        // Phase 2: group contiguous misses and let the backend perform one
-        // logical read_pages call per run. The temporary staging buffer keeps
-        // PageEntry data locks short and permits the backend I/O to remain
-        // outside op_gate/entries locks.
-        let mut cursor = 0;
-        while cursor < pending.len() {
-            if pending[cursor].index >= backend_npages {
-                pending[cursor].entry.with_bytes_mut(|bytes| bytes.fill(0));
+            // Phase 2: group contiguous claimed misses and let the backend
+            // perform one logical read_pages call per run.  Staging keeps
+            // backend callbacks outside PageEntry and PageCache locks.
+            let mut cursor = 0;
+            while cursor < pending.len() {
+                if pending[cursor].index >= backend_npages {
+                    pending[cursor].entry.with_bytes_mut(|bytes| bytes.fill(0));
+                    cursor += 1;
+                    continue;
+                }
+                let run_begin = cursor;
                 cursor += 1;
-                continue;
+                while cursor < pending.len()
+                    && pending[cursor].index < backend_npages
+                    && pending[cursor].index == pending[cursor - 1].index + 1
+                {
+                    cursor += 1;
+                }
+                let run_len = cursor - run_begin;
+                let mut staging = Vec::new();
+                staging
+                    .try_reserve_exact(run_len * PAGE_SIZE)
+                    .map_err(|_| SyscallErr::ENOMEM)?;
+                staging.resize(run_len * PAGE_SIZE, 0);
+                let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
+                let backend_start = crate::task::perf::perf_time_now_for(
+                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                );
+                let backend_result = backend.read_pages(pending[run_begin].index, &mut buffers);
+                if filemap_demand_page.is_some() {
+                    crate::task::perf::record_filemap_backend_read(
+                        crate::task::perf::perf_time_now_for(
+                            crate::task::perf::STATS_PROFILE_MEMORY_IO,
+                        )
+                        .wrapping_sub(backend_start),
+                        false,
+                    );
+                    crate::task::perf::record_filemap_fault_around_backend_run();
+                }
+                backend_result?;
+                drop(buffers);
+                for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
+                    let start = offset * PAGE_SIZE;
+                    pending_page.entry.with_bytes_mut(|buf| {
+                        buf.copy_from_slice(&staging[start..start + PAGE_SIZE])
+                    });
+                }
             }
-            let run_begin = cursor;
-            cursor += 1;
-            while cursor < pending.len()
-                && pending[cursor].index < backend_npages
-                && pending[cursor].index == pending[cursor - 1].index + 1
+
+            if generation != self.mutation_generation.load(Ordering::Acquire) {
+                return Err(SyscallErr::EAGAIN);
+            }
+
+            // Phase 3: publish only while the mutation generation remains
+            // stable.  A direct reader that won independently remains
+            // authoritative; the claimed batch never overwrites it.
+            let mut published_pages = 0;
+            let mut prefetched_pages = 0;
+            let track_use = filemap_demand_page.is_some()
+                && crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             {
-                cursor += 1;
-            }
-            let run_len = cursor - run_begin;
-            let mut staging = Vec::new();
-            staging
-                .try_reserve_exact(run_len * PAGE_SIZE)
-                .map_err(|_| SyscallErr::ENOMEM)?;
-            staging.resize(run_len * PAGE_SIZE, 0);
-            let mut buffers: Vec<&mut [u8]> = staging.chunks_mut(PAGE_SIZE).collect();
-            backend.read_pages(pending[run_begin].index, &mut buffers)?;
-            drop(buffers);
-            for (offset, pending_page) in pending[run_begin..cursor].iter().enumerate() {
-                let start = offset * PAGE_SIZE;
-                pending_page
-                    .entry
-                    .with_bytes_mut(|buf| buf.copy_from_slice(&staging[start..start + PAGE_SIZE]));
-            }
-        }
-
-        if generation != self.mutation_generation.load(Ordering::Acquire) {
-            return Err(SyscallErr::EAGAIN);
-        }
-
-        // Phase 4: 标记 UpToDate 并插入到 entries
-        {
-            let mut entries = self.entries.lock();
-            let mut inner = self.inner.lock();
-            for p in &pending {
-                // 扩展 entries 数组
-                while entries.len() <= p.index {
-                    entries.push(None);
+                let mut entries = self.entries.lock();
+                if generation != self.mutation_generation.load(Ordering::Acquire) {
+                    return Err(SyscallErr::EAGAIN);
                 }
-                // A fault/direct reader can populate (and even dirty) this
-                // slot while readahead I/O is in flight only after op_gate
-                // is released. Never overwrite that
-                // winner: doing so would detach its dirty data while leaving
-                // dirty accounting pointed at this index.
-                if entries[p.index].is_none() {
-                    p.entry.set_state(PageState::UpToDate);
-                    entries[p.index] = Some(p.entry.clone());
-                    inner.pages.insert(p.index);
+                let mut inner = self.inner.lock();
+                for p in &pending {
+                    while entries.len() <= p.index {
+                        entries.push(None);
+                    }
+                    if entries[p.index].is_none() {
+                        p.entry.set_state(PageState::UpToDate);
+                        if track_use && filemap_demand_page != Some(p.index) {
+                            p.entry.mark_filemap_readahead();
+                            prefetched_pages += 1;
+                        }
+                        entries[p.index] = Some(p.entry.clone());
+                        inner.pages.insert(p.index);
+                        published_pages += 1;
+                    }
                 }
             }
-        }
-        self.notify_state_progress();
+            Ok((published_pages, prefetched_pages))
+        })();
 
+        // Every exit after claiming pages must release ownership and wake
+        // waiters, including allocation/backend errors and generation races.
+        self.release_batch_read_claims(&claimed);
+        let (published_pages, prefetched_pages) = result?;
+        if filemap_demand_page.is_some() {
+            crate::task::perf::record_filemap_fault_around_publish(
+                published_pages,
+                prefetched_pages,
+            );
+        }
         Ok(count * PAGE_SIZE)
     }
 
@@ -3123,6 +3561,7 @@ impl PageCache {
             let mut inner = self.inner.lock();
             for page_index in hole_start_page..entries.len() {
                 if let Some(entry) = entries[page_index].take() {
+                    entry.discard_filemap_readahead();
                     if entry.state() == PageState::Dirty {
                         GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -3168,6 +3607,7 @@ impl PageCache {
                 continue;
             }
             if let Some(entry) = entries[page_index].take() {
+                entry.discard_filemap_readahead();
                 if entry.state() == PageState::Dirty {
                     GLOBAL_DIRTY_PAGES.fetch_sub(1, Ordering::Relaxed);
                 }
@@ -3218,8 +3658,8 @@ impl PageCache {
 
         let end = core::cmp::min(end_index, entries.len());
         for page_index in start_index..end {
-            if entries[page_index].is_some() {
-                entries[page_index] = None;
+            if let Some(entry) = entries[page_index].take() {
+                entry.discard_filemap_readahead();
                 inner.pages.remove(&page_index);
                 invalidated += 1;
             }
@@ -3505,8 +3945,9 @@ impl PageCacheBackend for FatPageCacheBackend {
                     let (block_id, block_off_bytes) = self.sector_to_parent(sec_id);
                     let mut block = alloc::vec![0u8; crate::hal::BLOCK_SZ];
                     self.fs.block_device.read_block(block_id, &mut block);
-                    buf[start..start + self.block_size]
-                        .copy_from_slice(&block[block_off_bytes..block_off_bytes + self.block_size]);
+                    buf[start..start + self.block_size].copy_from_slice(
+                        &block[block_off_bytes..block_off_bytes + self.block_size],
+                    );
                 }
                 None => {
                     buf[start..start + self.block_size].fill(0);

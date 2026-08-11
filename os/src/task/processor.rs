@@ -560,6 +560,7 @@ pub fn run_tasks() -> ! {
     }
 
     let mut schedule_tick = 0usize;
+    let mut last_prezero_tick_deadline = 0u64;
     // 与 AP 一样让 idle 调度边界始终从 IRQ-off 开始。每轮只打开一个短窗口
     // 交付已经 pending 的 hard IRQ，完整维护仍在关中断 idle 栈上执行。
     let _ = crate::hal::local_irq_save();
@@ -631,6 +632,11 @@ pub fn run_tasks() -> ! {
             dispatch_task(cpu, task_state, task, sched_profile, loop_t0);
         } else {
             // 没有就绪的任务 → CPU idle
+            let tick_deadline = crate::smp::local_sched_tick_deadline();
+            if tick_deadline != last_prezero_tick_deadline {
+                last_prezero_tick_deadline = tick_deadline;
+                let _ = crate::mm::idle_prezero_refill();
+            }
             let stage_t0 = sched_profile_start(sched_profile);
             super::perf::record_scheduler_idle(cpu, true);
             sched_record_stage(
@@ -659,6 +665,7 @@ pub fn run_tasks() -> ! {
 /// AP 上的 timer callback 不会进入共享子系统；普通用户任务仍需等待共享 FS/net/
 /// driver 审计完成后再解除默认 CPU0 affinity。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
+    let mut timer_parked = false;
     let _ = crate::hal::local_irq_save();
     loop {
         // 短暂打开全局 IRQ，使已经 pending 的 IPI 进入 hard handler；随后
@@ -670,6 +677,9 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         // timer hard IRQ 与 IPI 一样只发布无锁状态；在 idle 栈、尚未取得
         // runqueue/processor 锁时推进本地 tick 并重编程 one-shot。
         let _ = super::run_deferred_timer_work();
+        if crate::mm::take_idle_prezero_refill_request() {
+            let _ = crate::mm::idle_prezero_refill_batch();
+        }
         // 上一任务已经切回本 CPU idle 栈；只在这里释放本地 zombie Arc，
         // 避免 AP 退出路径再竞争全局 TaskManager 或等待 CPU0 代为回收。
         let _ = drain_local_zombies(cpu, 64);
@@ -679,11 +689,22 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         let next_task = super::run_queue::fetch_or_steal(cpu);
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
+            if timer_parked {
+                super::manager::restart_secondary_sched_timer();
+                timer_parked = false;
+            }
             dispatch_task(cpu, task_state, task, false, 0);
         } else {
+            if !timer_parked {
+                // Fill a useful initial reserve before removing the periodic
+                // tick.  Later low-water notifications wake one AP with an IPI.
+                let _ = crate::mm::idle_prezero_refill_batch();
+                super::manager::park_secondary_idle_timer();
+                timer_parked = true;
+            }
             super::perf::record_task_switch_idle_no_next();
-            // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
-            // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
+            // 关中断检查到空队列后再 wait；AP timer 此时已经停表。并发任务
+            // 发布和 prezero 低水位通知都先发布状态、后发 IPI，因此不会丢失。
             super::perf::record_scheduler_idle(cpu, true);
             crate::hal::cpu_wait_for_interrupt();
         }
@@ -720,6 +741,7 @@ fn dispatch_task(
     task_state
         .current_tid
         .store(task.gettid(), Ordering::Relaxed);
+    crate::task::perf::record_dispatch_after_timer_preemption(cpu, task.gettid());
     processor.current = Some(task);
     // 先写入权威 current 槽再发布负载提示；提示的瞬时误差只影响放置质量，
     // 不参与 owner 正确性判断。
@@ -983,6 +1005,16 @@ pub fn current_syscall_name() -> &'static str {
     match task_state.current_syscall_id.load(Ordering::Relaxed) {
         0 => "<none>",
         id => crate::syscall::syscall_name(id - 1),
+    }
+}
+
+/// 返回当前 CPU 正在处理的 syscall ID，仅供低频诊断记账。
+#[inline(always)]
+pub(crate) fn current_syscall_id() -> Option<usize> {
+    let task_state = crate::smp::try_local_task_state()?;
+    match task_state.current_syscall_id.load(Ordering::Relaxed) {
+        0 => None,
+        id => Some(id - 1),
     }
 }
 
