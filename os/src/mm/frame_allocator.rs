@@ -21,7 +21,7 @@ use crate::task::current_task;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use lazy_static::*;
 use spin::RwLock;
 
@@ -29,7 +29,9 @@ use spin::RwLock;
 /// faults.  The pool is deliberately small relative to the 8 GiB BuildStorm
 /// guest and is disabled under memory pressure.
 pub const PREZERO_POOL_HIGH_WATER: usize = 256;
+const PREZERO_POOL_LOW_WATER: usize = PREZERO_POOL_HIGH_WATER / 2;
 const PREZERO_REFILL_PER_IDLE_TICK: usize = 2;
+const PREZERO_REFILL_PER_IDLE_WAKE: usize = 32;
 const PREZERO_MIN_FREE_FRAMES: usize = 2048;
 const PREZERO_POLICY_UNINITIALIZED: u8 = 0;
 const PREZERO_POLICY_IDLE: u8 = 1;
@@ -37,6 +39,8 @@ const PREZERO_POLICY_QUIESCENT: u8 = 2;
 const PREZERO_POLICY_OFF: u8 = 3;
 
 static PREZERO_POLICY: AtomicU8 = AtomicU8::new(PREZERO_POLICY_UNINITIALIZED);
+/// A low-water notification is coalesced until one idle AP claims it.
+static PREZERO_REFILL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn parse_prezero_policy() -> u8 {
     crate::bootargs::get_cmdline()
@@ -95,6 +99,43 @@ fn prezero_refill_allowed() -> bool {
         }
         _ => true,
     }
+}
+
+/// Wake one genuinely idle AP after demand allocation drains the prezero pool.
+/// The allocator lock has already been released before this function sends an
+/// IPI, so scheduler and allocator lock ordering cannot cycle.
+fn request_idle_prezero_refill(remaining: usize) {
+    if remaining >= PREZERO_POOL_LOW_WATER {
+        return;
+    }
+
+    let online = crate::smp::online_cpu_mask();
+    let schedulers = crate::smp::scheduler_cpu_mask();
+    let stopped = crate::smp::stopped_cpu_mask();
+    let available_aps = online & schedulers & !stopped & !1usize;
+    // Early boot allocations occur before any AP scheduler exists.  Avoid
+    // consulting bootargs or publishing a request until somebody can serve it.
+    if available_aps == 0
+        || prezero_policy() != PREZERO_POLICY_IDLE
+        || PREZERO_REFILL_REQUESTED.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    for cpu in 1..crate::smp::configured_cpu_count() {
+        let bit = 1usize << cpu;
+        if available_aps & bit == 0
+            || crate::task::processor::cpu_current_count(cpu) != 0
+            || crate::task::run_queue_count(cpu) != 0
+        {
+            continue;
+        }
+        if crate::smp::request_reschedule(cpu).is_ok() {
+            return;
+        }
+    }
+    // No AP can service the request now.  A later allocation retries instead
+    // of leaving a permanently claimed notification behind.
+    PREZERO_REFILL_REQUESTED.store(false, Ordering::Release);
 }
 
 /// Clear one allocator-owned page before it is published to another owner.
@@ -1121,11 +1162,15 @@ pub fn init_frame_allocator() {
 /// pages.  CPU0 and APs share this routine; every iteration drops the allocator
 /// lock before touching page contents.
 pub fn idle_prezero_refill() -> usize {
+    refill_prezero_pages(PREZERO_REFILL_PER_IDLE_TICK)
+}
+
+fn refill_prezero_pages(limit: usize) -> usize {
     if !prezero_refill_allowed() {
         return 0;
     }
     let mut completed = 0;
-    for _ in 0..PREZERO_REFILL_PER_IDLE_TICK {
+    for _ in 0..limit {
         let Some(mut reservation) =
             with_frame_alloc_lock(|allocator| allocator.reserve_for_prezero())
         else {
@@ -1145,14 +1190,37 @@ pub fn idle_prezero_refill() -> usize {
     completed
 }
 
+/// Claim one coalesced low-water request from an AP idle scheduler.
+pub(crate) fn take_idle_prezero_refill_request() -> bool {
+    PREZERO_REFILL_REQUESTED.swap(false, Ordering::Acquire)
+}
+
+/// Refill a bounded batch after an event-driven AP wake.
+pub(crate) fn idle_prezero_refill_batch() -> usize {
+    refill_prezero_pages(PREZERO_REFILL_PER_IDLE_WAKE)
+}
+
 /// Try to obtain one page prepared by idle prezeroing.
 ///
 /// This deliberately has no recycled/fresh fallback and never invokes OOM
 /// recovery. It is suitable only for optional speculative work that can be
 /// abandoned when the pool is empty.
 pub(super) fn try_frame_alloc_prezeroed() -> Option<Arc<FrameTracker>> {
-    with_frame_alloc_lock(|allocator| allocator.reserve_prezeroed_only())
-        .map(|reservation| Arc::new(reservation.into_tracker()))
+    let (reservation, remaining) = with_frame_alloc_lock(|allocator| {
+        let reservation = allocator.reserve_prezeroed_only();
+        (reservation, allocator.prezeroed.len())
+    });
+    request_idle_prezero_refill(remaining);
+    reservation.map(|reservation| Arc::new(reservation.into_tracker()))
+}
+
+fn reserve_one_notifying() -> Option<FrameReservation> {
+    let (reservation, remaining) = with_frame_alloc_lock(|allocator| {
+        let reservation = allocator.reserve_one();
+        (reservation, allocator.prezeroed.len())
+    });
+    request_idle_prezero_refill(remaining);
+    reservation
 }
 
 /// Current prezero pool occupancy and its configured high-water mark.
@@ -1225,7 +1293,7 @@ pub fn frame_reserve(_num: usize) {}
 #[cfg(feature = "oom_handler")]
 /// 分配一页物理页，失败时先尝试 OOM 回收。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
+    let reservation = reserve_one_notifying();
     match reservation {
         Some(reservation) => Some(Arc::new(reservation.into_tracker())),
         None => {
@@ -1235,7 +1303,7 @@ pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
                 return None;
             }
             crate::show_frame_consumption!("GC", before);
-            let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
+            let reservation = reserve_one_notifying();
             reservation.map(|reservation| Arc::new(reservation.into_tracker()))
         }
     }
@@ -1314,7 +1382,7 @@ pub(crate) fn reserve_fresh_contiguous(num: usize) -> Option<PhysPageNum> {
 #[cfg(not(feature = "oom_handler"))]
 /// 分配一页物理页。
 pub fn frame_alloc() -> Option<Arc<FrameTracker>> {
-    let reservation = with_frame_alloc_lock(|allocator| allocator.reserve_one());
+    let reservation = reserve_one_notifying();
     reservation.map(|reservation| Arc::new(reservation.into_tracker()))
 }
 

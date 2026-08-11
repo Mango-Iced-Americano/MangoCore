@@ -25,9 +25,9 @@ pub const STATS_PROFILE_ALL: usize =
 pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
-pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
+pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 7;
 /// Scheduler preemption attribution field semantics version.
-pub const SCHED_PREEMPT_COUNTER_SCHEMA_VERSION: usize = 1;
+pub const SCHED_PREEMPT_COUNTER_SCHEMA_VERSION: usize = 2;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
 pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 4;
 /// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
@@ -124,6 +124,7 @@ mod enabled {
     pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
     pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
     pub static TIMER_PREEMPTIONS_WITH_IPI: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
     pub static TIMER_SAME_TASK_RESUMES: AtomicUsize = AtomicUsize::new(0);
     pub static TIMER_PREEMPT_LAST_TID: [AtomicUsize; crate::smp::MAX_CPUS] =
         [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
@@ -1122,6 +1123,13 @@ mod enabled {
         }
         if cpu < TIMER_PREEMPT_LAST_TID.len() {
             TIMER_PREEMPT_LAST_TID[cpu].store(tid, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_timer_preemption_elided() {
+        if stats_enabled() {
+            TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2923,6 +2931,7 @@ mod enabled {
         TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
         TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
         TIMER_PREEMPTIONS_WITH_IPI.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR.store(0, Ordering::Relaxed);
         TIMER_SAME_TASK_RESUMES.store(0, Ordering::Relaxed);
         for counter in TIMER_PREEMPT_LAST_TID.iter() {
             counter.store(0, Ordering::Relaxed);
@@ -4601,6 +4610,9 @@ pub fn record_timer_preemption(
     _ipi_pending: bool,
 ) {
 }
+
+#[cfg(not(feature = "perf_stats"))]
+pub fn record_timer_preemption_elided() {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_dispatch_after_timer_preemption(_cpu: usize, _tid: usize) {}
@@ -5587,6 +5599,8 @@ pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsiz
 pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static TIMER_PREEMPTIONS_WITH_IPI: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static TIMER_SAME_TASK_RESUMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]

@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-08-08
+last_update: 2026-08-11
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -71,7 +71,7 @@ cat /sys/kernel/stats/features
 | `profile` | rw | `core` / `memory_io` / `network_runtime`；诊断窗口一次只启用一组 |
 | `reset` | wo | 重置所有 delta 计数器 |
 | `boot` | ro | 从 Rust 入口起算的 console/MM/driver/net/FS/initproc/scheduler 累计 ticks；不随 `reset` 清零 |
-| `taskq` | ro | 调度队列、wake/steal 与新任务放置指标（schema v3） |
+| `taskq` | ro | 调度队列、wake/steal、抢占归因与新任务放置指标（schema v7） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
 | `vm` | ro | filemap、VM 锁/TLB、exec 路径和 MM 切换归因 |
@@ -165,6 +165,15 @@ echo 1 > /sys/kernel/tracing/clear
 | `new_task_idle_available` | counter | 新任务发布时允许集合中存在空闲 CPU 的次数 |
 | `new_task_selected_idle` | counter | 新任务发布实际选择空闲 CPU 的次数 |
 | `new_task_kept_busy_parent` | counter | 所有允许 CPU 都忙时仍保留创建者 CPU 的次数 |
+| `timer_preemptions` | counter | timer 安全点实际进入调度切换的次数 |
+| `timer_preemptions_no_local_competitor` | counter | 实际切换时本地 runqueue 没有竞争者的次数 |
+| `timer_preemptions_with_local_competitor` | counter | 实际切换时本地 runqueue 有竞争者的次数 |
+| `timer_preemptions_with_ipi` | counter | timer 与 RESCHEDULE IPI 合并后实际切换的次数 |
+| `timer_preemptions_elided_no_competitor` | counter | 无本地竞争者、IPI 或迁移请求时安全省略切换的次数 |
+| `timer_same_task_resumes` | counter | timer 切换后仍恢复同一 TID 的次数 |
+
+schema v7 在安全省略 timer context switch 时仍会对当前任务的运行片段做诊断 checkpoint，
+因此 `task_run_slice_ticks_total` 继续表示任务实际运行时间，而不是仅统计最终发生切换的片段。
 
 ### timer（内核计时器）
 

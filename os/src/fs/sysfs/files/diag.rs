@@ -234,6 +234,7 @@ fn stats_taskq_content(
     let _ = writeln!(s, "timer_preemptions_no_local_competitor={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR));
     let _ = writeln!(s, "timer_preemptions_with_local_competitor={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR));
     let _ = writeln!(s, "timer_preemptions_with_ipi={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_WITH_IPI));
+    let _ = writeln!(s, "timer_preemptions_elided_no_competitor={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_ELIDED_NO_COMPETITOR));
     let _ = writeln!(s, "timer_same_task_resumes={}", read_counter(&crate::task::perf::TIMER_SAME_TASK_RESUMES));
     let _ = writeln!(
         s,

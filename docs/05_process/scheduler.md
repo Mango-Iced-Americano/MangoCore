@@ -37,8 +37,11 @@ runqueue。B37 又让 clone/fork 继承的 mask 决定新任务的合法候选�
 `last_cpu` 作为 locality 提示。B38 不扩张状态机，用 per-task 请求槽让远程
 Running owner 在安全点真正交出 current；Blocking 则等待其稳定为 Running 或
 Blocked 后复用对应协议。
-B39 又给每个在线 CPU 建立独立 100Hz 绝对调度 tick；timer hard IRQ 仍只发布
+B39 给运行任务的 CPU 建立独立 100Hz 绝对调度 tick；timer hard IRQ 仍只发布
 per-CPU pending，真正的 tick 推进和是否切换延后到 trap-return/scheduler 安全点。
+AP 空闲后停掉本地 one-shot timer，由任务发布或预清零低水位 IPI 唤醒；重新 dispatch
+时从当前时间开始完整的新 quantum。纯 timer tick 若本地没有竞争者、IPI 或迁移请求，
+则只处理 timer/housekeeping 并直接返回当前任务，不再往返 idle 栈。
 全局 kernel timer/timeout/timerfd/net poll 继续由 CPU0 独占。B33 已让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
 yield/block/exit 仍直接进入切换边界。
@@ -428,15 +431,15 @@ timer/IPI，立即回到 IRQ-off idle 栈；只有 10ms scheduler tick 发布的
 AP 走独立的精简分支，只执行：
 
 ```text
-短暂开放 IPI/timer → 立即关中断 → 处理 STOP/deferred reason
-  → 推进本 CPU sched tick 并重编程本地 one-shot
+短暂开放 IPI → 立即关中断 → 处理 STOP/deferred reason
+  → 必要时处理合并式 prezero 补充请求
   → drain 本 CPU local_zombies
   → fetch 本 CPU RunQueue
   → 共用 dispatch_task()/current/__switch/switch-out
-  → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
+  → 空队列时停掉本地 timer，在 IRQ-off 窗口重查后执行 wfi/idle
 ```
 
-AP 只推进本地调度 tick，不执行全局 timeout、kernel timer callback、console、network、
+AP 只在运行任务时推进本地调度 tick，不执行全局 timeout、kernel timer callback、console、network、
 FS reclaim 或 OOM active tracker。B39 的无 syscall 用户忙循环已证明 CPU1 timer 可以在
 trap-return 安全点把 current 交给同核 helper。远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait

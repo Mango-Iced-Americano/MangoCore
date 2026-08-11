@@ -32,7 +32,7 @@ fn parse_anon_fault_around_enabled() -> bool {
         .split_whitespace()
         .find_map(|token| token.strip_prefix("mango.mm.anon_fault_around="))
         .map(|value| !matches!(value, "off" | "0" | "false" | "no"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub(super) fn anon_fault_around_enabled() -> bool {

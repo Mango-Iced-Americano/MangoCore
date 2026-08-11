@@ -196,7 +196,9 @@ B89 而把它们混入单页 reservation。
 
 ### 6.1 Idle 预清零池与运行时 A/B
 
-调度器空闲路径可以调用 `idle_prezero_refill()`，每个 idle tick 最多领取并清零 2 页，
+CPU0 空闲路径每个 housekeeping tick 最多领取并清零 2 页。AP 进入 idle 时会先执行
+一个最多 32 页的有界补充，再关闭本地 scheduler timer；池降到 128 页以下时，demand
+分配在释放 allocator 锁后用合并式 IPI 唤醒一个真正空闲的 AP，再补最多 32 页。
 池高水位为 256 页。领取和发布只在短暂持有 `FRAME_ALLOCATOR` 锁时完成，4 KiB 清零
 位于锁外；低于 2048 个空闲页时停止补充，避免预清零放大内存压力。
 

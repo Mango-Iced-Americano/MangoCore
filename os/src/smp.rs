@@ -1419,6 +1419,18 @@ pub(crate) fn local_sched_tick_deadline() -> u64 {
         .load(Ordering::Acquire)
 }
 
+/// Restart the current CPU's scheduler tick after an idle timer park.
+///
+/// AP idle deliberately quiesces its one-shot timer.  The next runnable task
+/// must receive a fresh full quantum rather than inheriting the stale deadline
+/// from before the CPU entered WFI.
+pub(crate) fn restart_local_sched_tick(deadline_ns: u64) {
+    assert_ne!(deadline_ns, 0, "scheduler tick deadline cannot be zero");
+    PER_CPUS[self::cpu_id()]
+        .sched_tick_deadline_ns
+        .store(deadline_ns, Ordering::Release);
+}
+
 /// 若本地调度 tick 已到期，则按绝对时间推进到下一周期。
 ///
 /// 中断可能被内核临界区推迟，因此不能简单执行 `deadline += period` 多次补账；

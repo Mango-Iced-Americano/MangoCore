@@ -46,8 +46,8 @@ pub fn tests() -> Vec<KernelTest> {
 }
 
 /// A forward sequential fault may consume at most two already-zeroed pages.
-/// The default-off production policy leaves this focused test as a no-op unless
-/// the ktest boot explicitly enables `mango.mm.anon_fault_around=on`.
+/// Production enables the bounded predictor by default; an explicit
+/// `mango.mm.anon_fault_around=off` keeps the escape hatch testable.
 fn test_anon_fault_around_is_bounded() -> Result<(), &'static str> {
     if !mm::anon_fault_around_enabled() {
         return Ok(());

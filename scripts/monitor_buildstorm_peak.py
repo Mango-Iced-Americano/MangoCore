@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-EXPECTED_SCHEMA = 6
+EXPECTED_SCHEMA = 7
 
 
 @dataclass(frozen=True)

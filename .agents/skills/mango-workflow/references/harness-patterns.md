@@ -1476,3 +1476,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**：内核返回标准 `riscv64`/`loongarch64`；测试入口对未知架构和残留 target fail-closed；正式启动入口按评分合同选择 RV64 8 核、LA64 12 核，并记录相同的内核、submodule、镜像与脚本哈希。
 - **教训**：跨架构性能数据先验证“架构名 → 编译 target → vCPU 数 → clean target → commit/hash”整条合同，再比较归一化得分。任何 fallback 或清理错误都使该轮数据无效。
 - **相关文件**：`os/src/syscall/process/ids.rs`、`user/src/bin/init.rs`、`user/src/bin/test_runner/groups/execute.rs`、`Makefile`、`os/make/arch/{rv64,la64}-settings.mk`
+
+## 省略调度切换时必须保持运行时间计数连续
+
+- **现象**：优化 timer tick 后，任务在没有本地竞争者时继续原地运行，不再经过 schedule-out；基于 context switch 才结算的 `task_run_slice_ticks_total` 因而停止增长，使区间平均忙核错误地接近零。
+- **根因**：诊断计数器把“任务正在执行的时间”隐含绑定到“任务最终发生切换”。当优化刻意消除切换时，业务行为正确，但观测模型失效。
+- **修复**：在被安全省略的 tick 上，仅在诊断 feature 下把 `now - run_started_ticks` 累计到全局运行时间，并将该任务的 `run_started_ticks` 更新为 `now`；后续真实 schedule-out 只结算新的区间，避免重复计数。同步提升 schema，并要求 monitor 启动时 fail-closed 握手。
+- **教训**：任何消除 context switch、锁获取、I/O completion 或状态迁移的性能优化，都必须审计依赖该事件结算的计数器。先保证可观测量仍表示原概念，再做前后 A/B；不能把计数下降直接解释成工作量下降。
+- **相关文件**：`os/src/task/manager.rs`、`os/src/task/perf.rs`、`scripts/monitor_buildstorm_peak.py`

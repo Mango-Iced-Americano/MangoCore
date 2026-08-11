@@ -231,8 +231,8 @@ Ok(ctx.offset_phys(ppn))
 4. 失败时回滚 `VmPageStore`；成功后由外层 `AddressSpace::write()` 根据 cached
    CPU mask 选择无失效、本地失效或远端 shootdown。
 
-可选启动参数 `mango.mm.anon_fault_around=on` 会在 demand page 成功映射后执行有界
-匿名 fault-around；默认关闭，便于使用同一代码基线做严格 A/B。该机制只适用于 private
+内核默认在 demand page 成功映射后执行有界匿名 fault-around；启动参数
+`mango.mm.anon_fault_around=off` 可关闭它以执行严格 A/B。该机制只适用于 private
 anonymous `LazyAlloc`，不改变 shared、file-backed、ELF、CoW、swap 或 zram 路径。
 
 方向由 fault 前相邻 PTE 自适应判断：仅前一页已映射时向前，仅后一页已映射时向后；

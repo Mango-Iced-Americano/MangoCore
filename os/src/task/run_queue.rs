@@ -397,9 +397,10 @@ fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 
 /// 在 owner runqueue 内更新 queued 任务 affinity，必要时搬到另一 CPU。
 ///
-/// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知目标 CPU；
-/// `Ok(None)` 表示旧 owner 仍合法、只更新了 mask；`Err(status)` 表示任务已被
-/// fetch、阻塞或退出。两个并发写侧通过 `Migrating` 重试并按实际完成顺序线性化。
+/// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知该 CPU：它可能是
+/// 实际搬队目标，也可能是 affinity 扩大后可窃取该任务的 idle CPU。`Ok(None)`
+/// 表示无需 doorbell；`Err(status)` 表示任务已被 fetch、阻塞或退出。两个并发
+/// 写侧通过 `Migrating` 重试并按实际完成顺序线性化。
 pub(crate) fn set_queued_affinity(
     task: &Arc<TaskControlBlock>,
     mask: usize,
@@ -455,7 +456,21 @@ pub(crate) fn set_queued_affinity(
                 TaskStatus::Queued(source_cpu),
                 "update queued affinity",
             );
-            return Ok(None);
+            // Tickless APs no longer poll remote queues every 10ms. If this
+            // update makes a queued task stealable, ring one idle legal CPU
+            // after the caller has left the source runqueue lock.
+            let idle_stealer = (super::processor::cpu_current_count(source_cpu) != 0)
+                .then(|| {
+                    mask & crate::smp::online_cpu_mask()
+                        & crate::smp::scheduler_cpu_mask()
+                        & !crate::smp::stopped_cpu_mask()
+                        & !(1usize << source_cpu)
+                })
+                .and_then(|runnable| {
+                    (0..crate::smp::configured_cpu_count())
+                        .find(|cpu| runnable & (1usize << cpu) != 0 && cpu_load(*cpu) == 0)
+                });
+            return Ok(idle_stealer);
         };
 
         // 状态先从源 owner 交给迁移调用方，再摘除容器；源 rq 锁使 fetch
