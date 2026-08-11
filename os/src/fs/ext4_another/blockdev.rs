@@ -117,25 +117,45 @@ impl another_ext4::BlockDevice for MangoBlockDevice {
         transaction_id: u32,
         staged_blocks: usize,
         cycles: usize,
-        _reason: another_ext4::JournalCommitReason,
+        reason: another_ext4::JournalCommitReason,
     ) {
         perf::record_wb_tx_journal_commit(transaction_id, staged_blocks, cycles);
+        perf::record_journal_commit_reason(match reason {
+            another_ext4::JournalCommitReason::DeferredThreshold => 0,
+            another_ext4::JournalCommitReason::DirectMetadataBarrier => 1,
+            another_ext4::JournalCommitReason::DurabilityBoundary => 2,
+            another_ext4::JournalCommitReason::Shutdown => 3,
+            another_ext4::JournalCommitReason::Explicit => 4,
+        });
     }
 
     fn record_writeback_journal_flush(
         &self,
         _transaction_id: u32,
-        _phase: another_ext4::JournalFlushPhase,
+        phase: another_ext4::JournalFlushPhase,
         cycles: usize,
     ) {
         perf::record_wb_tx_journal_flush(cycles);
+        perf::record_journal_flush_phase(match phase {
+            another_ext4::JournalFlushPhase::ActiveLog => 0,
+            another_ext4::JournalFlushPhase::CommitRecord => 1,
+            another_ext4::JournalFlushPhase::Checkpoint => 2,
+            another_ext4::JournalFlushPhase::TailUpdate => 3,
+        });
     }
 
     fn record_writeback_flush_boundary(
         &self,
-        _reason: another_ext4::JournalCommitReason,
+        reason: another_ext4::JournalCommitReason,
         cycles: usize,
     ) {
         perf::record_wb_tx_boundary_flush(cycles);
+        perf::record_direct_flush_reason(match reason {
+            another_ext4::JournalCommitReason::DeferredThreshold => 0,
+            another_ext4::JournalCommitReason::DirectMetadataBarrier => 1,
+            another_ext4::JournalCommitReason::DurabilityBoundary => 2,
+            another_ext4::JournalCommitReason::Shutdown => 3,
+            another_ext4::JournalCommitReason::Explicit => 4,
+        });
     }
 }

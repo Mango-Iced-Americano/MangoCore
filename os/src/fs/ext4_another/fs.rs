@@ -77,6 +77,21 @@ impl another_ext4::MetadataMutationNotifier for MetadataMutationWait {
 /// Live writable another_ext4 instances for global `sync(2)`.
 pub(crate) static EXT4_REGISTRY: Mutex<Vec<Weak<Ext4FileSystem>>> = Mutex::new(Vec::new());
 
+/// Snapshot low-frequency another_ext4 cache/prepare counters for diagnostics.
+/// The registry lock is released before touching any filesystem object so a
+/// sysfs read cannot serialize metadata operations.
+pub(crate) fn prepare_stats_snapshots() -> Vec<(usize, another_ext4::PrepareStatsSnapshot)> {
+    let live = {
+        let mut registry = EXT4_REGISTRY.lock();
+        let live: Vec<Arc<Ext4FileSystem>> = registry.iter().filter_map(Weak::upgrade).collect();
+        registry.retain(|weak| weak.strong_count() > 0);
+        live
+    };
+    live.into_iter()
+        .map(|fs| (fs.fs_id, fs.inner().prepare_stats_snapshot()))
+        .collect()
+}
+
 /// One writable another_ext4 filesystem instance.
 pub struct Ext4FileSystem {
     ext4: Arc<another_ext4::Ext4>,

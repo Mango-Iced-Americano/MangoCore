@@ -204,6 +204,8 @@ fn write_buildstorm_stat_control(path: &str, value: &[u8]) -> bool {
 fn buildstorm_stats_profile() -> Option<(&'static str, &'static [u8], bool)> {
     if boot_cmdline_contains(b"buildstorm.stats=all") {
         Some(("all", b"all\n", true))
+    } else if boot_cmdline_contains(b"buildstorm.stats=core_memory_io") {
+        Some(("core_memory_io", b"core_memory_io\n", true))
     } else if boot_cmdline_contains(b"buildstorm.stats=memory_io") {
         Some(("memory_io", b"memory_io\n", true))
     } else if boot_cmdline_contains(b"buildstorm.stats=core") {

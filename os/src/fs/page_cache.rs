@@ -1603,7 +1603,9 @@ impl PageCache {
         }
         match entry.state() {
             PageState::UpToDate | PageState::Dirty => {
-                entry.consume_filemap_readahead();
+                // Mapping an already resident adjacent page is speculative;
+                // do not classify it as a useful backend readahead hit.
+                crate::task::perf::record_filemap_pte_around_speculative_reuse();
                 let page_start = page_index.saturating_mul(PAGE_SIZE);
                 if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
                     let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);

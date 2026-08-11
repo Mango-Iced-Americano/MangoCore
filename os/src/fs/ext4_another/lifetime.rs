@@ -151,11 +151,17 @@ impl InodeLifetime {
 
     pub(crate) fn cached_directory_snapshot(&self) -> Option<Arc<DirectorySnapshot>> {
         let generation = self.directory_generation();
-        self.directory_snapshot
+        let snapshot = self.directory_snapshot
             .lock()
             .as_ref()
             .filter(|snapshot| snapshot.generation == generation)
-            .cloned()
+            .cloned();
+        if snapshot.is_some() {
+            crate::task::perf::record_ext4_dir_snapshot_hit();
+        } else {
+            crate::task::perf::record_ext4_dir_snapshot_miss();
+        }
+        snapshot
     }
 
     pub(crate) fn publish_directory_snapshot(
@@ -183,6 +189,7 @@ impl InodeLifetime {
     pub(crate) fn invalidate_directory_snapshot(&self) {
         self.directory_generation.fetch_add(1, Ordering::AcqRel);
         self.directory_snapshot.lock().take();
+        crate::task::perf::record_ext4_dir_snapshot_invalidation();
     }
 
     pub(crate) fn cache_modified_time(&self, now: TimeSpec) {

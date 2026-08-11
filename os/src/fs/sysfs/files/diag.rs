@@ -229,6 +229,12 @@ fn stats_taskq_content(
         "task_run_slice_ticks_total={}",
         read_counter(&crate::task::perf::TASK_RUN_SLICE_TICKS_TOTAL)
     );
+    let _ = writeln!(s, "scheduler_preempt_counter_schema_version={}", crate::task::perf::SCHED_PREEMPT_COUNTER_SCHEMA_VERSION);
+    let _ = writeln!(s, "timer_preemptions={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS));
+    let _ = writeln!(s, "timer_preemptions_no_local_competitor={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR));
+    let _ = writeln!(s, "timer_preemptions_with_local_competitor={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR));
+    let _ = writeln!(s, "timer_preemptions_with_ipi={}", read_counter(&crate::task::perf::TIMER_PREEMPTIONS_WITH_IPI));
+    let _ = writeln!(s, "timer_same_task_resumes={}", read_counter(&crate::task::perf::TIMER_SAME_TASK_RESUMES));
     let _ = writeln!(
         s,
         "steal_attempts={}",
@@ -402,6 +408,12 @@ fn stats_taskq_content(
             "idle_wait_loops_cpu{}={}",
             cpu,
             read_counter(&crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[cpu])
+        );
+        let _ = writeln!(
+            s,
+            "timer_preempt_last_tid_cpu{}={}",
+            cpu,
+            read_counter(&crate::task::perf::TIMER_PREEMPT_LAST_TID[cpu])
         );
     }
     write_str(offset, len, buf, &s)
@@ -1194,6 +1206,7 @@ fn stats_profile_content(
     let name = match profile {
         crate::task::perf::STATS_PROFILE_CORE => "core",
         crate::task::perf::STATS_PROFILE_MEMORY_IO => "memory_io",
+        crate::task::perf::STATS_PROFILE_CORE_MEMORY_IO => "core_memory_io",
         crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME => "network_runtime",
         crate::task::perf::STATS_PROFILE_ALL => "all",
         _ => "unknown",
@@ -1209,6 +1222,7 @@ fn stats_profile_write(_extra: usize, _offset: usize, buf: &[u8]) -> Result<usiz
     let profile = match command {
         "core" | "1" => crate::task::perf::STATS_PROFILE_CORE,
         "memory_io" | "2" => crate::task::perf::STATS_PROFILE_MEMORY_IO,
+        "core_memory_io" | "3" => crate::task::perf::STATS_PROFILE_CORE_MEMORY_IO,
         "network_runtime" | "4" => crate::task::perf::STATS_PROFILE_NETWORK_RUNTIME,
         "all" | "7" => crate::task::perf::STATS_PROFILE_ALL,
         _ => return Err(SyscallErr::EINVAL),
@@ -1943,6 +1957,47 @@ fn stats_blockio_content(
         "virtio_dma_bridge_lock_hold_ticks_max={}",
         read_counter(&crate::task::perf::VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX)
     );
+    let _ = writeln!(s, "fs_io_counter_schema_version=1");
+    for transport in 0..2 {
+        let name = if transport == 0 { "mmio" } else { "pci" };
+        let _ = writeln!(s, "virtio_{name}_device_lock_calls={}", read_counter(&crate::task::perf::VIRTIO_DEVICE_LOCK_CALLS[transport][0]));
+        let _ = writeln!(s, "virtio_{name}_device_lock_wait_ticks={}", read_counter(&crate::task::perf::VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport][0]));
+        let _ = writeln!(s, "virtio_{name}_device_lock_hold_ticks={}", read_counter(&crate::task::perf::VIRTIO_DEVICE_LOCK_HOLD_TICKS[transport][0]));
+        for bucket in 0..5 {
+            let _ = writeln!(s, "virtio_{name}_read_bucket_{bucket}={}", read_counter(&crate::task::perf::VIRTIO_REQUEST_SIZE_READ[transport][bucket]));
+            let _ = writeln!(s, "virtio_{name}_write_bucket_{bucket}={}", read_counter(&crate::task::perf::VIRTIO_REQUEST_SIZE_WRITE[transport][bucket]));
+        }
+    }
+    for (name, counter) in [
+        ("deferred_threshold", &crate::task::perf::JOURNAL_COMMIT_REASON_COUNTS[0]),
+        ("direct_metadata_barrier", &crate::task::perf::JOURNAL_COMMIT_REASON_COUNTS[1]),
+        ("durability_boundary", &crate::task::perf::JOURNAL_COMMIT_REASON_COUNTS[2]),
+        ("shutdown", &crate::task::perf::JOURNAL_COMMIT_REASON_COUNTS[3]),
+        ("explicit", &crate::task::perf::JOURNAL_COMMIT_REASON_COUNTS[4]),
+    ] {
+        let _ = writeln!(s, "journal_commit_reason_{name}={}", read_counter(counter));
+    }
+    for (name, counter) in [
+        ("active_log", &crate::task::perf::JOURNAL_FLUSH_PHASE_COUNTS[0]),
+        ("commit_record", &crate::task::perf::JOURNAL_FLUSH_PHASE_COUNTS[1]),
+        ("checkpoint", &crate::task::perf::JOURNAL_FLUSH_PHASE_COUNTS[2]),
+        ("tail_update", &crate::task::perf::JOURNAL_FLUSH_PHASE_COUNTS[3]),
+    ] {
+        let _ = writeln!(s, "journal_flush_phase_{name}={}", read_counter(counter));
+    }
+    for (name, counter) in [
+        ("deferred_threshold", &crate::task::perf::DIRECT_FLUSH_REASON_COUNTS[0]),
+        ("direct_metadata_barrier", &crate::task::perf::DIRECT_FLUSH_REASON_COUNTS[1]),
+        ("durability_boundary", &crate::task::perf::DIRECT_FLUSH_REASON_COUNTS[2]),
+        ("shutdown", &crate::task::perf::DIRECT_FLUSH_REASON_COUNTS[3]),
+        ("explicit", &crate::task::perf::DIRECT_FLUSH_REASON_COUNTS[4]),
+    ] {
+        let _ = writeln!(s, "direct_flush_reason_{name}={}", read_counter(counter));
+    }
+    let _ = writeln!(s, "ext4_dir_snapshot_hits={}", read_counter(&crate::task::perf::EXT4_DIR_SNAPSHOT_HITS));
+    let _ = writeln!(s, "ext4_dir_snapshot_misses={}", read_counter(&crate::task::perf::EXT4_DIR_SNAPSHOT_MISSES));
+    let _ = writeln!(s, "ext4_dir_snapshot_invalidations={}", read_counter(&crate::task::perf::EXT4_DIR_SNAPSHOT_INVALIDATIONS));
+    let _ = writeln!(s, "filemap_pte_around_speculative_reuses={}", read_counter(&crate::task::perf::EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES));
     let _ = writeln!(
         s,
         "sata_read_reqs={}",
@@ -2244,6 +2299,39 @@ fn stats_ext4_content(
         "ext4_direct_write_at_calls={}",
         read_counter(&crate::task::perf::EXT4_DIRECT_WRITE_AT_CALLS)
     );
+    let mut cache_fs_count = 0usize;
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+    let mut cache_full_clears = 0usize;
+    let mut cache_evicted = 0usize;
+    let mut cache_high_water = 0usize;
+    let mut extent_hits = 0usize;
+    let mut extent_misses = 0usize;
+    let mut extent_overwrites = 0usize;
+    let mut extent_invalidations = 0usize;
+    for (_, snapshot) in crate::fs::ext4_another::prepare_stats_snapshots() {
+        cache_fs_count += 1;
+        cache_hits += snapshot.inode_cache_hits;
+        cache_misses += snapshot.inode_cache_misses;
+        cache_full_clears += snapshot.inode_cache_full_clears;
+        cache_evicted += snapshot.inode_cache_evicted_entries;
+        cache_high_water = cache_high_water.max(snapshot.inode_cache_high_water);
+        extent_hits += snapshot.prepared_extent_hits;
+        extent_misses += snapshot.prepared_extent_misses;
+        extent_overwrites += snapshot.prepared_extent_overwrites;
+        extent_invalidations += snapshot.prepared_extent_epoch_invalidations;
+    }
+    let _ = writeln!(s, "another_ext4_prepare_stats_schema_version=2");
+    let _ = writeln!(s, "another_ext4_prepare_fs_count={cache_fs_count}");
+    let _ = writeln!(s, "another_ext4_inode_cache_hits={cache_hits}");
+    let _ = writeln!(s, "another_ext4_inode_cache_misses={cache_misses}");
+    let _ = writeln!(s, "another_ext4_inode_cache_full_clears={cache_full_clears}");
+    let _ = writeln!(s, "another_ext4_inode_cache_evicted_entries={cache_evicted}");
+    let _ = writeln!(s, "another_ext4_inode_cache_high_water={cache_high_water}");
+    let _ = writeln!(s, "another_ext4_prepared_extent_hits={extent_hits}");
+    let _ = writeln!(s, "another_ext4_prepared_extent_misses={extent_misses}");
+    let _ = writeln!(s, "another_ext4_prepared_extent_overwrites={extent_overwrites}");
+    let _ = writeln!(s, "another_ext4_prepared_extent_epoch_invalidations={extent_invalidations}");
     write_str(offset, len, buf, &s)
 }
 

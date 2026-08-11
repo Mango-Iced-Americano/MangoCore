@@ -732,6 +732,7 @@ fn dispatch_task(
     task_state
         .current_tid
         .store(task.gettid(), Ordering::Relaxed);
+    crate::task::perf::record_dispatch_after_timer_preemption(cpu, task.gettid());
     processor.current = Some(task);
     // 先写入权威 current 槽再发布负载提示；提示的瞬时误差只影响放置质量，
     // 不参与 owner 正确性判断。

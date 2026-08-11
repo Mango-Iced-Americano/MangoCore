@@ -2292,11 +2292,22 @@ pub fn run_task_safe_point() {
         task.process.check_interval_cpu_timers();
         task.process.check_posix_cpu_timers(task);
     }
+    let current_tid_for_preempt = task.as_ref().map(|current| current.gettid()).unwrap_or(0);
     // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。
     drop(task);
     let timer_resched = run_deferred_timer_work();
     let ipi_resched = crate::smp::take_reschedule_request();
     if timer_resched || ipi_resched {
+        if timer_resched && current_tid_for_preempt != 0 {
+            let cpu = crate::smp::cpu_id();
+            let local_competitor = super::run_queue::nr_running(cpu) != 0;
+            crate::task::perf::record_timer_preemption(
+                cpu,
+                current_tid_for_preempt,
+                local_competitor,
+                ipi_resched,
+            );
+        }
         crate::task::suspend_current_and_run_next();
     }
     crate::hal::local_irq_restore(irq_was_enabled);

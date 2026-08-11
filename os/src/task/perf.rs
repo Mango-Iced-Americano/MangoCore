@@ -13,10 +13,12 @@
 /// read/write it even when `perf_stats` is disabled at compile time.
 pub static STATS_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Runtime counter profiles. Only one profile is selected during a diagnostic
-/// window so unrelated hot paths do not pay counter or timer costs.
+/// Runtime counter profiles. A bounded bitmask may combine the core and
+/// memory/I/O groups during a diagnostic window; unrelated hot paths remain
+/// disabled so they do not pay counter or timer costs.
 pub const STATS_PROFILE_CORE: usize = 1;
 pub const STATS_PROFILE_MEMORY_IO: usize = 1 << 1;
+pub const STATS_PROFILE_CORE_MEMORY_IO: usize = STATS_PROFILE_CORE | STATS_PROFILE_MEMORY_IO;
 pub const STATS_PROFILE_NETWORK_RUNTIME: usize = 1 << 2;
 pub const STATS_PROFILE_ALL: usize =
     STATS_PROFILE_CORE | STATS_PROFILE_MEMORY_IO | STATS_PROFILE_NETWORK_RUNTIME;
@@ -24,6 +26,8 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(STATS_PROFILE_CORE);
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
+/// Scheduler preemption attribution field semantics version.
+pub const SCHED_PREEMPT_COUNTER_SCHEMA_VERSION: usize = 1;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
 pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 4;
 /// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
@@ -116,6 +120,13 @@ mod enabled {
     static SCHEDULE_FETCH: AtomicUsize = AtomicUsize::new(0);
     static SCHEDULE_IDLE: AtomicUsize = AtomicUsize::new(0);
     static TIMER_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPTIONS_WITH_IPI: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_SAME_TASK_RESUMES: AtomicUsize = AtomicUsize::new(0);
+    pub static TIMER_PREEMPT_LAST_TID: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
     /// 最近一次在 deferred 安全点输出 timer 快照时对应的 1024 次分段。
     static TIMER_SNAPSHOT_EPOCH: AtomicUsize = AtomicUsize::new(0);
     static FUTEX_WAIT: AtomicUsize = AtomicUsize::new(0);
@@ -1086,6 +1097,47 @@ mod enabled {
         }
     }
 
+    /// Attribute a scheduler tick that forced the current task through the
+    /// idle stack.  `local_competitor` is sampled from this CPU's runqueue
+    /// before the switch; it is deliberately diagnostic-only and does not
+    /// change scheduling policy.
+    #[inline(always)]
+    pub fn record_timer_preemption(
+        cpu: usize,
+        tid: usize,
+        local_competitor: bool,
+        ipi_pending: bool,
+    ) {
+        if !stats_enabled() {
+            return;
+        }
+        TIMER_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        if local_competitor {
+            TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR.fetch_add(1, Ordering::Relaxed);
+        } else {
+            TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR.fetch_add(1, Ordering::Relaxed);
+        }
+        if ipi_pending {
+            TIMER_PREEMPTIONS_WITH_IPI.fetch_add(1, Ordering::Relaxed);
+        }
+        if cpu < TIMER_PREEMPT_LAST_TID.len() {
+            TIMER_PREEMPT_LAST_TID[cpu].store(tid, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_dispatch_after_timer_preemption(cpu: usize, tid: usize) {
+        if !stats_enabled() || cpu >= TIMER_PREEMPT_LAST_TID.len() {
+            return;
+        }
+        if TIMER_PREEMPT_LAST_TID[cpu]
+            .swap(0, Ordering::Relaxed)
+            == tid
+        {
+            TIMER_SAME_TASK_RESUMES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     #[inline(always)]
     pub fn record_steal_attempt(cpu: usize) {
         if stats_enabled() {
@@ -1411,6 +1463,43 @@ mod enabled {
     pub static VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+    // Stage 1 FS/block attribution.  Arrays are indexed by transport
+    // (0=MMIO, 1=PCI) and request bucket (4K, 8K, 16K, 32K, 64K+).
+    pub static VIRTIO_DEVICE_LOCK_WAIT_TICKS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_DEVICE_LOCK_HOLD_TICKS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_DEVICE_LOCK_CALLS: [[AtomicUsize; 2]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_REQUEST_SIZE_READ: [[AtomicUsize; 5]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static VIRTIO_REQUEST_SIZE_WRITE: [[AtomicUsize; 5]; 2] = [
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+        [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+    ];
+    pub static JOURNAL_COMMIT_REASON_COUNTS: [AtomicUsize; 5] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static JOURNAL_FLUSH_PHASE_COUNTS: [AtomicUsize; 4] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static DIRECT_FLUSH_REASON_COUNTS: [AtomicUsize; 5] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    pub static EXT4_DIR_SNAPSHOT_HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_DIR_SNAPSHOT_MISSES: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_DIR_SNAPSHOT_INVALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+    pub static EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES: AtomicUsize = AtomicUsize::new(0);
 
     // ── P0: 2K1000LA SATA/AHCI ──
     pub static SATA_READ_REQS: AtomicUsize = AtomicUsize::new(0);
@@ -2478,6 +2567,95 @@ mod enabled {
     }
 
     #[inline(always)]
+    pub fn record_virtio_device_lock(transport: usize, wait_ticks: usize, hold_ticks: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let transport = transport.min(1);
+        VIRTIO_DEVICE_LOCK_CALLS[transport][0].fetch_add(1, Ordering::Relaxed);
+        VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport][0].fetch_add(wait_ticks, Ordering::Relaxed);
+        VIRTIO_DEVICE_LOCK_HOLD_TICKS[transport][0].fetch_add(hold_ticks, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_device_lock_wait(transport: usize, wait_ticks: usize) {
+        if memory_io_stats_enabled() {
+            VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport.min(1)][0]
+                .fetch_add(wait_ticks, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_virtio_request(transport: usize, write: bool, bytes: usize) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        let transport = transport.min(1);
+        let bucket = match bytes {
+            0..=4096 => 0,
+            4097..=8192 => 1,
+            8193..=16384 => 2,
+            16385..=32768 => 3,
+            _ => 4,
+        };
+        let counters = if write {
+            &VIRTIO_REQUEST_SIZE_WRITE[transport]
+        } else {
+            &VIRTIO_REQUEST_SIZE_READ[transport]
+        };
+        counters[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_journal_commit_reason(reason: usize) {
+        if memory_io_stats_enabled() {
+            JOURNAL_COMMIT_REASON_COUNTS[reason.min(4)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_journal_flush_phase(phase: usize) {
+        if memory_io_stats_enabled() {
+            JOURNAL_FLUSH_PHASE_COUNTS[phase.min(3)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_direct_flush_reason(reason: usize) {
+        if memory_io_stats_enabled() {
+            DIRECT_FLUSH_REASON_COUNTS[reason.min(4)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_hit() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_miss() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ext4_dir_snapshot_invalidation() {
+        if memory_io_stats_enabled() {
+            EXT4_DIR_SNAPSHOT_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_pte_around_speculative_reuse() {
+        if memory_io_stats_enabled() {
+            EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
     pub fn record_sata_read(bytes: usize, ticks: usize) {
         if !memory_io_stats_enabled() {
             return;
@@ -2741,6 +2919,14 @@ mod enabled {
         SCHEDULE_FETCH.store(0, Ordering::Relaxed);
         SCHEDULE_IDLE.store(0, Ordering::Relaxed);
         TIMER_INTERRUPTS.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR.store(0, Ordering::Relaxed);
+        TIMER_PREEMPTIONS_WITH_IPI.store(0, Ordering::Relaxed);
+        TIMER_SAME_TASK_RESUMES.store(0, Ordering::Relaxed);
+        for counter in TIMER_PREEMPT_LAST_TID.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
         TIMER_SNAPSHOT_EPOCH.store(0, Ordering::Relaxed);
         FUTEX_WAIT.store(0, Ordering::Relaxed);
         FUTEX_WAIT_SHARED.store(0, Ordering::Relaxed);
@@ -2989,6 +3175,30 @@ mod enabled {
         VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL.store(0, Ordering::Relaxed);
         VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX.store(0, Ordering::Relaxed);
+        for transport in 0..2 {
+            for op in 0..2 {
+                VIRTIO_DEVICE_LOCK_CALLS[transport][op].store(0, Ordering::Relaxed);
+                VIRTIO_DEVICE_LOCK_WAIT_TICKS[transport][op].store(0, Ordering::Relaxed);
+                VIRTIO_DEVICE_LOCK_HOLD_TICKS[transport][op].store(0, Ordering::Relaxed);
+            }
+            for bucket in 0..5 {
+                VIRTIO_REQUEST_SIZE_READ[transport][bucket].store(0, Ordering::Relaxed);
+                VIRTIO_REQUEST_SIZE_WRITE[transport][bucket].store(0, Ordering::Relaxed);
+            }
+        }
+        for counter in JOURNAL_COMMIT_REASON_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in JOURNAL_FLUSH_PHASE_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in DIRECT_FLUSH_REASON_COUNTS.iter() {
+            counter.store(0, Ordering::Relaxed);
+        }
+        EXT4_DIR_SNAPSHOT_HITS.store(0, Ordering::Relaxed);
+        EXT4_DIR_SNAPSHOT_MISSES.store(0, Ordering::Relaxed);
+        EXT4_DIR_SNAPSHOT_INVALIDATIONS.store(0, Ordering::Relaxed);
+        EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES.store(0, Ordering::Relaxed);
         SATA_READ_REQS.store(0, Ordering::Relaxed);
         SATA_READ_BYTES.store(0, Ordering::Relaxed);
         SATA_READ_TICKS_TOTAL.store(0, Ordering::Relaxed);
@@ -4382,6 +4592,18 @@ pub fn record_wake_to_run(_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_task_run_slice(_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_timer_preemption(
+    _cpu: usize,
+    _tid: usize,
+    _local_competitor: bool,
+    _ipi_pending: bool,
+) {
+}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_dispatch_after_timer_preemption(_cpu: usize, _tid: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -5051,6 +5273,36 @@ pub fn record_virtio_dma_share(_kind: usize) {}
 pub fn record_virtio_dma_bridge_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_virtio_device_lock(_transport: usize, _wait_ticks: usize, _hold_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_device_lock_wait(_transport: usize, _wait_ticks: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_virtio_request(_transport: usize, _write: bool, _bytes: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_commit_reason(_reason: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_journal_flush_phase(_phase: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_direct_flush_reason(_reason: usize) {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_hit() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_miss() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ext4_dir_snapshot_invalidation() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_filemap_pte_around_speculative_reuse() {}
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_sata_read(_bytes: usize, _ticks: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
@@ -5327,6 +5579,19 @@ pub static TIMER_POP_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
 #[cfg(not(feature = "perf_stats"))]
 pub static TIMER_POP_TICKS_MAX: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_NO_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_WITH_LOCAL_COMPETITOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPTIONS_WITH_IPI: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_SAME_TASK_RESUMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TIMER_PREEMPT_LAST_TID: [core::sync::atomic::AtomicUsize; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
 
 // ── Seccomp stubs ──
 #[cfg(not(feature = "perf_stats"))]
@@ -5687,6 +5952,47 @@ perf_stub_counter!(VIRTIO_DMA_SHARE_INDIRECT_POOL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_WAIT_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_TOTAL);
 perf_stub_counter!(VIRTIO_DMA_BRIDGE_LOCK_HOLD_TICKS_MAX);
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_WAIT_TICKS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_HOLD_TICKS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_DEVICE_LOCK_CALLS: [[core::sync::atomic::AtomicUsize; 2]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_REQUEST_SIZE_READ: [[core::sync::atomic::AtomicUsize; 5]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static VIRTIO_REQUEST_SIZE_WRITE: [[core::sync::atomic::AtomicUsize; 5]; 2] = [
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+    [core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0)],
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_COMMIT_REASON_COUNTS: [core::sync::atomic::AtomicUsize; 5] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static JOURNAL_FLUSH_PHASE_COUNTS: [core::sync::atomic::AtomicUsize; 4] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+#[cfg(not(feature = "perf_stats"))]
+pub static DIRECT_FLUSH_REASON_COUNTS: [core::sync::atomic::AtomicUsize; 5] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_HITS);
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_MISSES);
+perf_stub_counter!(EXT4_DIR_SNAPSHOT_INVALIDATIONS);
+perf_stub_counter!(EXT4_FILEMAP_PTE_AROUND_SPECULATIVE_REUSES);
 
 #[cfg(not(feature = "perf_stats"))]
 pub static SATA_READ_REQS: core::sync::atomic::AtomicUsize =

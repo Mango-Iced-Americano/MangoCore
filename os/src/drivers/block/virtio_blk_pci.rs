@@ -47,6 +47,20 @@ const VIRT_PCI_SIZE: usize = 0x0002_0000;
 
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, PciTransport>>);
 
+#[inline(always)]
+fn lock_virtio_device<'a, T>(mutex: &'a Mutex<T>) -> (spin::MutexGuard<'a, T>, usize) {
+    let start = perf::perf_memory_io_time_now();
+    match mutex.try_lock() {
+        Some(guard) => (guard, start),
+        None => {
+            let guard = mutex.lock();
+            let waited = perf::perf_memory_io_time_now().wrapping_sub(start);
+            perf::record_virtio_device_lock_wait(1, waited);
+            (guard, perf::perf_memory_io_time_now())
+        }
+    }
+}
+
 lazy_static! {
     static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> =
         Mutex::new(BTreeMap::new());
@@ -62,7 +76,7 @@ impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
-        let mut dev = self.0.lock();
+        let (mut dev, hold_start) = lock_virtio_device(&self.0);
         let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
@@ -91,6 +105,7 @@ impl BlockDevice for VirtIOBlock {
                 .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_read_chunk(chunk_len);
+            perf::record_virtio_request(1, false, chunk_len);
 
             virtio_dma_pool::dma_bridge_cancel_pending();
 
@@ -98,13 +113,14 @@ impl BlockDevice for VirtIOBlock {
 
             offset += chunk_len;
         }
+        perf::record_virtio_device_lock(1, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
         Ok(())
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
-        let mut dev = self.0.lock();
+        let (mut dev, hold_start) = lock_virtio_device(&self.0);
         let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
@@ -133,6 +149,7 @@ impl BlockDevice for VirtIOBlock {
                 .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_write_chunk(chunk_len);
+            perf::record_virtio_request(1, true, chunk_len);
 
             virtio_dma_pool::dma_bridge_cancel_pending();
 
@@ -140,17 +157,20 @@ impl BlockDevice for VirtIOBlock {
 
             offset += chunk_len;
         }
+        perf::record_virtio_device_lock(1, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
         Ok(())
     }
 
     fn flush(&self) -> BlockDeviceResult {
-        let mut dev = self.0.lock();
+        let (mut dev, hold_start) = lock_virtio_device(&self.0);
         let _bridge = virtio_dma_pool::dma_bridge_lock();
         if !dev.supports_flush() {
             return Err(BlockDeviceError::FlushUnsupported);
         }
         perf::record_device_flush();
-        dev.flush().map_err(|_| BlockDeviceError::DeviceError)
+        let result = dev.flush().map_err(|_| BlockDeviceError::DeviceError);
+        perf::record_virtio_device_lock(1, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
+        result
     }
 
     fn supports_reliable_flush(&self) -> bool {
