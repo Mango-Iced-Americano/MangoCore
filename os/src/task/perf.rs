@@ -27,7 +27,16 @@ pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
 pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 3;
 /// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
-pub const PAGEFAULT_COUNTER_SCHEMA_VERSION: usize = 3;
+pub const PAGEFAULT_COUNTER_SCHEMA_VERSION: usize = 4;
+
+#[derive(Clone, Copy)]
+pub enum AnonFaultAroundStopReason {
+    Boundary,
+    PageState,
+    NoPrezeroedPage,
+    MappingError,
+}
+
 /// `/sys/kernel/stats/heap` allocator attribution field semantics version.
 pub const HEAP_COUNTER_SCHEMA_VERSION: usize = 1;
 pub const HEAP_LOCK_HIST_BUCKETS: usize = 6;
@@ -78,6 +87,7 @@ pub fn stats_enabled_for(_profile: usize) -> bool {
 #[cfg(feature = "perf_stats")]
 mod enabled {
     use super::super::WaitResult;
+    use super::AnonFaultAroundStopReason;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const PRINT_EVERY_CLONES: usize = 512;
@@ -273,7 +283,16 @@ mod enabled {
     pub static FRAME_PREZERO_POOL_MISSES: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_PREZERO_REFILL_PAGES: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_PREZERO_REFILL_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_SKIPPED_POLICY: AtomicUsize = AtomicUsize::new(0);
+    pub static FRAME_PREZERO_REFILL_SKIPPED_ACTIVE: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_SYNC_ZERO_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_TRIGGERED: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_PAGES: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_BOUNDARY: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_STATE: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_NO_PREZERO: AtomicUsize = AtomicUsize::new(0);
+    pub static ANON_FAULT_AROUND_STOP_ERROR: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_WAIT_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_CONTIG_LOCK_HOLD_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -749,6 +768,55 @@ mod enabled {
             FRAME_PREZERO_REFILL_PAGES.fetch_add(1, Ordering::Relaxed);
             FRAME_PREZERO_REFILL_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         }
+    }
+
+    #[inline(always)]
+    pub fn record_frame_prezero_refill_skipped(active: bool) {
+        if memory_io_stats_enabled() {
+            if active {
+                FRAME_PREZERO_REFILL_SKIPPED_ACTIVE.fetch_add(1, Ordering::Relaxed);
+            } else {
+                FRAME_PREZERO_REFILL_SKIPPED_POLICY.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_attempt(triggered: bool) {
+        if memory_io_stats_enabled() {
+            ANON_FAULT_AROUND_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            if triggered {
+                ANON_FAULT_AROUND_TRIGGERED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_page() {
+        if memory_io_stats_enabled() {
+            ANON_FAULT_AROUND_PAGES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_anon_fault_around_stop(reason: AnonFaultAroundStopReason) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        match reason {
+            AnonFaultAroundStopReason::Boundary => {
+                ANON_FAULT_AROUND_STOP_BOUNDARY.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::PageState => {
+                ANON_FAULT_AROUND_STOP_STATE.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::NoPrezeroedPage => {
+                ANON_FAULT_AROUND_STOP_NO_PREZERO.fetch_add(1, Ordering::Relaxed)
+            }
+            AnonFaultAroundStopReason::MappingError => {
+                ANON_FAULT_AROUND_STOP_ERROR.fetch_add(1, Ordering::Relaxed)
+            }
+        };
     }
 
     #[inline(always)]
@@ -3054,6 +3122,15 @@ mod enabled {
         FRAME_PREZERO_POOL_MISSES.store(0, Ordering::Relaxed);
         FRAME_PREZERO_REFILL_PAGES.store(0, Ordering::Relaxed);
         FRAME_PREZERO_REFILL_TICKS_TOTAL.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_SKIPPED_POLICY.store(0, Ordering::Relaxed);
+        FRAME_PREZERO_REFILL_SKIPPED_ACTIVE.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_ATTEMPTS.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_TRIGGERED.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_PAGES.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_BOUNDARY.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_STATE.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_NO_PREZERO.store(0, Ordering::Relaxed);
+        ANON_FAULT_AROUND_STOP_ERROR.store(0, Ordering::Relaxed);
         FRAME_SYNC_ZERO_PAGES.store(0, Ordering::Relaxed);
         ANON_FAULT_LOCALITY_TOTAL.store(0, Ordering::Relaxed);
         ANON_FAULT_LOCALITY_FORWARD_1.store(0, Ordering::Relaxed);
@@ -4171,6 +4248,22 @@ pub fn record_frame_prezero_refill(_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_frame_prezero_refill_skipped(_active: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_attempt(_triggered: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_page() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_anon_fault_around_stop(_reason: AnonFaultAroundStopReason) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_sync_zero() {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -4334,6 +4427,15 @@ perf_stub_counter!(FRAME_PREZERO_POOL_HITS);
 perf_stub_counter!(FRAME_PREZERO_POOL_MISSES);
 perf_stub_counter!(FRAME_PREZERO_REFILL_PAGES);
 perf_stub_counter!(FRAME_PREZERO_REFILL_TICKS_TOTAL);
+perf_stub_counter!(FRAME_PREZERO_REFILL_SKIPPED_POLICY);
+perf_stub_counter!(FRAME_PREZERO_REFILL_SKIPPED_ACTIVE);
+perf_stub_counter!(ANON_FAULT_AROUND_ATTEMPTS);
+perf_stub_counter!(ANON_FAULT_AROUND_TRIGGERED);
+perf_stub_counter!(ANON_FAULT_AROUND_PAGES);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_BOUNDARY);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_STATE);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_NO_PREZERO);
+perf_stub_counter!(ANON_FAULT_AROUND_STOP_ERROR);
 perf_stub_counter!(FRAME_SYNC_ZERO_PAGES);
 perf_stub_counter!(ANON_FAULT_LOCALITY_TOTAL);
 perf_stub_counter!(ANON_FAULT_LOCALITY_FORWARD_1);

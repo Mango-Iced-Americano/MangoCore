@@ -1447,3 +1447,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复模式**：在原 payload 和 request sequence 保持不变期间，只向 `targets & !stopped & !acknowledged` 周期性重发幂等 doorbell；使用子系统独立且有界的超时预算。目标 handler 依据 mailbox bit 和 sequence 幂等执行，全部确认前不得复用 slot、回滚 generation 或提前释放待退休 frame。
 - **安全边界**：重试只能修复通知交付，不能掩盖真实 handler 卡死；超出预算仍需 fail-stop 并打印 missing/ack/pending 快照。不要通过不断改写 payload 或无限等待规避同步错误。
 - **相关文件**：`os/src/smp.rs`
+
+## BuildStorm 固定窗口与完成标记必须独立于字段布局和峰值状态
+
+- **现象**：guest 已输出 `BUILDSTORM_COMPILE mode=multi ok=true ...`，monitor 却没有按完成标记停止；用于单变量 A/B 的“900 秒窗口”还可能因峰值状态机提前结束或被峰后延长规则拖长。
+- **根因**：完成检测使用了要求字段相邻的字面子串 `BUILDSTORM_COMPILE ok=true`，插入 `mode=multi` 后静默失配；同一个软超时同时承担“无峰值定因”和“固定 wall-time A/B”两种不同语义。
+- **修复**：完成标记按行首和键值匹配（`^BUILDSTORM_COMPILE\b.*\bok=true\b`），不固定其他字段的位置；固定窗口另设从 `BUILDSTORM_BEGIN` 起算的 hard timeout，其优先级独立于峰值触发与峰后样本数。每个 A/B variant 仍须使用同一 kernel hash、全新 golden overlay、相同 CPU/内存/MTTCG，并在启动时核对被测运行时开关和 schema。
+- **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
+- **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。

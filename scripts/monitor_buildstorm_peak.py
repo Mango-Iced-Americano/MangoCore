@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-overlay", required=True)
     parser.add_argument("--period-seconds", type=float, default=5.0)
     parser.add_argument("--timed-timeout-seconds", type=float, default=900.0)
+    parser.add_argument("--hard-timed-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--boot-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--post-peak-min-samples", type=int, default=36)
     parser.add_argument("--post-peak-target-samples", type=int, default=60)
@@ -52,6 +53,12 @@ def append_status(path: Path, message: str) -> None:
     with path.open("a", encoding="utf-8") as status:
         status.write(f"{stamp} {message}\n")
         status.flush()
+
+
+def buildstorm_compile_succeeded(text: str) -> bool:
+    """Match the ordered result marker without requiring adjacent fields."""
+
+    return re.search(r"(?m)^BUILDSTORM_COMPILE\b.*\bok=true\b", text) is not None
 
 
 def field(block: str, name: str) -> int | None:
@@ -190,9 +197,22 @@ def main() -> int:
             snapshots.clear()
             append_status(args.status, "buildstorm_begin_seen")
 
-        if "BUILDSTORM_COMPILE ok=true" in text:
+        if buildstorm_compile_succeeded(text):
             if pid is not None:
                 return 0 if terminate_owned_qemu(args, pid, "guest_compile_complete") else 2
+            return 0
+
+        if (
+            begin_at is not None
+            and args.hard_timed_timeout_seconds > 0
+            and now - begin_at >= args.hard_timed_timeout_seconds
+        ):
+            if pid is not None:
+                return (
+                    0
+                    if terminate_owned_qemu(args, pid, "hard_timed_window_complete")
+                    else 2
+                )
             return 0
 
         timed_text = text[begin_offset:] if begin_offset >= 0 else text

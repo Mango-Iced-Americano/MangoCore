@@ -231,6 +231,19 @@ Ok(ctx.offset_phys(ppn))
 4. 失败时回滚 `VmPageStore`；成功后由外层 `AddressSpace::write()` 根据 cached
    CPU mask 选择无失效、本地失效或远端 shootdown。
 
+可选启动参数 `mango.mm.anon_fault_around=on` 会在 demand page 成功映射后执行有界
+匿名 fault-around；默认关闭，便于使用同一代码基线做严格 A/B。该机制只适用于 private
+anonymous `LazyAlloc`，不改变 shared、file-backed、ELF、CoW、swap 或 zram 路径。
+
+方向由 fault 前相邻 PTE 自适应判断：仅前一页已映射时向前，仅后一页已映射时向后；
+没有方向证据或两侧都已映射时不预测。每次最多额外映射 2 页，并同时要求候选 VPN 位于
+同一 VMA、状态仍为 `Unallocated`、PTE 尚未存在。候选页只能来自 idle 预清零池；池空、
+边界、页状态变化或映射失败都会立即停止，不触发同步清零和 OOM recovery。
+
+demand 与 speculative PTE 都通过当前 `UserMapper`/`MmuGather` 发布，因此沿用外层统一
+TLB shootdown 契约。`/sys/kernel/stats/pagefault` 的 schema v4 导出 attempt、trigger、
+映射页数以及 boundary/state/no-prezero/error 停止原因。
+
 ## 6. ResidentWithoutPte
 
 `ResidentWithoutPte` 处理“VMA 已持有页帧，但用户 PTE 尚未安装”的情况。当前典型来源是 writable anonymous `MAP_SHARED`：

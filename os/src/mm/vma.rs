@@ -22,6 +22,7 @@ use super::{AddressSpace, FaultAccess, MemoryError, PageTableImpl};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
+use crate::mm::frame_allocator::try_frame_alloc_prezeroed;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -310,6 +311,27 @@ impl Vma {
             return Err(err);
         }
         Ok(ppn)
+    }
+
+    /// Best-effort map of one already-zeroed speculative anonymous page.
+    ///
+    /// `Ok(None)` means the bounded prezero pool is empty. This path never
+    /// falls back to synchronous zeroing or OOM recovery.
+    pub(super) fn try_map_one_prezeroed_unchecked<T: PageTable>(
+        &mut self,
+        mapper: &mut UserMapper<'_, T>,
+        vpn: VirtPageNum,
+    ) -> Result<Option<PhysPageNum>, MemoryError> {
+        let Some(frame) = try_frame_alloc_prezeroed() else {
+            return Ok(None);
+        };
+        let ppn = frame.ppn;
+        self.inner.alloc_in_memory(vpn, frame)?;
+        if let Err(error) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
+            self.inner.remove_in_memory(&vpn);
+            return Err(error);
+        }
+        Ok(Some(ppn))
     }
 
     pub fn alloc_one_zeroed_unmapped(

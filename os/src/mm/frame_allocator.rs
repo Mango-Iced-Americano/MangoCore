@@ -21,6 +21,7 @@ use crate::task::current_task;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::{self, Debug, Formatter};
+use core::sync::atomic::{AtomicU8, Ordering};
 use lazy_static::*;
 use spin::RwLock;
 
@@ -30,6 +31,71 @@ use spin::RwLock;
 pub const PREZERO_POOL_HIGH_WATER: usize = 256;
 const PREZERO_REFILL_PER_IDLE_TICK: usize = 2;
 const PREZERO_MIN_FREE_FRAMES: usize = 2048;
+const PREZERO_POLICY_UNINITIALIZED: u8 = 0;
+const PREZERO_POLICY_IDLE: u8 = 1;
+const PREZERO_POLICY_QUIESCENT: u8 = 2;
+const PREZERO_POLICY_OFF: u8 = 3;
+
+static PREZERO_POLICY: AtomicU8 = AtomicU8::new(PREZERO_POLICY_UNINITIALIZED);
+
+fn parse_prezero_policy() -> u8 {
+    crate::bootargs::get_cmdline()
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("mango.mm.prezero="))
+        .map(|value| match value {
+            "off" | "0" => PREZERO_POLICY_OFF,
+            "quiescent" => PREZERO_POLICY_QUIESCENT,
+            _ => PREZERO_POLICY_IDLE,
+        })
+        .unwrap_or(PREZERO_POLICY_IDLE)
+}
+
+fn prezero_policy() -> u8 {
+    let policy = PREZERO_POLICY.load(Ordering::Acquire);
+    if policy != PREZERO_POLICY_UNINITIALIZED {
+        return policy;
+    }
+    let parsed = parse_prezero_policy();
+    match PREZERO_POLICY.compare_exchange(
+        PREZERO_POLICY_UNINITIALIZED,
+        parsed,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => parsed,
+        Err(installed) => installed,
+    }
+}
+
+/// Runtime prezero policy selected by `mango.mm.prezero=`.
+pub fn prezero_policy_name() -> &'static str {
+    match prezero_policy() {
+        PREZERO_POLICY_OFF => "off",
+        PREZERO_POLICY_QUIESCENT => "quiescent",
+        _ => "idle",
+    }
+}
+
+fn prezero_refill_allowed() -> bool {
+    match prezero_policy() {
+        PREZERO_POLICY_OFF => {
+            crate::task::perf::record_frame_prezero_refill_skipped(false);
+            false
+        }
+        PREZERO_POLICY_QUIESCENT => {
+            let has_ready = crate::task::has_ready_task();
+            let has_current = (0..crate::smp::configured_cpu_count())
+                .any(|cpu| crate::task::processor::cpu_current_count(cpu) != 0);
+            if has_ready || has_current {
+                crate::task::perf::record_frame_prezero_refill_skipped(true);
+                false
+            } else {
+                true
+            }
+        }
+        _ => true,
+    }
+}
 
 /// Clear one allocator-owned page before it is published to another owner.
 fn zero_frame_bytes(ppn: PhysPageNum) {
@@ -670,6 +736,26 @@ impl StackFrameAllocator {
         })
     }
 
+    /// Claim one already-zeroed page without falling back to synchronous zeroing
+    /// or OOM recovery. Speculative fault-around uses this path so a failed
+    /// prediction can consume only bounded idle work, never demand-path work.
+    fn reserve_prezeroed_only(&mut self) -> Option<FrameReservation> {
+        let started_ticks =
+            crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
+        let Some(ppn) = self.prezeroed.pop() else {
+            crate::task::perf::record_frame_prezero_miss();
+            return None;
+        };
+        crate::task::perf::record_frame_alloc();
+        crate::task::perf::record_frame_alloc_source_prezeroed();
+        crate::task::perf::record_frame_prezero_hit();
+        Some(FrameReservation {
+            ppn: Some(ppn.into()),
+            needs_zero: false,
+            started_ticks,
+        })
+    }
+
     fn publish_prezeroed(&mut self, ppn: PhysPageNum) {
         // Capacity is reserved at init for the high-water mark plus all CPUs'
         // possible in-flight pages, so this push never allocates under lock.
@@ -1035,6 +1121,9 @@ pub fn init_frame_allocator() {
 /// pages.  CPU0 and APs share this routine; every iteration drops the allocator
 /// lock before touching page contents.
 pub fn idle_prezero_refill() -> usize {
+    if !prezero_refill_allowed() {
+        return 0;
+    }
     let mut completed = 0;
     for _ in 0..PREZERO_REFILL_PER_IDLE_TICK {
         let Some(mut reservation) =
@@ -1054,6 +1143,16 @@ pub fn idle_prezero_refill() -> usize {
         completed += 1;
     }
     completed
+}
+
+/// Try to obtain one page prepared by idle prezeroing.
+///
+/// This deliberately has no recycled/fresh fallback and never invokes OOM
+/// recovery. It is suitable only for optional speculative work that can be
+/// abandoned when the pool is empty.
+pub(super) fn try_frame_alloc_prezeroed() -> Option<Arc<FrameTracker>> {
+    with_frame_alloc_lock(|allocator| allocator.reserve_prezeroed_only())
+        .map(|reservation| Arc::new(reservation.into_tracker()))
 }
 
 /// Current prezero pool occupancy and its configured high-water mark.

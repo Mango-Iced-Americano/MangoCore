@@ -2,7 +2,6 @@
 
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs::{File, FileFlags};
-use core::convert::TryInto;
 use crate::kernel_tests::runner::KernelTest;
 use crate::mm::{
     self, AddressSpace, AddressSpaceInner, FaultAccess, MapFlags, MapPermission, PageTable,
@@ -11,6 +10,7 @@ use crate::mm::{
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::convert::TryInto;
 
 /// Returns all mm-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
@@ -33,12 +33,82 @@ pub fn tests() -> Vec<KernelTest> {
             "mm::elf_ptload_pages_are_demand_paged",
             test_elf_ptload_pages_are_demand_paged,
         ),
+        KernelTest::new(
+            "mm::anon_fault_around_is_bounded",
+            test_anon_fault_around_is_bounded,
+        ),
         #[cfg(feature = "oom_handler")]
         KernelTest::new(
             "mm::shared_futex_pin_blocks_reclaim",
             test_shared_futex_pin_blocks_reclaim,
         ),
     ]
+}
+
+/// A forward sequential fault may consume at most two already-zeroed pages.
+/// The default-off production policy leaves this focused test as a no-op unless
+/// the ktest boot explicitly enables `mango.mm.anon_fault_around=on`.
+fn test_anon_fault_around_is_bounded() -> Result<(), &'static str> {
+    if !mm::anon_fault_around_enabled() {
+        return Ok(());
+    }
+
+    const TEST_BASE: usize = crate::config::ELF_PIE_BASE + 0x60_0000;
+    const TEST_PAGES: usize = 8;
+    for _ in 0..4 {
+        mm::idle_prezero_refill();
+    }
+
+    let space = AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare());
+    let mapped = space.write(|inner| {
+        inner.mmap(
+            TEST_BASE,
+            TEST_PAGES * PAGE_SIZE,
+            MapPermission::R | MapPermission::W | MapPermission::U,
+            MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED_NOREPLACE,
+            0,
+            None,
+            true,
+            false,
+        )
+    });
+    if mapped != TEST_BASE as isize {
+        return Err("failed to create anonymous fault-around fixture");
+    }
+
+    space
+        .fault_in_user_va_retry(VirtAddr::from(TEST_BASE), FaultAccess::Store)
+        .map_err(|_| "first anonymous demand fault failed")?;
+    let first = VirtAddr::from(TEST_BASE).floor();
+    if space.read(|inner| {
+        inner.translate(first).is_none()
+            || inner
+                .translate(VirtAddr::from(TEST_BASE + PAGE_SIZE).floor())
+                .is_some()
+    }) {
+        return Err("first anonymous fault predicted without a direction");
+    }
+
+    space
+        .fault_in_user_va_retry(VirtAddr::from(TEST_BASE + PAGE_SIZE), FaultAccess::Store)
+        .map_err(|_| "second anonymous demand fault failed")?;
+    space.read(|inner| {
+        for page in 0..=3 {
+            if inner
+                .translate(VirtAddr::from(TEST_BASE + page * PAGE_SIZE).floor())
+                .is_none()
+            {
+                return Err("fault-around did not populate its bounded forward window");
+            }
+        }
+        if inner
+            .translate(VirtAddr::from(TEST_BASE + 4 * PAGE_SIZE).floor())
+            .is_some()
+        {
+            return Err("fault-around populated beyond its two-page bound");
+        }
+        Ok(())
+    })
 }
 
 fn pread_exact(file: &File, mut offset: usize, mut dst: &mut [u8]) -> Result<(), &'static str> {

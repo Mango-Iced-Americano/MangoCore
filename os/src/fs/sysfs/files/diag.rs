@@ -2535,6 +2535,46 @@ fn stats_pagefault_content(
             stage_names[stage], count, ticks
         );
     }
+    let _ = writeln!(
+        s,
+        "anon_fault_around_enabled={}",
+        usize::from(crate::mm::anon_fault_around_enabled())
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_attempts={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_ATTEMPTS)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_triggered={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_TRIGGERED)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_pages={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_PAGES)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_stop_boundary={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_STOP_BOUNDARY)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_stop_state={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_STOP_STATE)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_stop_no_prezero={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_STOP_NO_PREZERO)
+    );
+    let _ = writeln!(
+        s,
+        "anon_fault_around_stop_error={}",
+        read_counter(&crate::task::perf::ANON_FAULT_AROUND_STOP_ERROR)
+    );
     write_str(offset, len, buf, &s)
 }
 
@@ -2948,6 +2988,21 @@ fn stats_vm_content(
         s,
         "frame_prezero_refill_ticks_total={}",
         read_counter(&crate::task::perf::FRAME_PREZERO_REFILL_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_policy={}",
+        crate::mm::prezero_policy_name()
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_refill_skipped_policy={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_REFILL_SKIPPED_POLICY)
+    );
+    let _ = writeln!(
+        s,
+        "frame_prezero_refill_skipped_active={}",
+        read_counter(&crate::task::perf::FRAME_PREZERO_REFILL_SKIPPED_ACTIVE)
     );
     let _ = writeln!(
         s,

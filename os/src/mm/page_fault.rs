@@ -15,8 +15,52 @@ use super::user_mapper::UserMapper;
 use super::vma::Vma;
 use super::vma::{VmAreaKind, VmAreaMapping, VmPageState};
 use super::{FaultAccess, FaultOutcome, MemoryError, PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::task::perf::AnonFaultAroundStopReason;
 use crate::utils::error::SyscallErr;
+use core::sync::atomic::{AtomicU8, Ordering};
 use log::{error, warn};
+
+const ANON_FAULT_AROUND_UNINITIALIZED: u8 = 0;
+const ANON_FAULT_AROUND_ENABLED: u8 = 1;
+const ANON_FAULT_AROUND_DISABLED: u8 = 2;
+const ANON_FAULT_AROUND_PAGES: usize = 2;
+
+static ANON_FAULT_AROUND_POLICY: AtomicU8 = AtomicU8::new(ANON_FAULT_AROUND_UNINITIALIZED);
+
+fn parse_anon_fault_around_enabled() -> bool {
+    crate::bootargs::get_cmdline()
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("mango.mm.anon_fault_around="))
+        .map(|value| !matches!(value, "off" | "0" | "false" | "no"))
+        .unwrap_or(false)
+}
+
+pub(super) fn anon_fault_around_enabled() -> bool {
+    let policy = ANON_FAULT_AROUND_POLICY.load(Ordering::Acquire);
+    if policy != ANON_FAULT_AROUND_UNINITIALIZED {
+        return policy == ANON_FAULT_AROUND_ENABLED;
+    }
+    let parsed = if parse_anon_fault_around_enabled() {
+        ANON_FAULT_AROUND_ENABLED
+    } else {
+        ANON_FAULT_AROUND_DISABLED
+    };
+    match ANON_FAULT_AROUND_POLICY.compare_exchange(
+        ANON_FAULT_AROUND_UNINITIALIZED,
+        parsed,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => parsed == ANON_FAULT_AROUND_ENABLED,
+        Err(installed) => installed == ANON_FAULT_AROUND_ENABLED,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AnonFaultAroundDirection {
+    Forward,
+    Backward,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// 一次缺页的规范化上下文。
@@ -265,8 +309,80 @@ fn map_lazy_zero_page<T: PageTable>(
     mapper: &mut UserMapper<'_, T>,
     ctx: FaultContext,
 ) -> Result<super::PhysPageNum, MemoryError> {
+    let direction = anon_fault_around_direction(area, mapper, ctx.vpn);
     let ppn = area.map_one_zeroed_unchecked(mapper, ctx.vpn)?;
+    populate_anon_fault_around(area, mapper, ctx.vpn, direction);
     Ok(ppn)
+}
+
+fn anon_fault_around_direction<T: PageTable>(
+    area: &Vma,
+    mapper: &UserMapper<'_, T>,
+    vpn: VirtPageNum,
+) -> Option<AnonFaultAroundDirection> {
+    if !anon_fault_around_enabled() || area.vm_mapping() != VmAreaMapping::Private {
+        return None;
+    }
+    let previous_mapped = vpn.0 > area.vm_start().0 && mapper.is_mapped(VirtPageNum(vpn.0 - 1));
+    let next_mapped = vpn
+        .0
+        .checked_add(1)
+        .map(VirtPageNum)
+        .is_some_and(|next| next < area.vm_end() && mapper.is_mapped(next));
+    match (previous_mapped, next_mapped) {
+        (true, false) => Some(AnonFaultAroundDirection::Forward),
+        (false, true) => Some(AnonFaultAroundDirection::Backward),
+        _ => None,
+    }
+}
+
+fn populate_anon_fault_around<T: PageTable>(
+    area: &mut Vma,
+    mapper: &mut UserMapper<'_, T>,
+    fault_vpn: VirtPageNum,
+    direction: Option<AnonFaultAroundDirection>,
+) {
+    crate::task::perf::record_anon_fault_around_attempt(direction.is_some());
+    let Some(direction) = direction else {
+        return;
+    };
+
+    for distance in 1..=ANON_FAULT_AROUND_PAGES {
+        let candidate = match direction {
+            AnonFaultAroundDirection::Forward => fault_vpn.0.checked_add(distance),
+            AnonFaultAroundDirection::Backward => fault_vpn.0.checked_sub(distance),
+        }
+        .map(VirtPageNum);
+        let Some(candidate) = candidate else {
+            crate::task::perf::record_anon_fault_around_stop(AnonFaultAroundStopReason::Boundary);
+            break;
+        };
+        if !area.vm_contains(candidate) {
+            crate::task::perf::record_anon_fault_around_stop(AnonFaultAroundStopReason::Boundary);
+            break;
+        }
+        if mapper.is_mapped(candidate)
+            || !matches!(area.vm_page_state(candidate), Ok(VmPageState::Unallocated))
+        {
+            crate::task::perf::record_anon_fault_around_stop(AnonFaultAroundStopReason::PageState);
+            break;
+        }
+        match area.try_map_one_prezeroed_unchecked(mapper, candidate) {
+            Ok(Some(_)) => crate::task::perf::record_anon_fault_around_page(),
+            Ok(None) => {
+                crate::task::perf::record_anon_fault_around_stop(
+                    AnonFaultAroundStopReason::NoPrezeroedPage,
+                );
+                break;
+            }
+            Err(_) => {
+                crate::task::perf::record_anon_fault_around_stop(
+                    AnonFaultAroundStopReason::MappingError,
+                );
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "oom_handler")]
