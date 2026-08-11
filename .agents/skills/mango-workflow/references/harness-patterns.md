@@ -1455,3 +1455,16 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**：完成标记按行首和键值匹配（`^BUILDSTORM_COMPILE\b.*\bok=true\b`），不固定其他字段的位置；固定窗口另设从 `BUILDSTORM_BEGIN` 起算的 hard timeout，其优先级独立于峰值触发与峰后样本数。每个 A/B variant 仍须使用同一 kernel hash、全新 golden overlay、相同 CPU/内存/MTTCG，并在启动时核对被测运行时开关和 schema。
 - **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
 - **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。
+
+## 双架构串行编译要同时校验命令退出和构建进程静默
+
+- **现象**：外层 Docker/Make 命令的输出已经暂停或终端 wrapper 已返回，但 LTO `rustc`
+  仍在容器中运行。此时启动另一架构会违反共享工具链/生成状态的串行约束；在
+  编译期间继续改源码，也会让“编译通过”不再对应一个可确定的源码快照。
+- **门禁**：每个架构必须同时满足：原始 `make kernel` 进程明确退出且 rc=0；目标
+  容器中不再存在该命令对应的 `cargo`/`rustc`。之后才能启动下一架构。最终
+  验证必须在所有源码修改完成后重跑；修改期间产生的早期成功结果只能作为中间
+  smoke，不能列入最终验收。
+- **检查方式**：保留可轮询的 PTY/session，等到 `Finished ...` 与 make 退出；必要时再以
+  容器内精确命令行过滤确认没有对应构建子进程。不使用宽泛 `pgrep cargo`，避免把队友容器或
+  无关 host build 当成本轮进程。
