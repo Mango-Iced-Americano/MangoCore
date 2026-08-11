@@ -50,6 +50,31 @@
 - **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
 - **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
 
+### 大内存启动早期 OOM：bootstrap heap 必须覆盖按 RAM 线性增长的结构
+
+- **现象**: 提高 QEMU 内存后（如 la64 `-m 36G -smp 12`、rv64 `-m 16G`），内核在启动早期
+  `Console initialized.` 之后、`init_runtime_heap` 之前 panic：
+  `HEAP ALLOCATION FAILED (FATAL) layout: size=9356593, align=1`，`KERNEL_HEAP_SIZE` 显示的
+  仍是 bootstrap heap 大小（如 8MiB 减去 metadata 后的 8335360）。`align=1` 是 `Vec<bool>`/
+  `Vec<u8>` 类分配的指纹。
+- **根因**: `StackFrameAllocator::init`（`frame_allocator.rs`）为每个 DRAM region 调用
+  `FrameRegion::new()`，其 `recycled_flags: Vec<bool>` 按 region 页数 1 字节/页分配，随
+  物理内存线性增长（36G ≈ 9.35M 页 → 9.36MiB）；buddy 分配又把它圆整到下一个 2 的幂
+  order（9.36MiB → order 12 = 16MiB 连续块）。这些结构在 runtime heap（DRAM 扩展堆）
+  建立前就要分配，8MiB bootstrap heap 必然失败。la64 还有 `laflex::IdentityDirtyMap`
+  （highest_end/4096/64 个 `AtomicUsize`，36G 约 1.19MiB）同样在预 runtime 期分配。
+- **修复**: 调大双架构 `KERNEL_BOOTSTRAP_HEAP_SIZE`（8MiB → 32MiB），把 buddy 圆整后的
+  order 12 块 + IdentityDirtyMap + slab 余量都覆盖进去。数值推导写入 config.rs 注释，
+  避免后人盲目改小。
+- **教训**: ① 启动早期 OOM 先看 `align` 指纹——`align=1` 且 size 接近页数 = per-page
+  结构；size 是 2 的幂 order 倍数 = buddy 圆整，别只按"实际字节 < 堆大小"判断。②
+  随物理内存线性增长的结构（frame flags、bitmap、dirty map）必须按评测最大内存推导
+  bootstrap heap 需求，不能只按默认内存（768MiB/1GiB）验证。③ 修复后必须用评测
+  级内存重新 QEMU 验证，且注意 rv64 要用 strip 后的 `Image`/`kernel-rv` raw binary
+  启动（ELF PhysAddr 是链接虚拟地址，QEMU 加载不了）。
+- **相关文件**: `os/src/mm/frame_allocator.rs`、`os/src/mm/heap_allocator.rs`、
+  `os/src/hal/arch/{riscv,loongarch64}/config.rs`、`os/src/hal/arch/loongarch64/laflex.rs`
+
 ### PCI host 的 `ranges` 与 `reg` 必须在预堆阶段同时映射
 
 - **现象**: RV64 用 `BLK_MODE=virt_pci` 启动时，PCI config access 或 VirtIO BAR access 触发 page fault；仅把固定 ECAM 地址加到板级 MMIO 常量会使 QEMU 特例可用，但仍无法适配 FDT 描述的不同 host。
