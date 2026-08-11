@@ -1826,6 +1826,8 @@ fn stats_blockio_content(
         "virtio_dma_pool_enabled={}",
         crate::drivers::block::virtio_dma_pool::dma_pool_is_enabled()
     );
+    let _ = writeln!(s, "virtio_dma_bridge_schema_version=2");
+    let _ = writeln!(s, "virtio_dma_bridge_per_hart=1");
     let _ = writeln!(
         s,
         "virtio_dma_small_pool_enabled={}",
@@ -2748,6 +2750,36 @@ fn stats_vm_content(
         s,
         "filemap_fault_around_aborts={}",
         read_counter(&crate::task::perf::FILEMAP_FAULT_AROUND_ABORTS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_calls={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_pages_examined={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_PAGES_EXAMINED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_pages_mapped={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_PAGES_MAPPED)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_not_ready_stops={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_NOT_READY_STOPS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_state_conflicts={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_STATE_CONFLICTS)
+    );
+    let _ = writeln!(
+        s,
+        "filemap_pte_around_cache_errors={}",
+        read_counter(&crate::task::perf::FILEMAP_PTE_AROUND_CACHE_ERRORS)
     );
     let _ = writeln!(
         s,

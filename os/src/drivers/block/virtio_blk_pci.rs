@@ -54,8 +54,6 @@ lazy_static! {
         Mutex::new(PciRangeAllocator::new(VIRT_PCI_BASE, VIRT_PCI_SIZE));
 }
 
-static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
-
 impl BlockDevice for VirtIOBlock {
     fn name_style(&self) -> BlockDeviceNameStyle {
         BlockDeviceNameStyle::Alphabetic("vd")
@@ -80,7 +78,7 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+            virtio_dma_pool::dma_bridge_set_reservation(reservation);
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -94,9 +92,7 @@ impl BlockDevice for VirtIOBlock {
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_read_chunk(chunk_len);
 
-            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
-                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
-            }
+            virtio_dma_pool::dma_bridge_cancel_pending();
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
@@ -124,7 +120,7 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+            virtio_dma_pool::dma_bridge_set_reservation(reservation);
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -138,9 +134,7 @@ impl BlockDevice for VirtIOBlock {
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_write_chunk(chunk_len);
 
-            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
-                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
-            }
+            virtio_dma_pool::dma_bridge_cancel_pending();
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
@@ -350,7 +344,10 @@ pub fn probe_la64() -> Vec<Arc<dyn super::BlockDevice>> {
                     virtio_dma_pool::dma_pool_init_once();
                 }
                 result.push(Arc::new(VirtIOBlock(Mutex::new(blk))) as Arc<dyn super::BlockDevice>);
-                println!("[kernel] discovered VirtIO PCI block device {} ({:?})", index, df);
+                println!(
+                    "[kernel] discovered VirtIO PCI block device {} ({:?})",
+                    index, df
+                );
             }
             Err(_) => {
                 println!(
@@ -386,11 +383,8 @@ unsafe impl Hal for VirtioHal {
         let buffer = buffer.as_ref();
         let pages = (buffer.len() + PAGE_SIZE - 1) >> PAGE_SIZE_BITS;
 
-        let mut pending = PENDING_DMA_RESERVATION.lock();
-        if let Some((slot, gen)) = pending.take() {
-            if buffer.len() >= BLOCK_SZ {
-                drop(pending);
-                let reservation = virtio_dma_pool::DmaReservation { slot, gen };
+        if buffer.len() >= BLOCK_SZ {
+            if let Some(reservation) = virtio_dma_pool::dma_bridge_take_data_reservation() {
                 let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
                 perf::record_virtio_dma_share(0);
 
@@ -400,10 +394,7 @@ unsafe impl Hal for VirtioHal {
                 }
                 return pa;
             }
-            // Small descriptor (header/status) — put reservation back for data call
-            *pending = Some((slot, gen));
         }
-        drop(pending);
 
         // Reuse fixed single-page slots for block request descriptors. Keep
         // arbitrary one-page users on the old fallback path.

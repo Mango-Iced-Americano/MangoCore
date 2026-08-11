@@ -47,13 +47,6 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
-/// Bridges the DMA pool reservation from `read_block`/`write_block` to
-/// `VirtioHal::share()`.  The virtio-drivers library calls `share()` internally
-/// during `dev.read_blocks()`/`write_blocks()`, passing through no extra
-/// parameters, so the reservation is communicated via this static.
-/// Stores `(slot, gen)` from `DmaReservation`.
-static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
-
 impl BlockDevice for VirtIOBlock {
     fn name_style(&self) -> BlockDeviceNameStyle {
         BlockDeviceNameStyle::Alphabetic("vd")
@@ -78,10 +71,7 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            // Store (slot, gen) for VirtioHal::share() to consume.
-            // consume the original DmaReservation — the tuple alone is enough
-            // for share() to reconstruct a DmaReservation and consume it.
-            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+            virtio_dma_pool::dma_bridge_set_reservation(reservation);
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -97,9 +87,7 @@ impl BlockDevice for VirtIOBlock {
 
             // share() should have consumed the reservation. If it didn't (e.g.
             // because the virtio-drivers library split the buffer), cancel it.
-            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
-                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
-            }
+            virtio_dma_pool::dma_bridge_cancel_pending();
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
@@ -127,7 +115,7 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
+            virtio_dma_pool::dma_bridge_set_reservation(reservation);
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -141,9 +129,7 @@ impl BlockDevice for VirtIOBlock {
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_write_chunk(chunk_len);
 
-            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
-                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
-            }
+            virtio_dma_pool::dma_bridge_cancel_pending();
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
@@ -260,11 +246,8 @@ unsafe impl Hal for VirtioHal {
         // request header, data, response status, and the indirect descriptor
         // table. Only the data buffer (>= BLOCK_SZ) consumes the reservation;
         // the three small buffers use the single-page fallback path.
-        let mut pending = PENDING_DMA_RESERVATION.lock();
-        if let Some((slot, gen)) = pending.take() {
-            if buffer.len() >= BLOCK_SZ {
-                drop(pending);
-                let reservation = virtio_dma_pool::DmaReservation { slot, gen };
+        if buffer.len() >= BLOCK_SZ {
+            if let Some(reservation) = virtio_dma_pool::dma_bridge_take_data_reservation() {
                 let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
                 perf::record_virtio_dma_share(0);
 
@@ -277,10 +260,7 @@ unsafe impl Hal for VirtioHal {
                 }
                 return pa;
             }
-            // Small descriptor (header/status) — put reservation back for data call
-            *pending = Some((slot, gen));
         }
-        drop(pending);
 
         // Reuse fixed single-page slots for the three descriptor sizes emitted
         // by the block driver. Other one-page users (for example network
