@@ -115,6 +115,14 @@ pub(super) fn test_filemap_fault_around_is_bounded_and_lock_outside() -> Result<
     if backend.calls.load(Ordering::SeqCst) != 0 {
         return Err("filemap fault-around performed I/O during VM-lock admission");
     }
+    if cache
+        .try_resident_frame_for_filemap_map(1, MAX_DEMAND_READ_PAGES * PAGE_SIZE)
+        .map_err(|_| "cold resident admission returned an error")?
+        .is_some()
+        || backend.calls.load(Ordering::SeqCst) != 0
+    {
+        return Err("resident PTE admission created or loaded a cold page");
+    }
     wait.wait();
     if backend.calls.load(Ordering::SeqCst) != 1
         || backend.pages.load(Ordering::SeqCst) != MAX_DEMAND_READ_PAGES
@@ -129,6 +137,14 @@ pub(super) fn test_filemap_fault_around_is_bounded_and_lock_outside() -> Result<
     let byte = unsafe { frame.ppn.with_bytes(|bytes| bytes[0]) };
     if byte != last as u8 {
         return Err("fault-around page payload did not match its file offset");
+    }
+    let adjacent = cache
+        .try_resident_frame_for_filemap_map(1, MAX_DEMAND_READ_PAGES * PAGE_SIZE)
+        .map_err(|_| "resident PTE admission rejected a ready page")?
+        .ok_or("resident PTE admission missed a prefetched page")?;
+    let adjacent_byte = unsafe { adjacent.ppn.with_bytes(|bytes| bytes[0]) };
+    if adjacent_byte != 1 || backend.calls.load(Ordering::SeqCst) != 1 {
+        return Err("resident PTE admission changed payload or started backend I/O");
     }
     Ok(())
 }

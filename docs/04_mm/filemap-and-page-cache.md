@@ -21,6 +21,7 @@ tags: [mm, mmap, filemap, page-cache, mmu-gather]
 | `os/src/mm/filemap.rs` | `check_within_file()` | 检查 fault 偏移是否在文件大小 round-up 范围内 |
 | `os/src/mm/filemap.rs` | `zero_tail()` | 清零最后一页 EOF 之后的字节 |
 | `os/src/mm/filemap.rs` | `verify_filemap_fault()` | 校验 VMA resident frame 与 PTE 一致 |
+| `os/src/mm/filemap.rs` | `map_resident_filemap_tail()` | demand fault 成功后映射窗口内已 resident 的相邻页 |
 | `os/src/mm/filemap.rs` | `ElfLazyBacking` / `elf_lazy_fault()` | 首次触页时装配私有 ELF PT_LOAD 页 |
 | `os/src/mm/page_fault.rs` | `FaultAction::FileBacked*` | 将缺页分类派发到 filemap |
 | `os/src/fs/` | `PageCache` / inode page cache 接口 | 提供文件页缓存 frame |
@@ -135,6 +136,8 @@ filemap_read_fault(area, page_table, ctx)
   ├── map_perm = area.vm_perm()，若含 W 则去掉 W
   ├── area.inner.alloc_in_memory(ctx.vpn, cache_frame)
   ├── UserMapper::map_user_page(ctx.vpn, cache_ppn, map_perm)
+  ├── map_resident_filemap_tail()
+  │     └── 只为连续已 resident/ready 页安装 PTE，首个 miss 即停止
   └── verify_filemap_fault()
 ```
 
@@ -156,6 +159,14 @@ claim 后等待统一的 page-state generation。所有成功、分配失败、I
 预取页在首次被 filemap、ELF 或普通 PageCache 读写路径消费时清除 readahead 标记；
 若在消费前被 clock、truncate 或 invalidate 丢弃，则记录为 unused discard。该标记只
 用于 `memory_io` 诊断窗口，不参与页面状态机或正确性判断。
+
+demand 页映射成功后，`map_resident_filemap_tail()` 会继续检查同一窗口的
+相邻页。该阶段只使用 `try_resident_frame_for_filemap_map()` 获取已经
+UpToDate/Dirty 的 frame，不创建 PageCache entry、不等待正在进行的回写，也不
+发起后端 I/O。因此它可以在地址空间锁内安全地减少后续 resident
+页的 PTE fault，遇到第一个未就绪页就停止，不改变 demand fault 的成功/失败结果。
+filemap schema v4 分别记录检查数、PTE 映射数、not-ready、VM 状态冲突和
+cache error，便于区分“数据已预取但仍反复 fault”与“后端页未就绪”。
 
 ## 7. 为什么读缺页要清 W
 

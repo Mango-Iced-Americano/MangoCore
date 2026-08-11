@@ -793,10 +793,9 @@ impl RetryWait for PageCacheFaultWait {
                 fault_around_attempted = true;
                 // Speculative failures must not turn a valid demand fault into
                 // an error. The single-page path below remains authoritative.
-                let _ = self.cache.sync_filemap_fault_around(
-                    self.page_index,
-                    self.fault_around_pages,
-                );
+                let _ = self
+                    .cache
+                    .sync_filemap_fault_around(self.page_index, self.fault_around_pages);
             }
             let observed = self.cache.state_wait_generation.load(Ordering::Acquire);
             // Another fault-around worker may own this miss while its backend
@@ -1569,6 +1568,51 @@ impl PageCache {
             }
             PageState::Error => Err(PageCacheFault::Error(SyscallErr::EIO)),
             PageState::Loading | PageState::Writeback => Err(retry()),
+        }
+    }
+
+    /// Return an already-resident filemap page without creating an entry or
+    /// starting backend I/O.
+    ///
+    /// This is the speculative half of PTE fault-around. The demand page uses
+    /// [`Self::try_frame_for_filemap_read_ahead`] so a miss can return a
+    /// lock-outside retry token; adjacent pages use this method and simply stop
+    /// at the first cache miss/transient state. In particular, this method must
+    /// remain safe while the caller holds its address-space lock.
+    pub(crate) fn try_resident_frame_for_filemap_map(
+        &self,
+        page_index: usize,
+        authoritative_eof: usize,
+    ) -> Result<Option<Arc<FrameTracker>>, SyscallErr> {
+        let Some(_op) = self.op_gate.try_read() else {
+            return Ok(None);
+        };
+        let entry = self
+            .entries
+            .lock()
+            .get(page_index)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        if !entry.is_fully_valid()
+            || matches!(entry.state(), PageState::Loading | PageState::Writeback)
+        {
+            return Ok(None);
+        }
+        match entry.state() {
+            PageState::UpToDate | PageState::Dirty => {
+                entry.consume_filemap_readahead();
+                let page_start = page_index.saturating_mul(PAGE_SIZE);
+                if authoritative_eof < page_start.saturating_add(PAGE_SIZE) {
+                    let tail_start = authoritative_eof.saturating_sub(page_start).min(PAGE_SIZE);
+                    entry.with_bytes_mut(|bytes| bytes[tail_start..].fill(0));
+                }
+                Ok(Some(entry.page.clone()))
+            }
+            PageState::Error => Err(SyscallErr::EIO),
+            PageState::Loading | PageState::Writeback => Ok(None),
         }
     }
 
@@ -2994,9 +3038,7 @@ impl PageCache {
             let mut published_pages = 0;
             let mut prefetched_pages = 0;
             let track_use = filemap_demand_page.is_some()
-                && crate::task::perf::stats_enabled_for(
-                    crate::task::perf::STATS_PROFILE_MEMORY_IO,
-                );
+                && crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO);
             {
                 let mut entries = self.entries.lock();
                 if generation != self.mutation_generation.load(Ordering::Acquire) {

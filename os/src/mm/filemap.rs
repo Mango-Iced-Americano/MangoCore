@@ -11,7 +11,7 @@
 
 use super::page_fault::FaultContext;
 use super::user_mapper::UserMapper;
-use super::vma::Vma;
+use super::vma::{VmPageState, Vma};
 use super::{MapPermission, MemoryError, PageTable, PhysAddr, PhysPageNum};
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::fs::vfs::IndexNode;
@@ -146,6 +146,84 @@ fn map_pc_error(e: SyscallErr) -> MemoryError {
         SyscallErr::EIO => MemoryError::BackingStoreFailure,
         _ => MemoryError::BackingStoreFailure,
     }
+}
+
+/// Install read-only PTEs for the contiguous, already-resident tail of a
+/// filemap read-ahead window. The demand page has already succeeded before
+/// this helper runs, so every speculative failure is advisory: no backend I/O
+/// is started under the VM lock and the original fault remains successful.
+fn map_resident_filemap_tail<T: PageTable>(
+    area: &mut Vma,
+    mapper: &mut UserMapper<'_, T>,
+    pc: &Arc<PageCache>,
+    first_vpn: super::VirtPageNum,
+    first_page_index: usize,
+    pages: usize,
+    file_size: usize,
+    map_perm: MapPermission,
+) {
+    if pages <= 1 {
+        return;
+    }
+
+    let mut examined = 0usize;
+    let mut mapped = 0usize;
+    let mut not_ready = false;
+    let mut state_conflicts = 0usize;
+    let mut cache_errors = 0usize;
+
+    for offset in 1..pages {
+        let Some(vpn_value) = first_vpn.0.checked_add(offset) else {
+            break;
+        };
+        let Some(page_index) = first_page_index.checked_add(offset) else {
+            break;
+        };
+        let vpn = super::VirtPageNum(vpn_value);
+        examined = examined.saturating_add(1);
+
+        // A preceding fault or a non-resident VM state owns this slot. Skip it
+        // without disturbing that state, but keep scanning the bounded window.
+        if mapper.is_mapped(vpn) || !matches!(area.vm_page_state(vpn), Ok(VmPageState::Unallocated))
+        {
+            state_conflicts = state_conflicts.saturating_add(1);
+            continue;
+        }
+
+        let frame = match pc.try_resident_frame_for_filemap_map(page_index, file_size) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                not_ready = true;
+                break;
+            }
+            Err(_) => {
+                cache_errors = cache_errors.saturating_add(1);
+                break;
+            }
+        };
+        let ppn = frame.ppn;
+        if area.inner.alloc_in_memory(vpn, frame).is_err() {
+            state_conflicts = state_conflicts.saturating_add(1);
+            continue;
+        }
+        if mapper.map_user_page(vpn, ppn, map_perm).is_err() {
+            area.inner.remove_in_memory(&vpn);
+            cache_errors = cache_errors.saturating_add(1);
+            break;
+        }
+        pc.map_page(page_index);
+        mapped = mapped.saturating_add(1);
+    }
+
+    crate::task::perf::record_filemap_pte_around(
+        examined,
+        mapped,
+        not_ready,
+        state_conflicts,
+        cache_errors,
+    );
+    crate::task::perf::FILEMAP_FAULT_FRAMES
+        .fetch_add(mapped, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Populate one private ELF page on first access.
@@ -365,6 +443,16 @@ pub(super) fn filemap_read_fault<T: PageTable>(
         return FaultOutcome::Error(err);
     }
     pc.map_page(page_index);
+    map_resident_filemap_tail(
+        area,
+        mapper,
+        &pc,
+        ctx.vpn,
+        page_index,
+        fault_around_pages,
+        file_size,
+        map_perm,
+    );
     let map_ticks = crate::task::perf::perf_time_now().wrapping_sub(_map_start);
     crate::task::perf::FILEMAP_MAP_USER_TICKS
         .fetch_add(map_ticks, core::sync::atomic::Ordering::Relaxed);

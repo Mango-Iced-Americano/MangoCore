@@ -25,7 +25,7 @@ pub static STATS_PROFILE: core::sync::atomic::AtomicUsize =
 /// `/sys/kernel/stats/taskq` 调度计数器字段语义版本。
 pub const SCHED_COUNTER_SCHEMA_VERSION: usize = 6;
 /// `/sys/kernel/stats/vm` filemap counter field semantics version.
-pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 3;
+pub const FILEMAP_COUNTER_SCHEMA_VERSION: usize = 4;
 /// `/sys/kernel/stats/pagefault` action/access/outcome field semantics version.
 pub const PAGEFAULT_COUNTER_SCHEMA_VERSION: usize = 4;
 
@@ -229,6 +229,12 @@ mod enabled {
     pub static FILEMAP_FAULT_AROUND_USEFUL_HITS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_UNUSED_DISCARDS: AtomicUsize = AtomicUsize::new(0);
     pub static FILEMAP_FAULT_AROUND_ABORTS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_PAGES_EXAMINED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_PAGES_MAPPED: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_NOT_READY_STOPS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_STATE_CONFLICTS: AtomicUsize = AtomicUsize::new(0);
+    pub static FILEMAP_PTE_AROUND_CACHE_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
     // ── TLB flush cycle counters ──
     pub static TLB_PAGE_FLUSH_CYCLES: AtomicUsize = AtomicUsize::new(0);
@@ -692,6 +698,27 @@ mod enabled {
     pub fn record_filemap_fault_around_abort() {
         if memory_io_stats_enabled() {
             FILEMAP_FAULT_AROUND_ABORTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_filemap_pte_around(
+        examined: usize,
+        mapped: usize,
+        not_ready: bool,
+        state_conflicts: usize,
+        cache_errors: usize,
+    ) {
+        if !memory_io_stats_enabled() {
+            return;
+        }
+        FILEMAP_PTE_AROUND_CALLS.fetch_add(1, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_EXAMINED.fetch_add(examined, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_MAPPED.fetch_add(mapped, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_STATE_CONFLICTS.fetch_add(state_conflicts, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CACHE_ERRORS.fetch_add(cache_errors, Ordering::Relaxed);
+        if not_ready {
+            FILEMAP_PTE_AROUND_NOT_READY_STOPS.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -3073,6 +3100,12 @@ mod enabled {
         FILEMAP_FAULT_AROUND_USEFUL_HITS.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_UNUSED_DISCARDS.store(0, Ordering::Relaxed);
         FILEMAP_FAULT_AROUND_ABORTS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CALLS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_EXAMINED.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_PAGES_MAPPED.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_NOT_READY_STOPS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_STATE_CONFLICTS.store(0, Ordering::Relaxed);
+        FILEMAP_PTE_AROUND_CACHE_ERRORS.store(0, Ordering::Relaxed);
 
         // ── TLB flush cycles ──
         TLB_PAGE_FLUSH_CYCLES.store(0, Ordering::Relaxed);
@@ -4216,6 +4249,17 @@ pub fn record_filemap_fault_around_abort() {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_filemap_pte_around(
+    _examined: usize,
+    _mapped: usize,
+    _not_ready: bool,
+    _state_conflicts: usize,
+    _cache_errors: usize,
+) {
+}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_frame_global_alloc_lock(_wait_ticks: usize, _hold_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -4556,6 +4600,12 @@ perf_stub_counter!(FILEMAP_FAULT_AROUND_BACKEND_RUNS);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_USEFUL_HITS);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_UNUSED_DISCARDS);
 perf_stub_counter!(FILEMAP_FAULT_AROUND_ABORTS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_CALLS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_PAGES_EXAMINED);
+perf_stub_counter!(FILEMAP_PTE_AROUND_PAGES_MAPPED);
+perf_stub_counter!(FILEMAP_PTE_AROUND_NOT_READY_STOPS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_STATE_CONFLICTS);
+perf_stub_counter!(FILEMAP_PTE_AROUND_CACHE_ERRORS);
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
