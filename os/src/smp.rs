@@ -12,7 +12,12 @@ use core::{
 };
 
 pub const BOOT_CPU_ID: usize = 0;
-pub const MAX_CPUS: usize = 8;
+/// Maximum topology supported by the shared SMP tables.
+///
+/// The final BuildStorm contract uses 8 RV64 vCPUs and 12 LA64 vCPUs.  Keep
+/// one architecture-neutral ceiling so every per-CPU table has the same safe
+/// index domain; architecture makefiles still reject unsupported run sizes.
+pub const MAX_CPUS: usize = 12;
 /// 精确 shootdown 在 hard IRQ 中可执行的最大连续页数。
 ///
 /// 超过该跨度时上层改用全用户 TLB 失效，从而为软件 IPI
@@ -339,11 +344,26 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(5),
     PerCpu::new(6),
     PerCpu::new(7),
+    PerCpu::new(8),
+    PerCpu::new(9),
+    PerCpu::new(10),
+    PerCpu::new(11),
 ];
 
-// build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
+const fn parse_configured_cpu_count(value: &[u8]) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < value.len() {
+        count = count * 10 + (value[index] - b'0') as usize;
+        index += 1;
+    }
+    count
+}
+
+// build.rs 会拒绝架构构建合同之外的参数，因此这里可以无分支解析十进制值。
 // FDT `/cpus` 探测失败（如 LA64 静态板级）时作为运行时 CPU 数的兜底值。
-const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
+const CONFIGURED_CPU_COUNT: usize =
+    parse_configured_cpu_count(env!("MANGO_CORE_NUM").as_bytes());
 
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;

@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
 use user_lib::{
     chdir, close, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction,
-    sleep, sleep_blocking, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT, SIGKILL,
-    SIGTERM,
+    sleep, sleep_blocking, waitpid, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT,
+    SIGKILL, SIGTERM,
 };
 
 #[path = "init/mounts.rs"]
@@ -24,6 +24,22 @@ const BUILDSTORM_INIT: &str = "/sbin/init\0";
 const BUILDSTORM_FALLBACK_INIT: &str = "/init\0";
 const BUILDSTORM_SCRIPT: &str = "/glibc/buildstorm_testcode.sh\0";
 const BUILDSTORM_SHELL: &str = "/bin/sh\0";
+const BUILDSTORM_SHELL_C: &str = "-c\0";
+const BUILDSTORM_PRECLEAN: &str = concat!(
+    r#"case "$(uname -m 2>/dev/null)" in
+  riscv64) AXTGT=riscv64gc-unknown-linux-musl ;;
+  loongarch64) AXTGT=loongarch64-unknown-linux-musl ;;
+  *) echo "BUILDSTORM_ARCH fail machine=$(uname -m 2>/dev/null)"; exit 125 ;;
+esac
+cd /work/tgoskits || { echo "BUILDSTORM_PRECLEAN fail reason=missing-worktree"; exit 125; }
+if ! rm -rf "target/$AXTGT" || [ -e "target/$AXTGT" ] || [ -L "target/$AXTGT" ]; then
+  echo "BUILDSTORM_PRECLEAN fail target=$AXTGT"
+  exit 125
+fi
+echo "BUILDSTORM_PRECLEAN ok target=$AXTGT"
+"#,
+    "\0"
+);
 const SIGACTION_RESTART: usize = 0x10000000;
 static CHILD_EVENT: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -130,6 +146,44 @@ fn enable_buildstorm_cpus() {
     } else {
         println!("[init] BuildStorm sched_setaffinity(all) enabled");
     }
+}
+
+/// Establish a clean-target precondition before the official script starts.
+///
+/// The official runner does not fail when `rm -rf` leaves entries behind.  A
+/// separate child keeps shell expansion out of PID1 and turns that condition
+/// into a hard test-contract failure before any timed marker is emitted.
+fn prepare_buildstorm_target() -> bool {
+    let child = fork();
+    if child == 0 {
+        let env = runner_environment("buildstorm");
+        exec(
+            BUILDSTORM_SHELL,
+            &[
+                BUILDSTORM_SHELL.as_ptr(),
+                BUILDSTORM_SHELL_C.as_ptr(),
+                BUILDSTORM_PRECLEAN.as_ptr(),
+                core::ptr::null(),
+            ],
+            &env,
+        );
+        exit(127);
+    }
+    if child < 0 {
+        println!("[init] BuildStorm preclean fork failed: {}", child);
+        return false;
+    }
+
+    let mut status = 0;
+    let waited = waitpid(child as usize, &mut status);
+    if waited != child || status != 0 {
+        println!(
+            "[init] BuildStorm preclean failed: waited={} status={}",
+            waited, status
+        );
+        return false;
+    }
+    true
 }
 
 fn write_buildstorm_stat_control(path: &str, value: &[u8]) -> bool {
@@ -376,6 +430,10 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
         mounts::mount_tmpfs("/tmp\0");
         if !enter_buildstorm_root() {
             println!("[init] BuildStorm root unavailable; entering rescue");
+            rescue_forever();
+        }
+        if !prepare_buildstorm_target() {
+            println!("[init] BuildStorm clean-target contract failed; entering rescue");
             rescue_forever();
         }
         if let Some((profile_name, profile_value, all)) = buildstorm_stats {

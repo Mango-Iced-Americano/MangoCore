@@ -40,7 +40,7 @@ export CARGO_NET_OFFLINE=true
 case "$(uname -m 2>/dev/null)" in
   loongarch64) AXARCH=loongarch64; AXTGT=loongarch64-unknown-linux-musl ;;
   riscv64)     AXARCH=riscv64;     AXTGT=riscv64gc-unknown-linux-musl ;;
-  *)           AXARCH=riscv64;     AXTGT=riscv64gc-unknown-linux-musl ;;
+  *)           echo "BUILDSTORM_ARCH fail machine=$(uname -m 2>/dev/null)"; exit 1 ;;
 esac
 echo "[buildstorm] STEP2 toolchain-check"
 if rustc --version && cargo --version; then
@@ -67,7 +67,11 @@ cd /work/tgoskits 2>/dev/null || {
     echo "#### OS COMP TEST GROUP END buildstorm ####"
     exit 1
 }
-rm -rf "target/$AXTGT"
+if ! rm -rf "target/$AXTGT" || [ -e "target/$AXTGT" ] || [ -L "target/$AXTGT" ]; then
+    echo "BUILDSTORM_PRECLEAN fail target=$AXTGT"
+    exit 1
+fi
+echo "BUILDSTORM_PRECLEAN ok target=$AXTGT"
 echo "[buildstorm] STEP7 prebuild-xtask"
 echo "----- pre-build tg-xtask (untimed) -----"
 cargo build -p tg-xtask 2>&1 || true

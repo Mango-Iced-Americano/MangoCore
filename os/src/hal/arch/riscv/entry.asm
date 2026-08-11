@@ -1,6 +1,8 @@
     # MangoCore reserves a fixed maximum so every possible QEMU hart has a
     # private stack before Rust, the allocator, or any shared state is usable.
-    .equ MAX_CPUS, 8
+    # Match crate::smp::MAX_CPUS. RV64 formal runs remain capped at 8 by the
+    # architecture makefile, while the shared SMP storage also serves LA64 12C.
+    .equ MAX_CPUS, 12
     .equ BOOT_STACK_SHIFT, 18
     .equ BOOT_STACK_SIZE, 1 << BOOT_STACK_SHIFT
     # The early FDT parser runs before the final kernel page table exists.

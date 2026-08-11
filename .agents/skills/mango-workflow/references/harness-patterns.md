@@ -1468,3 +1468,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **检查方式**：保留可轮询的 PTY/session，等到 `Finished ...` 与 make 退出；必要时再以
   容器内精确命令行过滤确认没有对应构建子进程。不使用宽泛 `pgrep cargo`，避免把队友容器或
   无关 host build 当成本轮进程。
+
+## 跨架构性能测试必须先校验用户态架构合同
+
+- **现象**：双架构 BuildStorm 都能完成，但日志中的 target 相同，原始墙钟差距被误当成内核架构性能差。
+- **根因**：`uname -m` 返回项目内部简称，官方脚本只识别 Linux ABI 名称；未知值又静默回退到某个默认 target。QEMU 核数、target 清洁状态或代码提交不同会进一步污染比较。
+- **修复**：内核返回标准 `riscv64`/`loongarch64`；测试入口对未知架构和残留 target fail-closed；正式启动入口按评分合同选择 RV64 8 核、LA64 12 核，并记录相同的内核、submodule、镜像与脚本哈希。
+- **教训**：跨架构性能数据先验证“架构名 → 编译 target → vCPU 数 → clean target → commit/hash”整条合同，再比较归一化得分。任何 fallback 或清理错误都使该轮数据无效。
+- **相关文件**：`os/src/syscall/process/ids.rs`、`user/src/bin/init.rs`、`user/src/bin/test_runner/groups/execute.rs`、`Makefile`、`os/make/arch/{rv64,la64}-settings.mk`

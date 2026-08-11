@@ -87,7 +87,7 @@ run: validate-run print-logo toolchain-preflight
 # contract remains limited to normal/regression.
 buildstorm: toolchain-preflight
 	$(if $(filter rv64 la64,$(ARCH)),,$(error ARCH must be rv64 or la64))
-	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=normal" "CORE_NUM=$(or $(CORE_NUM),8)" "QEMU_MEMORY=$(or $(QEMU_MEMORY),8G)" buildstorm
+	$(MAKE) -C os "ARCH=$(ARCH)" "MODE=$(MODE)" "PROFILE=normal" "CORE_NUM=$(or $(CORE_NUM),$(if $(filter la64,$(ARCH)),12,8))" "QEMU_MEMORY=$(or $(QEMU_MEMORY),8G)" buildstorm
 
 test: toolchain-preflight
 	$(call validate-formal-inputs)
