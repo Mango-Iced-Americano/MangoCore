@@ -66,6 +66,9 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
+              # GitHub runner checkout 的文件 owner 是 runner 用户，容器内以 root 跑 git 会触发
+              # dubious ownership；prepare-cargo-config 的 submodule 更新会失败。先放行全部目录。
+              git config --global --add safe.directory "*"
               make toolchain-setup
             '
       - name: Clippy rv64
@@ -111,6 +114,9 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
+              # GitHub runner checkout 的文件 owner 是 runner 用户，容器内以 root 跑 git 会触发
+              # dubious ownership；prepare-cargo-config 的 submodule 更新会失败。先放行全部目录。
+              git config --global --add safe.directory "*"
               make toolchain-setup
             '
       - name: Cargo test rv64
@@ -156,6 +162,9 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
+              # GitHub runner checkout 的文件 owner 是 runner 用户，容器内以 root 跑 git 会触发
+              # dubious ownership；prepare-cargo-config 的 submodule 更新会失败。先放行全部目录。
+              git config --global --add safe.directory "*"
               make toolchain-setup
             '
       - name: ktest rv64
@@ -199,6 +208,9 @@ jobs:
             -e RUSTUP_HOME=/root/.rustup \
             -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
+              # GitHub runner checkout 的文件 owner 是 runner 用户，容器内以 root 跑 git 会触发
+              # dubious ownership；prepare-cargo-config 的 submodule 更新会失败。先放行全部目录。
+              git config --global --add safe.directory "*"
               make toolchain-setup
             '
       - name: Regression rv64
@@ -251,7 +263,7 @@ jobs:
         run: docker compose up -d
       - name: Provision toolchain
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'make toolchain-setup'
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'git config --global --add safe.directory "*" && make toolchain-setup'
       - name: Ensure test image
         run: |
           docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
@@ -313,7 +325,7 @@ jobs:
         run: docker compose up -d
       - name: Provision toolchain
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'make toolchain-setup'
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'git config --global --add safe.directory "*" && make toolchain-setup'
       - name: Ensure test image
         run: |
           docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
