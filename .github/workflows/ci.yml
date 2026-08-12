@@ -20,6 +20,10 @@ concurrency:
 env:
   DOCKER_IMAGE: zhouzhouyi/os-contest:20260510
   QEMU_TIMEOUT: ${{ inputs.qemu_timeout || '7200' }}
+  # GitHub runner 在美国，直连 rsproxy.cn 超时；rustup-setup.sh 的默认镜像
+  # 只在环境变量未设置时兜底，这里显式指向官方 CDN 并透传给容器。
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
 
 jobs:
   # ════════════════════════════════════════════════
@@ -60,7 +64,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               make toolchain-setup
             '
@@ -68,7 +72,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               # 对齐 os/make/rv64.mk 真实内核构建 features（riscv + block_virt + oom_handler）
               cd /app/os && cargo clippy --features "riscv block_virt oom_handler" -- -W warnings
@@ -77,7 +81,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               # 对齐 os/make/la64.mk 真实内核构建 features（boot_la_qemu 已含 oom_handler，显式列出保持一致）
               cd /app/os && CARGO_BUILD_TARGET=loongarch64-unknown-linux-gnu cargo clippy --features "boot_la_qemu block_virt_pci oom_handler" -- -W warnings
@@ -105,7 +109,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               make toolchain-setup
             '
@@ -113,7 +117,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               # The bare-metal target has no libtest runner; unit tests execute on the host.
               cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
@@ -122,7 +126,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               # The bare-metal target has no libtest runner; unit tests execute on the host.
               cd /app/os && CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu cargo test --lib -p mango-kernel-core
@@ -150,7 +154,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               make toolchain-setup
             '
@@ -158,7 +162,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               cd /app && make -C os rv64-ktest CORE_NUM=4
             '
@@ -166,7 +170,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               cd /app && make -C os la64-ktest CORE_NUM=4
             '
@@ -193,7 +197,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               make toolchain-setup
             '
@@ -201,7 +205,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               cd /app && make test ARCH=rv64 PROFILE=regression CORE_NUM=4
             '
@@ -209,7 +213,7 @@ jobs:
         run: |
           docker compose exec -T \
             -e RUSTUP_HOME=/root/.rustup \
-            -e CARGO_HOME=/root/.cargo \
+            -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT \
             os-dev bash -lc '
               cd /app && make test ARCH=la64 PROFILE=regression CORE_NUM=4
             '
@@ -247,41 +251,29 @@ jobs:
         run: docker compose up -d
       - name: Provision toolchain
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc 'make toolchain-setup'
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'make toolchain-setup'
       - name: Ensure test image
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             cd /app && mkdir -p fs-img-dir
             if [ ! -s fs-img-dir/sdcard-rv.img.xz ] || ! xz -t fs-img-dir/sdcard-rv.img.xz; then rm -f fs-img-dir/sdcard-rv.img.xz; make testsuits-download; fi'
-      - name: Write test config
-        run: |
-          cat > os_test_ci.conf <<'EOF'
-          mode=run
-          mask=0xFDF
-          ltp_runner=suite
-          ltp_libc=both
-          ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
-          ltp_exclude=execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01
-          ltp_exclude_musl=
-          ltp_exclude_glibc=
-          ltp_include=
-          ltp_from=
-          EOF
+      # 测试配置直接读取仓库根目录的 os_test_ci.conf（挂载为 /app/os_test_ci.conf），
+      # 由 Inject config 步骤经 CONF_FILE=../os_test_ci.conf 注入镜像；修改配置只需改仓库文件。
       - name: Build kernel and decompress image
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euxo pipefail; cd /app
             make all MODE=release
             xz -dkcf fs-img-dir/sdcard-rv.img.xz > sdcard-rv.img'
       - name: Inject config
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euxo pipefail; cd /app
             make -C os conf-inject CONF_ARCH=rv64 CONF_BLK_MODE=virt CONF_FILE=../os_test_ci.conf'
       - name: Run QEMU
         run: |
           set -euo pipefail
-          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euo pipefail
             cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/rv64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-rv64.log'
       - name: Score
@@ -321,41 +313,29 @@ jobs:
         run: docker compose up -d
       - name: Provision toolchain
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc 'make toolchain-setup'
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc 'make toolchain-setup'
       - name: Ensure test image
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             cd /app && mkdir -p fs-img-dir
             if [ ! -s fs-img-dir/sdcard-la.img.xz ] || ! xz -t fs-img-dir/sdcard-la.img.xz; then rm -f fs-img-dir/sdcard-la.img.xz; make testsuits-download; fi'
-      - name: Write test config
-        run: |
-          cat > os_test_ci.conf <<'EOF'
-          mode=run
-          mask=0xFDF
-          ltp_runner=suite
-          ltp_libc=both
-          ltp_suites=syscalls,fs,fs_perms_simple,fs_readonly,fcntl-locktests
-          ltp_exclude=execve05,fallocate06,mmap16,rename10,shmctl01,copy_file_range02,pipe13,splice02,splice07,timer_settime03,statx11,prot_hsymlinks,send02,futex_cmp_requeue01
-          ltp_exclude_musl=
-          ltp_exclude_glibc=
-          ltp_include=
-          ltp_from=
-          EOF
+      # 测试配置直接读取仓库根目录的 os_test_ci.conf（挂载为 /app/os_test_ci.conf），
+      # 由 Inject config 步骤经 CONF_FILE=../os_test_ci.conf 注入镜像；修改配置只需改仓库文件。
       - name: Build kernel and decompress image
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euxo pipefail; cd /app
             make all MODE=release
             xz -dkcf fs-img-dir/sdcard-la.img.xz > sdcard-la.img'
       - name: Inject config
         run: |
-          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euxo pipefail; cd /app
             make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf'
       - name: Run QEMU
         run: |
           set -euo pipefail
-          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo os-dev bash -lc '
+          docker compose exec -T -e QEMU_TIMEOUT -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euo pipefail
             cd /app/os && timeout ${QEMU_TIMEOUT}s make -f make/la64.mk derived-comp CORE_NUM=4 2>&1 | tee /tmp/qemu-la64.log'
       - name: Score
