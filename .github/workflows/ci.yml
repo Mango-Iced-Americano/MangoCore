@@ -335,9 +335,8 @@ jobs:
           docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             cd /app && mkdir -p fs-img-dir
             if [ ! -s fs-img-dir/sdcard-la.img.xz ] || ! xz -t fs-img-dir/sdcard-la.img.xz; then rm -f fs-img-dir/sdcard-la.img.xz; make testsuits-download; fi'
-      # 测试配置直接读取仓库根目录的 os_test_ci_la.conf（挂载为 /app/os_test_ci_la.conf），
-      # 由 Inject config 步骤经 CONF_FILE=../os_test_ci_la.conf 注入镜像；修改配置只需改仓库文件。
-      # la64 独立配置：mask 去掉 netperf（TCP_CRR 触发 HEAP ALLOCATION FAILED panic）。
+      # 测试配置直接读取仓库根目录的 os_test_ci.conf（挂载为 /app/os_test_ci.conf），
+      # 一套配置同时服务 rv64/la64（mask 取交集 0x6DDF，已跳过 la64 会 panic 的 netperf）。
       - name: Build kernel and decompress image
         run: |
           docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
@@ -348,7 +347,7 @@ jobs:
         run: |
           docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo -e RUSTUP_DIST_SERVER -e RUSTUP_UPDATE_ROOT os-dev bash -lc '
             set -euxo pipefail; cd /app
-            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci_la.conf'
+            make -C os conf-inject CONF_ARCH=la64 CONF_BLK_MODE=virt_pci CONF_FILE=../os_test_ci.conf'
       - name: Run QEMU
         run: |
           set -euo pipefail
