@@ -138,13 +138,22 @@ fn enter_buildstorm_root() -> bool {
     true
 }
 
-fn enable_buildstorm_cpus() {
+/// Allow PID1 and every later fork/exec descendant to run on all online CPUs.
+///
+/// The normal contest path executes CAgent and BuildStorm through test-runner,
+/// so widening only the dedicated `profile=buildstorm` path silently leaves
+/// the scored workload pinned to CPU0.  Linux affinity is inherited across
+/// fork and preserved across exec; setting it once on PID1 therefore covers
+/// both launch paths without workload-specific scheduler policy.
+fn enable_all_online_cpus() -> bool {
     let mask = usize::MAX;
     let ret = sys_sched_setaffinity(0, size_of::<usize>(), &mask as *const usize as *const u8);
     if ret < 0 {
-        println!("[init] BuildStorm sched_setaffinity(all) failed: {}", ret);
+        println!("[init] PID1 sched_setaffinity(all) failed: {}", ret);
+        false
     } else {
-        println!("[init] BuildStorm sched_setaffinity(all) enabled");
+        println!("[init] PID1 sched_setaffinity(all) enabled");
+        true
     }
 }
 
@@ -421,6 +430,11 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
     mounts::prepare_pseudo_fs_framework();
     mounts::mount_pseudo_filesystems();
     let profile = boot_profile();
+    if profile != "regression" && !enable_all_online_cpus() {
+        println!("[init] MANGO_RUNNER_FAILURE: cannot enable all online CPUs");
+        shutdown();
+        rescue_forever();
+    }
     let buildstorm_stats = if profile == "buildstorm" {
         buildstorm_stats_profile()
     } else {
@@ -445,7 +459,6 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
                 println!("[init] BuildStorm stats unavailable; collector not started");
             }
         }
-        enable_buildstorm_cpus();
         exec_buildstorm_init();
     }
     if profile != "regression" {

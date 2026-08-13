@@ -1,6 +1,8 @@
 {
     "debug": false,
-    "qemu.smp": 1,
-    "qemu.mem": "1G",
+    "qemu.smp": 8,
+    "qemu.smp.rv64": 8,
+    "qemu.smp.la64": 12,
+    "qemu.mem": "8G",
     "qemu.timeout": 3600
 }

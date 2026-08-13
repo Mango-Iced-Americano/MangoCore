@@ -1488,6 +1488,27 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **教训**：跨架构性能数据先验证“架构名 → 编译 target → vCPU 数 → clean target → commit/hash”整条合同，再比较归一化得分。任何 fallback 或清理错误都使该轮数据无效。
 - **相关文件**：`os/src/syscall/process/ids.rs`、`user/src/bin/init.rs`、`user/src/bin/test_runner/groups/execute.rs`、`Makefile`、`os/make/arch/{rv64,la64}-settings.mk`
 
+## 正式 SMP 验收必须同时闭合宿主、构建和继承三层合同
+
+- **现象**：QEMU 命令显示 `-smp 8`，内核也启动了 8 个 hart，但 CAgent/BuildStorm
+  仍只使用一个宿主核；专用性能 profile 的多核测试正常，正式 `mode=run` 却退化为
+  单核。
+- **根因**：SMP 拓扑不是单一开关。至少有三层独立合同：宿主 runner 的 QEMU
+  `-smp/-m`，编译期 `MANGO_CORE_NUM`，以及 PID1 经 fork/exec 传给工作负载的
+  affinity。只修专用 profile 会掩盖 normal test-runner 链路仍继承 CPU0-only 初始
+  mask；仓库内兼容 judge 配置的 `qemu.smp=1` 还可能在启动前再次降级。
+- **修复模式**：保留内核 TCB/工作线程的 CPU0 安全默认值，由 normal PID1 在 AP
+  全部 online 后一次性放开用户态 affinity；正式 RV/LA 构建显式传递 8/12 核；judge
+  配置同时保留兼容默认和架构专属值。若 RV/LA 由两个线程共享同一个 Job 并发启动，
+  必须为每个线程提供复制后的架构配置视图，不能运行期改写共享 `qemu.smp` 形成竞态。
+- **验收**：不要只检查命令行。发烟必须走 normal PID1 → test-runner → chroot 工作负载
+  链路，并在 CAgent 与 BuildStorm 两个真实后代中分别读取 `nproc`（raw
+  `sched_getaffinity`）、在线 CPU 数和 `/proc/cpuinfo`。若 `/proc/[pid]/status` 的
+  `Cpus_allowed` 是占位实现，不得把它用于结论；最终同时保存 OpenSBI hart 数、内核
+  online mask 和两个后代的 `nproc`。
+- **相关文件**：`judge/config.json`、`os/Makefile`、`user/src/bin/init.rs`、
+  `scripts/test-canonical-build-graph.sh`。
+
 ## 省略调度切换时必须保持运行时间计数连续
 
 - **现象**：优化 timer tick 后，任务在没有本地竞争者时继续原地运行，不再经过 schedule-out；基于 context switch 才结算的 `task_run_slice_ticks_total` 因而停止增长，使区间平均忙核错误地接近零。

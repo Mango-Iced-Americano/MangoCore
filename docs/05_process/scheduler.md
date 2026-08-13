@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-06
+last_update: 2026-08-13
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -22,8 +22,9 @@ tags: [process, scheduler, task-manager, processor]
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
-拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通任务的初始 mask 仍为
-CPU0-only，但首次发布已按任务 affinity 和近似负载选点。focused ktest 的短 kernel-only
+拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；底层 TCB 构造保留
+CPU0-only 安全初值，正式 normal PID1 在派生 test-runner 前将 mask 扩为全部在线 CPU；
+首次发布按继承的任务 affinity 和近似负载选点。focused ktest 的短 kernel-only
 任务可通过同一通用入口远程入队，并能在阻塞后
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
 发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
@@ -144,8 +145,8 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。普通任务仍从 CPU0-only mask 起步；显式设置过 affinity 的父线程 clone/fork
-时，子任务会继承该 mask。新任务没有可复用的最近运行位置：允许集合存在真正空闲的
+调度域。正式用户任务从 PID1 的全核 mask 起步；显式设置过 affinity 的父线程
+clone/fork 时，子任务继续继承该 mask。新任务没有可复用的最近运行位置：允许集合存在真正空闲的
 CPU 时先投递到该 CPU，只有所有允许 CPU 都忙时才回退到 B37 的负载加 locality 选择器。
 受控 ktest 任务也走同一入口，单 bit mask 仍保证它精确到达指定 AP。
 
@@ -156,8 +157,8 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
 稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
 新任务与 wake 的选择基础设施（新任务 idle-first、阻塞 wake 保留 locality），B38 已让远程 Running/Blocking 走 owner
-安全点交接。work stealing 已可用于 affinity 允许的任务，但普通用户任务默认 mask 仍为
-CPU0-only，因此这不等于已经解除共享子系统门禁。
+安全点交接。work stealing 可用于 affinity 允许的任务；正式 normal 用户进程树已经
+继承 PID1 的全核 mask，独立测试 TCB 则继续由用例显式设置精确 mask。
 
 ### 3.1 Work stealing claim 顺序
 
@@ -201,7 +202,8 @@ CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择�
 
 `publish_task_on()` 本身仍是精确目标提交原语，不做负载选择；普通
 `publish_task()` 已在 B37 按 affinity/locality/近似负载选择目标，然后调用该原语。
-普通任务的默认 mask 仍是 bit0，因此“放置器已通用化”不等于“默认用户任务已全核化”。
+独立构造的 TCB 默认 mask 仍是 bit0；正式 normal 路径会在派生用户任务前由 PID1
+通过 `sched_setaffinity` 扩为全部在线 CPU，因此不会把测试进程树锁死在 CPU0。
 普通 clone 使用可失败的 `try_publish_task_on()`：最终门禁已关闭时返回 `EAGAIN`，
 并由 syscall 层清理尚未发布的用户资源；启动/ktest wrapper 仍把拒绝视为不变量错误。
 
