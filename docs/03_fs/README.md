@@ -4,7 +4,7 @@ module: fs
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: "2026-08-11"
+last_updated: "2026-07-23"
 code_paths:
   - "os/src/fs/"
 entry_points:
@@ -96,22 +96,6 @@ FS 子系统采用层次化 VFS 设计，自顶向下依次为：
 **PageCache (os/src/fs/page_cache.rs):** 通用缓存层，状态机为 Loading → UpToDate ↔ Dirty → Writeback。单个 packed `PG_*` 原子位负责每页写入、回写和截断之间的序列化；正常 write 仅发布每页脏位，后台写回从 32 MiB 水位开始按空闲帧比例协作执行，`fsync`/最后一次 `close` 负责持久化，`reclaim.rs` 周期性探测并回收。
 
 **another_ext4 时间戳缓存：** regular-file 写成功后只在 `InodeLifetime` 更新 mtime/ctime 原子缓存，不读取或修改 ext4 inode 块。`metadata()` 在缓存 dirty 时返回新时间戳；`fsync`、`syncfs` 与全局 `sync` 在数据回写后将两个时间戳合并为一次 `setattr`，仅在最终设备 flush 成功后清除 dirty 标记。
-
-**another_ext4 持久化与事务合并：** `fsync`/`syncfs` 仅回写目标文件系统由
-`InodeLifetime` 强引用保留的 dirty PageCache，不扫描无关 mount 的全局
-PageCache registry。size generation、mtime/ctime dirty 位和 dirty-cache pin 只在
-设备持久化边界成功后清除，flush 失败保留完整重试状态。全局 `sync`
-对已由 VFS lifecycle 同步的 clean 实例不再重复提交。普通硬链接、非最后
-unlink、regular-file replacement rename 与 orphan reclaim 可共享最多 256 个
-staged metadata blocks 的有界 journal batch；`fsync`/`syncfs`/`sync`/unmount 仍强制
-按 descriptor→commit→checkpoint→tail-update 四阶段落盘。一次 orphan drain 先验证整条链并
-按 head-to-tail 顺序回收，避免每个 inode 重新扫描链表的 O(N²) `sync` 放大。
-
-**another_ext4 目录查询缓存：** 同一 `(filesystem, inode, inode-generation)` 的所有
-VFS wrapper 通过 `InodeLifetime` 共享完整目录快照，`find()`、`list()` 和
-`list_dirents()` 复用同一次 `listdir()`。create/link/unlink/rename 等命名空间事务成功后
-递增目录 generation 并清除相关父目录快照；后台扫描只有在 generation 前后一致时才能
-发布，因此与修改并发的旧扫描不会重新安装 stale dentry。
 
 ### 特殊文件描述符
 

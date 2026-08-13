@@ -41,6 +41,33 @@ overall=0
 pass() { printf 'PASS: %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; overall=1; }
 
+python3 - "$repo_root/judge/config.json" <<'PY' || overall=1
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as config_file:
+    config = json.load(config_file)
+
+expected = {
+    "qemu.smp": 8,
+    "qemu.smp.rv64": 8,
+    "qemu.smp.la64": 12,
+    "qemu.mem": "8G",
+}
+for key, value in expected.items():
+    if config.get(key) != value:
+        raise SystemExit(f"FAIL: judge config {key} must be {value!r}")
+print("PASS: judge config preserves the formal RV64 8-CPU and LA64 12-CPU topology")
+PY
+
+if grep -F 'rv_job = ArchConfigJob(job, "rv64")' "$repo_root/judge/run.py" >/dev/null \
+    && grep -F 'la_job = ArchConfigJob(job, "la64")' "$repo_root/judge/run.py" >/dev/null \
+    && grep -F 'config.get(f"qemu.smp.{self._arch}", formal_cpus[self._arch])' "$repo_root/judge/run.py" >/dev/null; then
+    pass 'judge runner gives concurrent RV64 and LA64 QEMUs isolated CPU topology views'
+else
+    fail 'judge runner must not share one qemu.smp value across both architectures'
+fi
+
 require_phony() {
     target=$1
     if awk -v target="$target" '
@@ -91,6 +118,18 @@ if trace=$(make -C "$repo_root" -n all 2>&1); then
     else
         fail 'root all must serialize RV64, LA64, then compatibility publication'
     fi
+    case "$trace" in
+        *'ARCH=rv64 PROFILE=normal CORE_NUM=8 -f make/rv64.mk all'*)
+            pass 'canonical RV64 product is built for the official 8-CPU topology'
+            ;;
+        *) fail 'canonical RV64 product must set CORE_NUM=8 explicitly' ;;
+    esac
+    case "$trace" in
+        *'ARCH=la64 PROFILE=normal CORE_NUM=12 -f make/la64.mk all'*)
+            pass 'canonical LA64 product is built for the official 12-CPU topology'
+            ;;
+        *) fail 'canonical LA64 product must set CORE_NUM=12 explicitly' ;;
+    esac
 else
     fail 'root all dry-run must succeed'
 fi

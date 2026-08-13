@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-11
+last_updated: 2026-08-09
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -97,8 +97,7 @@ EFI 查找精确返回 `MissingSystemTable`，内核才从 QEMU virt 规定的�
 `PlatformInfo`。该对象在启动 AP 前通过 `spin::Once` 完整发布；AP 不解析固件数据、
 不写平台状态，只读取 BSP 已发布的快照。
 
-共享 SMP 表与双架构入口都按 12 个硬件 CPU 的上限预留独立 boot stack；正式
-BuildStorm 拓扑由架构 Make 合同进一步限制为 RV64 8 核、LA64 12 核。入口在
+RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入口在
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`
 计算向下增长栈的初始栈顶。整个 `.bss.stack` 位于普通 `sbss` 之前，因此
 CPU0 的 `mem_clear()` 不会清除 AP 正在使用的启动栈。

@@ -25,9 +25,6 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     if is_nonblock {
         read_into_user(&file, token, buf, count)
     } else if let Some(wq) = file.read_wait_queue() {
-        #[cfg(feature = "perf_stats")]
-        let _blocked_reason = (file.file_type() == FileType::Pipe)
-            .then(|| task.blocked_reason_scope(crate::task::BlockedReason::Pipe));
         match WaitQueue::wait_until_interruptible(wq.queue(), || {
             let ret = read_into_user(&file, token, buf, count);
             if ret == -(SyscallErr::EAGAIN as isize) { None } else { Some(ret) }

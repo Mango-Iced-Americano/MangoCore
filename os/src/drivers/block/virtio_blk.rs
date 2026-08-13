@@ -30,36 +30,19 @@ const BLOCK_RATIO: usize = BLOCK_SZ / VIRT_IO_BLOCK_SZ;
 // is exhausted.  See virtio_dma_pool.rs.
 const MAX_VIRTIO_REQ_BYTES: usize = virtio_dma_pool::DMA_POOL_BUF_BYTES;
 
-#[inline(always)]
-fn small_dma_share_kind(len: usize) -> Option<usize> {
-    match len {
-        16 => Some(6),      // request header pool
-        1 => Some(7),       // response status pool
-        32 | 48 => Some(8), // indirect descriptor pool
-        _ => None,
-    }
-}
-
 pub struct VirtIOBlock(Mutex<VirtIOBlk<VirtioHal, MmioTransport<'static>>>);
-
-#[inline(always)]
-fn lock_virtio_device<'a, T>(mutex: &'a Mutex<T>) -> (spin::MutexGuard<'a, T>, usize) {
-    let start = perf::perf_memory_io_time_now();
-    match mutex.try_lock() {
-        Some(guard) => (guard, start),
-        None => {
-            let guard = mutex.lock();
-            let waited = perf::perf_memory_io_time_now().wrapping_sub(start);
-            perf::record_virtio_device_lock_wait(0, waited);
-            (guard, perf::perf_memory_io_time_now())
-        }
-    }
-}
 
 lazy_static! {
     static ref QUEUE_FRAMES: Mutex<BTreeMap<usize, Vec<Arc<FrameTracker>>>> =
         Mutex::new(BTreeMap::new());
 }
+
+/// Bridges the DMA pool reservation from `read_block`/`write_block` to
+/// `VirtioHal::share()`.  The virtio-drivers library calls `share()` internally
+/// during `dev.read_blocks()`/`write_blocks()`, passing through no extra
+/// parameters, so the reservation is communicated via this static.
+/// Stores `(slot, gen)` from `DmaReservation`.
+static PENDING_DMA_RESERVATION: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 impl BlockDevice for VirtIOBlock {
     fn name_style(&self) -> BlockDeviceNameStyle {
@@ -69,7 +52,7 @@ impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vread(buf.len() / VIRT_IO_BLOCK_SZ);
-        let (mut dev, hold_start) = lock_virtio_device(&self.0);
+        let mut dev = self.0.lock();
         let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
@@ -85,7 +68,10 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            virtio_dma_pool::dma_bridge_set_reservation(reservation);
+            // Store (slot, gen) for VirtioHal::share() to consume.
+            // consume the original DmaReservation — the tuple alone is enough
+            // for share() to reconstruct a DmaReservation and consume it.
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -93,29 +79,26 @@ impl BlockDevice for VirtIOBlock {
                 .ok_or(BlockDeviceError::OutOfBounds)?;
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_read();
-            #[cfg(feature = "perf_stats")]
-            let _blocked_reason = crate::task::current_task()
-                .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.read_blocks(first_sector, &mut buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_read_chunk(chunk_len);
-            perf::record_virtio_request(0, false, chunk_len);
 
             // share() should have consumed the reservation. If it didn't (e.g.
             // because the virtio-drivers library split the buffer), cancel it.
-            virtio_dma_pool::dma_bridge_cancel_pending();
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
             offset += chunk_len;
         }
-        perf::record_virtio_device_lock(0, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
         Ok(())
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
         validate_block_buffer_length(buf.len())?;
         perf::record_blk_vwrite(buf.len() / VIRT_IO_BLOCK_SZ);
-        let (mut dev, hold_start) = lock_virtio_device(&self.0);
+        let mut dev = self.0.lock();
         let _bridge = virtio_dma_pool::dma_bridge_lock();
 
         let mut offset: usize = 0;
@@ -131,7 +114,7 @@ impl BlockDevice for VirtIOBlock {
                 BLOCK_SZ
             };
 
-            virtio_dma_pool::dma_bridge_set_reservation(reservation);
+            *PENDING_DMA_RESERVATION.lock() = reservation.map(|r| (r.slot, r.gen));
 
             let first_sector = block_id
                 .checked_add(offset / BLOCK_SZ)
@@ -139,33 +122,28 @@ impl BlockDevice for VirtIOBlock {
                 .ok_or(BlockDeviceError::OutOfBounds)?;
             // One record per submitted VirtIO request, after any DMA fallback split.
             perf::record_virtio_write(chunk_len);
-            #[cfg(feature = "perf_stats")]
-            let _blocked_reason = crate::task::current_task()
-                .map(|task| task.blocked_reason_scope(crate::task::BlockedReason::BlockDevice));
             let result = dev.write_blocks(first_sector, &buf[offset..offset + chunk_len]);
             perf::record_virtio_blk_write_chunk(chunk_len);
-            perf::record_virtio_request(0, true, chunk_len);
 
-            virtio_dma_pool::dma_bridge_cancel_pending();
+            if let Some((slot, gen)) = PENDING_DMA_RESERVATION.lock().take() {
+                virtio_dma_pool::dma_pool_cancel_reservation(slot, gen);
+            }
 
             result.map_err(|_| BlockDeviceError::DeviceError)?;
 
             offset += chunk_len;
         }
-        perf::record_virtio_device_lock(0, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
         Ok(())
     }
 
     fn flush(&self) -> BlockDeviceResult {
-        let (mut dev, hold_start) = lock_virtio_device(&self.0);
+        let mut dev = self.0.lock();
         let _bridge = virtio_dma_pool::dma_bridge_lock();
         if !dev.supports_flush() {
             return Err(BlockDeviceError::FlushUnsupported);
         }
         perf::record_device_flush();
-        let result = dev.flush().map_err(|_| BlockDeviceError::DeviceError);
-        perf::record_virtio_device_lock(0, 0, perf::perf_memory_io_time_now().wrapping_sub(hold_start));
-        result
+        dev.flush().map_err(|_| BlockDeviceError::DeviceError)
     }
 
     fn supports_reliable_flush(&self) -> bool {
@@ -266,8 +244,11 @@ unsafe impl Hal for VirtioHal {
         // request header, data, response status, and the indirect descriptor
         // table. Only the data buffer (>= BLOCK_SZ) consumes the reservation;
         // the three small buffers use the single-page fallback path.
-        if buffer.len() >= BLOCK_SZ {
-            if let Some(reservation) = virtio_dma_pool::dma_bridge_take_data_reservation() {
+        let mut pending = PENDING_DMA_RESERVATION.lock();
+        if let Some((slot, gen)) = pending.take() {
+            if buffer.len() >= BLOCK_SZ {
+                drop(pending);
+                let reservation = virtio_dma_pool::DmaReservation { slot, gen };
                 let pa = virtio_dma_pool::dma_pool_consume_reserved(reservation);
                 perf::record_virtio_dma_share(0);
 
@@ -280,24 +261,10 @@ unsafe impl Hal for VirtioHal {
                 }
                 return pa;
             }
+            // Small descriptor (header/status) — put reservation back for data call
+            *pending = Some((slot, gen));
         }
-
-        // Reuse fixed single-page slots for the three descriptor sizes emitted
-        // by the block driver. Other one-page users (for example network
-        // buffers) retain the existing fallback path and its ownership map.
-        if let Some(pool_kind) = small_dma_share_kind(buffer.len()) {
-            if let Some((_slot, pa)) = virtio_dma_pool::dma_pool_try_alloc_small() {
-                perf::record_virtio_dma_share(pool_kind);
-                if matches!(
-                    direction,
-                    BufferDirection::DriverToDevice | BufferDirection::Both
-                ) {
-                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
-                        .copy_from_slice(buffer);
-                }
-                return pa;
-            }
-        }
+        drop(pending);
 
         // Fallback: single-page allocation.
         // Multi-page without reservation cannot happen because read_block/write_block

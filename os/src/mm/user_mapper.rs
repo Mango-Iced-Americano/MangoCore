@@ -161,13 +161,7 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
         ppn: PhysPageNum,
         flags: MapPermission,
     ) -> MmResult<()> {
-        let started = crate::task::perf::perf_memory_io_time_now();
-        let result = self.page_table.try_map_no_flush(vpn, ppn, flags);
-        crate::task::perf::record_pagefault_stage(
-            2,
-            crate::task::perf::perf_memory_io_time_now().wrapping_sub(started),
-        );
-        result?;
+        self.page_table.try_map_no_flush(vpn, ppn, flags)?;
         self.gather.record_change(vpn);
         Ok(())
     }

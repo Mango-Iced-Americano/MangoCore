@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-08-11
+last_update: 2026-08-08
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -71,7 +71,7 @@ cat /sys/kernel/stats/features
 | `profile` | rw | `core` / `memory_io` / `network_runtime`；诊断窗口一次只启用一组 |
 | `reset` | wo | 重置所有 delta 计数器 |
 | `boot` | ro | 从 Rust 入口起算的 console/MM/driver/net/FS/initproc/scheduler 累计 ticks；不随 `reset` 清零 |
-| `taskq` | ro | 调度队列、wake/steal、抢占归因与新任务放置指标（schema v7） |
+| `taskq` | ro | 调度队列指标（15 项） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
 | `vm` | ro | filemap、VM 锁/TLB、exec 路径和 MM 切换归因 |
@@ -162,18 +162,6 @@ echo 1 > /sys/kernel/tracing/clear
 | `zombie_drain_calls` | counter | zombie drain 调用次数 |
 | `zombie_drain_removed` | counter | zombie drain 移除总数 |
 | `ready_nonzero_nice_cur` | gauge | 当前 nice≠0 任务数 |
-| `new_task_idle_available` | counter | 新任务发布时允许集合中存在空闲 CPU 的次数 |
-| `new_task_selected_idle` | counter | 新任务发布实际选择空闲 CPU 的次数 |
-| `new_task_kept_busy_parent` | counter | 所有允许 CPU 都忙时仍保留创建者 CPU 的次数 |
-| `timer_preemptions` | counter | timer 安全点实际进入调度切换的次数 |
-| `timer_preemptions_no_local_competitor` | counter | 实际切换时本地 runqueue 没有竞争者的次数 |
-| `timer_preemptions_with_local_competitor` | counter | 实际切换时本地 runqueue 有竞争者的次数 |
-| `timer_preemptions_with_ipi` | counter | timer 与 RESCHEDULE IPI 合并后实际切换的次数 |
-| `timer_preemptions_elided_no_competitor` | counter | 无本地竞争者、IPI 或迁移请求时安全省略切换的次数 |
-| `timer_same_task_resumes` | counter | timer 切换后仍恢复同一 TID 的次数 |
-
-schema v7 在安全省略 timer context switch 时仍会对当前任务的运行片段做诊断 checkpoint，
-因此 `task_run_slice_ticks_total` 继续表示任务实际运行时间，而不是仅统计最终发生切换的片段。
 
 ### timer（内核计时器）
 
@@ -220,12 +208,8 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `device_flush_count` | counter | 实际提交到 VirtIO 块设备的 flush 请求数 |
 | `virtio_write_{requests,bytes}` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的写请求数及字节数 |
 | `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
-| `virtio_dma_small_pool_enabled` | gauge | 固定小描述符 DMA 池是否成功初始化 |
-| `virtio_dma_share_{header,status,indirect}_pool` | counter | block VirtIO 请求头、状态字节、间接描述符从小池复用的次数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
-| `ext4_pc_readpages_{calls,pages}` | counter | PageCache 后端批量读取的调用数与页数；another_ext4 demand miss 每次最多 16 页（64 KiB） |
-| `ext4_pc_readpages_runs` | counter | legacy ext4 后端按物理连续块合并的读取 run 数（another_ext4 不使用该字段） |
 | `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |
 | `wb_tx_alloc_extent_{calls,pages,ticks}` | counter | data write 路径中 alloc/extent 准备的次数、页数与累计 ticks |
 | `wb_tx_journal_{commit_ticks,staged_blocks,tx_first,tx_last}` | counter/gauge | 已提交 journal transaction 的累计 ticks、staged block 数及本窗口 transaction id 范围 |
@@ -254,13 +238,6 @@ another_ext4 的 transaction 诊断会在串口输出 `[wb_txn]` 事件：`commi
 | `filemap_backend_read_calls` | counter | filemap 调用 PageCache 后端读取的次数 |
 | `filemap_backend_read_ticks_total` | counter | 上述 PageCache 读取累计 ticks |
 | `filemap_backend_read_under_vm_calls` | counter | 后端读取发生在 VM 写锁内的次数 |
-| `filemap_fault_around_calls/pages_requested` | counter | filemap 冷缺页触发的受限窗口次数与请求页数 |
-| `filemap_fault_around_pages_missing/published` | counter | admission 时实际缺页数与代际重验后实际发布页数 |
-| `filemap_fault_around_pages_prefetched` | counter | 发布页中除 demand 页外带 readahead 标记的页数 |
-| `filemap_fault_around_backend_runs` | counter | 连续 miss run 产生的真实后端 `read_pages` 调用数 |
-| `filemap_fault_around_useful_hits` | counter | readahead 页随后被 PageCache/filemap 消费的次数 |
-| `filemap_fault_around_unused_discards` | counter | readahead 页未使用即被回收、truncate 或 invalidate 的次数 |
-| `filemap_fault_around_aborts` | counter | 批量 admission 因 I/O、内存或 generation 变化放弃的次数 |
 | `exec_direct_count` | counter | exec 尝试 direct ELF loader 的次数 |
 | `exec_direct_enosys_count` | counter | direct loader 返回 ENOSYS 的次数 |
 | `exec_fallback_count` | counter | 回退到通用 ELF loader 的次数 |

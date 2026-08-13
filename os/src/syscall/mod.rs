@@ -18,6 +18,7 @@ use crate::net::syscall::*;
 use alloc::collections::BTreeSet;
 use core::convert::TryFrom;
 use flock::*;
+use spin::Mutex;
 use fs::*;
 use log::{error, info};
 use process::*;
@@ -30,7 +31,6 @@ pub use process::{
     sysv_msgmax, sysv_msgmnb, sysv_msgmni, sysv_sem_limits, sysv_sem_proc_snapshot,
     sysv_shm_proc_snapshot, sysv_shmall, sysv_shmmax, sysv_shmmni, CloneFlags,
 };
-use spin::Mutex;
 use syscall_id::*;
 
 #[cfg(feature = "riscv")]
@@ -310,24 +310,6 @@ use crate::{
 
 /// Log each unknown syscall id exactly once (first hit) to stop rseq/fsopen spam.
 static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
-
-/// 没有更精确等待点标注时，按 syscall 给任务阻塞快照归类。
-pub(crate) fn default_blocked_reason(syscall_id: usize) -> crate::task::BlockedReason {
-    use crate::task::BlockedReason;
-
-    match syscall_id {
-        SYSCALL_READ | SYSCALL_READV | SYSCALL_PREAD | SYSCALL_PREADV | SYSCALL_PREADV2 => {
-            BlockedReason::FileRead
-        }
-        SYSCALL_WRITE | SYSCALL_WRITEV | SYSCALL_PWRITE | SYSCALL_PWRITEV | SYSCALL_PWRITEV2 => {
-            BlockedReason::FileWrite
-        }
-        SYSCALL_FUTEX | SYSCALL_FUTEX_WAITV => BlockedReason::Futex,
-        SYSCALL_WAIT4 | SYSCALL_WAITID => BlockedReason::WaitChild,
-        SYSCALL_NANOSLEEP | SYSCALL_CLOCK_NANOSLEEP => BlockedReason::Timer,
-        _ => BlockedReason::Other,
-    }
-}
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     crate::task::perf::record_syscall_enter(syscall_id);
@@ -1060,10 +1042,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             0,
         );
     }
-    // The field describes what is executing now, not the last syscall seen on
-    // this CPU.  Clear it before returning to userspace so task snapshots do
-    // not attribute pure user computation to a stale syscall.
-    crate::task::set_current_syscall_id(None);
     ret
 }
 

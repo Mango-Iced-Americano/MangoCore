@@ -74,7 +74,7 @@ pub use process::{
     is_executable_inode_busy, is_writable_inode_busy, register_writable_inode,
     unregister_writable_inode, PosixTimer, ProcessControlBlock, ProcessState,
 };
-pub(crate) use process::{ExecutableMappingGuard, IntervalTimerKind, LimitPair, ProcessLimits};
+pub(crate) use process::{IntervalTimerKind, LimitPair, ProcessLimits};
 pub(crate) use process_manager::CloneScheduleOutcome;
 pub use process_manager::ProcessManager;
 pub use processor::{
@@ -97,7 +97,6 @@ pub use task::{
     any_seccomp_enabled, FsStatus, RobustList, RseqRegistration, Rusage, SeccompFilterInsn,
     TaskControlBlock, TaskStatus, UtsNamespace,
 };
-pub(crate) use task::BlockedReason;
 
 /// 返回指定 CPU 的精确 runqueue 长度，供诊断和 SMP focused test 使用。
 pub(crate) fn run_queue_count(cpu: usize) -> usize {

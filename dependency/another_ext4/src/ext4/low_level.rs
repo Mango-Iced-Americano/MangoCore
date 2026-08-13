@@ -1653,6 +1653,10 @@ impl Ext4 {
     /// * `ENOSPC` - no space left on device
     pub fn link(&self, child: InodeId, parent: InodeId, name: &str) -> Result<()> {
         self.ensure_mutable()?;
+        // link_inode starts its own transaction for zero-link orphan recovery.
+        // The usual direct metadata path may grow the parent directory, whose
+        // allocator acquires the compatible direct mutation domain.
+        let _metadata_guard = self.lock_direct_metadata_mutation()?;
         let _namespace_guard = self.namespace_lock.lock();
         let _mutation_guards = self.lock_inode_mutations(&[parent, child]);
         let mut parent = self.read_inode(parent)?;
@@ -1674,15 +1678,7 @@ impl Ext4 {
             Err(e) if e.code() == ErrCode::ENOENT => {}
             Err(e) => return Err(e),
         }
-        if !self.dir_has_insert_space(&parent, &child, name)? {
-            // Directory growth is still a direct allocation operation. Do it
-            // before entering the journal domain; an empty initialized slot is
-            // harmless if the later link is not made durable.
-            let _metadata_guard = self.lock_direct_metadata_mutation()?;
-            self.prepare_empty_dir_slot(&mut parent)?;
-        }
-        let _metadata_guard = self.lock_transactional_metadata_mutation()?;
-        self.link_inode_transactional(&mut parent, &mut child, name, true)?;
+        self.link_inode(&mut parent, &mut child, name, true)?;
         Ok(())
     }
 
@@ -1701,6 +1697,12 @@ impl Ext4 {
     pub fn unlink(&self, parent: InodeId, name: &str) -> Result<Option<InodeReclaimHandle>> {
         self.ensure_mutable()?;
         let _metadata_guard = self.lock_transactional_metadata_mutation()?;
+        // Namespace deletion may follow a dirty page-cache writeback batch.
+        // Flush that deferred journal image before reserving the unlink
+        // transaction; otherwise the pending images are counted against the
+        // small unlink credit budget and a valid remove can spuriously return
+        // E2BIG when the journal ring is nearly full.
+        self.flush_deferred_journal()?;
         let _namespace_guard = self.namespace_lock.lock();
         let mut parent_ref = self.read_inode(parent)?;
         // Can only unlink from a directory
@@ -1712,15 +1714,17 @@ impl Ext4 {
             );
         }
         // Cannot unlink directory
-        let location = self.dir_find_entry_location(&parent_ref, name)?;
-        let child_id = location.inode_id;
+        let child_id = self.dir_find_entry(&parent_ref, name)?;
         let _mutation_guards = self.lock_inode_mutations(&[parent, child_id]);
         parent_ref = self.read_inode(parent)?;
+        if self.dir_find_entry(&parent_ref, name)? != child_id {
+            return_error!(ErrCode::ENOENT, "Namespace changed during unlink");
+        }
         let mut child = self.read_inode(child_id)?;
         if child.inode.is_dir() {
             return_error!(ErrCode::EISDIR, "Cannot unlink a directory");
         }
-        self.unlink_inode(&mut parent_ref, &mut child, name, location)
+        self.unlink_inode(&mut parent_ref, &mut child, name)
     }
 
     /// Helper: Read and validate parent directories for rename operations.
@@ -1811,6 +1815,10 @@ impl Ext4 {
         new_name: &str,
     ) -> Result<Option<InodeReclaimHandle>> {
         self.ensure_mutable()?;
+        // The rename transaction has a bounded credit estimate.  Do not let
+        // an unrelated deferred writeback batch consume that reservation and
+        // turn a normal namespace update into E2BIG.
+        self.flush_deferred_journal()?;
         let _namespace_guard = self.namespace_lock.lock();
         let mut reclaim = None;
         // 1. 验证父目录
@@ -1915,7 +1923,7 @@ impl Ext4 {
                 if final_target && self.uses_journal() {
                     credits += 1; // superblock orphan head
                 }
-                let mut transaction = self.transaction_start_with_deferred_retry(credits)?;
+                let mut transaction = self.transaction_start(credits)?;
 
                 // Match Linux ext4_rename(): ext4_setent(new), delete(old),
                 // ext4_rename_dir_finish(), parent counts, target nlink, and
@@ -1985,18 +1993,7 @@ impl Ext4 {
                     self.transaction_stage_inode_with_csum(&mut transaction, &mut existing_inode)?;
                 }
 
-                let result = if child_is_dir || existing_is_dir {
-                    // Directory parent-link updates retain their synchronous
-                    // crash-consistency test matrix.
-                    transaction.commit(self.block_device.as_ref(), self)
-                } else {
-                    transaction.defer_or_commit(
-                        self.block_device.as_ref(),
-                        self,
-                        super::link::MAX_DEFERRED_NAMESPACE_BLOCKS,
-                    )
-                };
-                if let Err(error) = result {
+                if let Err(error) = transaction.commit(self.block_device.as_ref(), self) {
                     // Once commit processing starts, failures can leave an
                     // uncertain committed/checkpointed state.  Fail-stop every
                     // subsequent metadata writer on this mount.
@@ -2331,10 +2328,12 @@ impl Ext4 {
                 parent_ref.id
             );
         }
-        let location = self.dir_find_entry_location(&parent_ref, name)?;
-        let child_id = location.inode_id;
+        let child_id = self.dir_find_entry(&parent_ref, name)?;
         let _mutation_guards = self.lock_inode_mutations(&[parent, child_id]);
         parent_ref = self.read_inode(parent)?;
+        if self.dir_find_entry(&parent_ref, name)? != child_id {
+            return_error!(ErrCode::ENOENT, "Namespace changed during rmdir");
+        }
         let mut child = self.read_inode(child_id)?;
         // Child must be a directory
         if !child.inode.is_dir() {
@@ -2345,7 +2344,7 @@ impl Ext4 {
             return_error!(ErrCode::ENOTEMPTY, "Directory {} is not empty", child.id);
         }
         // Remove directory entry
-        self.unlink_inode(&mut parent_ref, &mut child, name, location)
+        self.unlink_inode(&mut parent_ref, &mut child, name)
     }
 
     /// Get extended attribute of a file.

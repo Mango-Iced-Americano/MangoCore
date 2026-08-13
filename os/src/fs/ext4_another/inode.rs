@@ -16,7 +16,7 @@ use crate::utils::error::SyscallErr;
 
 use super::errno::from_another;
 use super::fs::Ext4FileSystem;
-use super::lifetime::{DirectorySnapshot, InodeKey, InodeLifetime};
+use super::lifetime::{InodeKey, InodeLifetime};
 use super::page_cache::AnotherExt4PageCacheBackend;
 
 /// Writable VFS inode identified by its stable ext4 inode number.
@@ -116,47 +116,6 @@ impl Ext4Inode {
             .upgrade()
             .map(|inode| inode as Arc<dyn IndexNode>)
             .ok_or(SyscallErr::EIO)
-    }
-
-    fn directory_snapshot(
-        &self,
-        fs: &Ext4FileSystem,
-    ) -> Result<Arc<DirectorySnapshot>, SyscallErr> {
-        if self.file_type != FileType::Dir {
-            return Err(SyscallErr::ENOTDIR);
-        }
-        loop {
-            if let Some(snapshot) = self.lifetime.cached_directory_snapshot() {
-                return Ok(snapshot);
-            }
-            let generation = self.lifetime.directory_generation();
-            let entries = fs
-                .inner()
-                .listdir(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
-                .map_err(|error| from_another(error.code()))?
-                .into_iter()
-                .map(|entry| {
-                    Ok((
-                        entry.name(),
-                        usize::try_from(entry.inode()).map_err(|_| SyscallErr::EFBIG)?,
-                        map_file_type(entry.file_type()),
-                    ))
-                })
-                .collect::<Result<Vec<_>, SyscallErr>>()?;
-            let snapshot = Arc::new(DirectorySnapshot::new(generation, entries));
-            if let Some(snapshot) = self
-                .lifetime
-                .publish_directory_snapshot(generation, snapshot)
-            {
-                return Ok(snapshot);
-            }
-            // A namespace mutation committed while listdir was in flight.
-            // Retry from the new generation; never publish the stale scan.
-        }
-    }
-
-    fn invalidate_directory_snapshot(&self) {
-        self.lifetime.invalidate_directory_snapshot();
     }
 
     fn regular_page_cache(&self, fs: &Arc<Ext4FileSystem>) -> Result<&Arc<PageCache>, SyscallErr> {
@@ -318,22 +277,41 @@ impl IndexNode for Ext4Inode {
         if name == "." {
             return self.self_arc();
         }
-        let (inode_id, _) = self
-            .directory_snapshot(&fs)?
-            .find(name)
-            .ok_or(SyscallErr::ENOENT)?;
-        let inode_id = u32::try_from(inode_id).map_err(|_| SyscallErr::EFBIG)?;
+        let inode_id = fs
+            .inner()
+            .lookup(
+                u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
+                name,
+            )
+            .map_err(|error| from_another(error.code()))?;
         Ext4Inode::new(fs, inode_id).map(|inode| inode as Arc<dyn IndexNode>)
     }
 
     fn list(&self) -> Result<Vec<String>, SyscallErr> {
         let fs = self.fs_arc()?;
-        Ok(self.directory_snapshot(&fs)?.names())
+        let entries = fs
+            .inner()
+            .listdir(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
+            .map_err(|error| from_another(error.code()))?;
+        Ok(entries.into_iter().map(|entry| entry.name()).collect())
     }
 
     fn list_dirents(&self) -> Result<Vec<(String, InodeId, FileType)>, SyscallErr> {
         let fs = self.fs_arc()?;
-        Ok(self.directory_snapshot(&fs)?.entries())
+        let entries = fs
+            .inner()
+            .listdir(u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?)
+            .map_err(|error| from_another(error.code()))?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                Ok((
+                    entry.name(),
+                    usize::try_from(entry.inode()).map_err(|_| SyscallErr::EFBIG)?,
+                    map_file_type(entry.file_type()),
+                ))
+            })
+            .collect::<Result<Vec<_>, SyscallErr>>()?)
     }
 
     fn metadata(&self) -> Result<Metadata, SyscallErr> {

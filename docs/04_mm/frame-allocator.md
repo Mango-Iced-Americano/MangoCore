@@ -171,7 +171,6 @@ pub unsafe fn frame_alloc_uninit() -> Option<Arc<FrameTracker>>
 frame_alloc()
   ├── lock FRAME_ALLOCATOR
   ├── reserve_one()
-  │     ├── prezeroed.pop()
   │     ├── recycled.pop()
   │     └── regions[fresh_region].current += 1
   ├── unlock FRAME_ALLOCATOR
@@ -193,29 +192,6 @@ B89 而把它们混入单页 reservation。
 若启用 `zero_init` 特性，BSP 会在建堆前沿同一个动态 usable-region 迭代器清零所有
 未来 fresh 页，并跳过内核、固件 carveout 和内存洞；fresh 页随后可走 `new_uninit`
 快路径。这属于编译特性控制，不改变 `frame_alloc()` 对调用者暴露的所有权模型。
-
-### 6.1 Idle 预清零池与运行时 A/B
-
-CPU0 空闲路径每个 housekeeping tick 最多领取并清零 2 页。AP 进入 idle 时会先执行
-一个最多 32 页的有界补充，再关闭本地 scheduler timer；池降到 128 页以下时，demand
-分配在释放 allocator 锁后用合并式 IPI 唤醒一个真正空闲的 AP，再补最多 32 页。
-池高水位为 256 页。领取和发布只在短暂持有 `FRAME_ALLOCATOR` 锁时完成，4 KiB 清零
-位于锁外；低于 2048 个空闲页时停止补充，避免预清零放大内存压力。
-
-启动参数 `mango.mm.prezero=` 控制同一内核二进制的 A/B：
-
-- `idle`（默认）：CPU 进入 idle 路径时允许有界补充；
-- `quiescent`：仅当全局没有 ready/current task 时补充；
-- `off`：完全关闭补充。
-
-普通 `frame_alloc()` 优先消费预清零页，池空时仍按 recycled/fresh 路径满足 demand
-allocation。可选的匿名 fault-around 则调用 `try_frame_alloc_prezeroed()`：该接口只消费
-已经清零的池页，绝不回退到同步清零、fresh allocation 或 OOM recovery。这样错误预测
-最多浪费有界 idle 工作，不会把额外延迟引入真正的缺页关键路径。
-
-评估预清零本身时应关闭 fault-around，仅比较 `prezero=off` 与 `prezero=idle`；评估
-fault-around 时两组都固定 `prezero=idle`。`/sys/kernel/stats/pagefault` 导出当前策略、
-池命中/未命中、补充页数/耗时及策略/活跃任务跳过次数。
 
 ## 7. 释放路径与重复释放防御
 

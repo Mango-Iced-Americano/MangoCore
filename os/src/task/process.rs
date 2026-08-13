@@ -669,11 +669,6 @@ pub struct ProcessInner {
     exec_key: Option<InodeBusyKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
-    /// `perf_stats` 诊断构建保存的有界 exec 标签。
-    ///
-    /// 当前只记录 rustc 的 crate 名称，避免长期保留完整 argv 或把命令行
-    /// 内容带入默认构建。该字段只供低频 sysfs 快照使用。
-    exec_diag_label: String,
     /// 文件描述符表（新 VFS）。
     files: Arc<Mutex<vfs::FdTable>>,
     /// 文件系统状态（cwd 等）。
@@ -847,36 +842,6 @@ fn register_exec_key(key: InodeBusyKey) {
 
 fn unregister_exec_key(key: InodeBusyKey) {
     unregister_busy_key(&EXEC_INODE_REFS, key);
-}
-
-/// Keeps an executable mapping's inode alive and enforces ETXTBSY until the
-/// last VMA backing is dropped. This is distinct from the PCB's main `exe`
-/// reference because a dynamic interpreter has its own independently faulted
-/// PT_LOAD pages.
-pub(crate) struct ExecutableMappingGuard {
-    _inode: Arc<dyn vfs::IndexNode>,
-    key: Option<InodeBusyKey>,
-}
-
-impl ExecutableMappingGuard {
-    pub(crate) fn new(inode: Arc<dyn vfs::IndexNode>) -> Self {
-        let key = inode_busy_key(&inode);
-        if let Some(key) = key {
-            register_exec_key(key);
-        }
-        Self {
-            _inode: inode,
-            key,
-        }
-    }
-}
-
-impl Drop for ExecutableMappingGuard {
-    fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
-            unregister_exec_key(key);
-        }
-    }
 }
 
 pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
@@ -1447,7 +1412,6 @@ impl ProcessControlBlock {
                 exe,
                 exec_key,
                 exe_path,
-                exec_diag_label: String::new(),
                 files,
                 fs,
                 uts,
@@ -1519,44 +1483,6 @@ impl ProcessControlBlock {
 
     pub fn set_exe_path(&self, exe_path: String) {
         self.inner.lock().exe_path = exe_path;
-    }
-
-    /// 原子更新 exec 路径与性能诊断标签。
-    ///
-    /// 普通构建只保存 Linux ABI 所需的 exe 路径。`perf_stats` 构建额外从
-    /// rustc argv 中提取 `--crate-name`，使 BuildStorm 快照能把 PID 对应到
-    /// crate，但不保留可能很长或包含敏感内容的完整命令行。
-    pub fn set_exec_identity(&self, exe_path: String, argv: &[String]) {
-        let mut inner = self.inner.lock();
-        inner.exe_path = exe_path;
-        inner.exec_diag_label.clear();
-        if !cfg!(feature = "perf_stats") {
-            return;
-        }
-
-        let mut crate_name = None;
-        let mut args = argv.iter();
-        while let Some(arg) = args.next() {
-            if arg == "--crate-name" {
-                crate_name = args.next().map(String::as_str);
-                break;
-            }
-            if let Some(value) = arg.strip_prefix("--crate-name=") {
-                crate_name = Some(value);
-                break;
-            }
-        }
-        if let Some(crate_name) = crate_name {
-            for ch in crate_name.chars().take(64) {
-                inner.exec_diag_label.push(ch);
-            }
-        }
-    }
-
-    /// 返回低频任务快照所需的可执行路径和 crate 标签。
-    pub(crate) fn exec_diagnostics(&self) -> (String, String) {
-        let inner = self.inner.lock();
-        (inner.exe_path.clone(), inner.exec_diag_label.clone())
     }
 
     pub fn mark_execed(&self) {

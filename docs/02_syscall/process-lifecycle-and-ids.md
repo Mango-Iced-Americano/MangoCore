@@ -3,7 +3,7 @@ title: "进程生命周期与身份 syscall"
 category: syscall
 status: stable
 author: MangoCore Team
-last_update: 2026-08-11
+last_update: 2026-07-31
 tags: [syscall, process, clone, exec, ids]
 ---
 
@@ -22,10 +22,6 @@ tags: [syscall, process, clone, exec, ids]
 | `syscall/process/misc.rs` | 少量 misc 入口通过 process 模块导出 |
 
 这些 syscall 直接操作 `TaskControlBlock`、`ProcessControlBlock`、地址空间、fd table、namespace、信号和调度状态。
-
-`uname(2)` 的 `machine` 字段遵循 Linux 用户态 ABI：RV64 返回 `riscv64`，LA64
-返回 `loongarch64`。测试脚本和构建系统必须把未知值视为合同错误，不能静默
-回退到另一架构的 target。
 
 ## 2. clone
 

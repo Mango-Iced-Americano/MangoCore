@@ -197,43 +197,6 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
         Ok(total_bytes)
     }
 
-    fn read_contiguous(
-        &self,
-        start_index: usize,
-        buffer: &mut [u8],
-    ) -> Result<usize, SyscallErr> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        if buffer.len() % PAGE_SIZE != 0 {
-            return Err(SyscallErr::ENOBUFS);
-        }
-        let pages = buffer.len() / PAGE_SIZE;
-        if pages > crate::fs::page_cache::MAX_DEMAND_READ_PAGES {
-            return Err(SyscallErr::E2BIG);
-        }
-        crate::task::perf::record_ext4_pc_readpages_calls();
-        crate::task::perf::record_ext4_pc_readpages_pages(pages);
-
-        let start_offset = Self::page_offset(start_index)?;
-        let size = self.visible_size();
-        buffer.fill(0);
-        if start_offset >= size {
-            return Ok(buffer.len());
-        }
-        let read_len = buffer.len().min(size - start_offset);
-        let fs = self.fs()?;
-        fs
-            .inner()
-            .read(
-                u32::try_from(self.key.inode_id()).map_err(|_| SyscallErr::EFBIG)?,
-                start_offset,
-                &mut buffer[..read_len],
-            )
-            .map_err(|error| from_another_op(&error, "read"))?;
-        Ok(buffer.len())
-    }
-
     fn write_page(&self, index: usize, buffer: &[u8]) -> Result<usize, SyscallErr> {
         self.write_pages(index, &[buffer])
     }
@@ -278,6 +241,17 @@ impl PageCacheBackend for AnotherExt4PageCacheBackend {
                 (total_bytes / crate::config::PAGE_SIZE) as usize,
                 0,
                 _t1.wrapping_sub(_t0),
+            );
+            let _t2 = perf::perf_time_now();
+            #[cfg(feature = "perf_diag")]
+            crate::println!(
+                "[ext4_another] write_pages ino={} pages={} total_bytes={} prepare_cycles={} commit_cycles={} direct={}",
+                inode_id,
+                pages.len(),
+                total_bytes,
+                _t1.wrapping_sub(_t0),
+                _t2.wrapping_sub(_t1),
+                _data_written,
             );
             Ok(total_bytes)
         })();

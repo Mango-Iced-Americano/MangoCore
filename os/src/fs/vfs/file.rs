@@ -22,8 +22,7 @@ use spin::{Mutex, MutexGuard};
 
 use super::event::EventWaitQueue;
 use super::{
-    FilePrivateData, FileType, IndexNode, InodeFlags, InodeId, InodeMode, Metadata,
-    ReadWaitSource,
+    FilePrivateData, FileType, IndexNode, InodeFlags, InodeMode, Metadata, ReadWaitSource,
 };
 use crate::config::SYSTEM_FD_LIMIT;
 use crate::mm::UserBuffer;
@@ -670,9 +669,8 @@ pub struct File {
     pub inode: Arc<dyn IndexNode>,
     /// 文件偏移量（目录时作为 getdents64 的快照索引）
     offset: AtomicUsize,
-    /// getdents64 目录项快照：offset==0 时重建，保证名称、inode 和类型来自
-    /// 同一次目录扫描。目录流建立后不再为每个名称重复执行 find/stat。
-    dirent_snapshot: Mutex<Option<Vec<(String, InodeId, FileType)>>>,
+    /// getdents64 目录项快照：offset==0 时重建，保证偏移在条目删除后仍稳定
+    dirent_snapshot: Mutex<Option<Vec<String>>>,
     /// 打开标志（AtomicU32：fcntl F_SETFL 只改 O_NONBLOCK/O_APPEND 等状态 flags）
     flags: AtomicU32,
     /// 文件访问模式（open 后不变，直接存值去锁）
@@ -2037,10 +2035,7 @@ impl File {
     ///
     /// DragonOS-style stable snapshot for directory iteration.
     /// d_off = entry index (0, 1, 2…) rather than computed byte offset,
-    /// so directory mutations between getdents64 calls cannot invalidate the
-    /// cursor. Linux does not guarantee that an in-progress directory stream
-    /// reflects concurrent namespace changes, so the complete tuple captured
-    /// by list_dirents() remains authoritative until rewind.
+    /// so deleting entries between getdents64 calls does not skip survivors.
     pub fn get_dirent64(&self, buf: &mut [u8]) -> Result<usize, isize> {
         if !self.is_dir() {
             return Err(crate::syscall::errno::ENOTDIR);
@@ -2065,14 +2060,35 @@ impl File {
             *snapshot = Some(
                 self.inode
                     .list_dirents()
-                    .map_err(|e| -(e as isize))?,
+                    .map_err(|e| -(e as isize))?
+                    .into_iter()
+                    .map(|(name, _, _)| name)
+                    .collect(),
             );
         }
-        let entries = snapshot.as_ref().expect("directory snapshot initialized");
+        let names = snapshot.as_ref().expect("directory snapshot initialized");
         let mut written = 0usize;
 
-        while index < entries.len() {
-            let (name, inode_id, file_type) = &entries[index];
+        while index < names.len() {
+            let name = &names[index];
+            let child = match self.inode.find(name) {
+                Ok(child) => child,
+                Err(SyscallErr::ENOENT) => {
+                    index += 1;
+                    continue;
+                }
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
+            };
+            let metadata = match child.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    self.offset.store(index, Ordering::SeqCst);
+                    return Err(-(error as isize));
+                }
+            };
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let raw_size = 8 + 8 + 2 + 1 + name_len + 1;
@@ -2091,7 +2107,7 @@ impl File {
                 *b = 0;
             }
 
-            let d_type = match *file_type {
+            let d_type = match metadata.file_type {
                 FileType::Dir => 4u8,
                 FileType::File => 8u8,
                 FileType::SymLink => 10u8,
@@ -2103,7 +2119,7 @@ impl File {
             };
 
             let next_cookie = (index + 1) as i64;
-            buf[pos..pos + 8].copy_from_slice(&(*inode_id as u64).to_le_bytes());
+            buf[pos..pos + 8].copy_from_slice(&(metadata.inode_id as u64).to_le_bytes());
             buf[pos + 8..pos + 16].copy_from_slice(&next_cookie.to_le_bytes());
             buf[pos + 16..pos + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
             buf[pos + 18] = d_type;

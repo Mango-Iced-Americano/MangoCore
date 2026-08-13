@@ -1,9 +1,9 @@
 ---
-title: "MangoCore 双架构 SMP 实施方案"
+title: "MangoCore 双架构 8 核 SMP 实施方案"
 category: plan
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-11
+last_updated: 2026-08-04
 tags: [smp, rv64, la64, scheduler, ipi, tlb, qemu]
 entry_points:
   - "os/src/main.rs"
@@ -23,7 +23,7 @@ related_docs:
   - "docs/08_testing/README.md"
 ---
 
-# MangoCore 双架构 SMP 实施方案
+# MangoCore 双架构 8 核 SMP 实施方案
 
 ## 1. 目标、边界与完成定义
 
@@ -34,11 +34,11 @@ related_docs:
 | 架构 | CPU 数量 |
 |---|---|
 | RISC-V QEMU virt | 1、2、4、8 |
-| LoongArch QEMU virt | 1、2、4、8、12 |
+| LoongArch QEMU virt | 1、2、4、8 |
 
 最终实现：
 
-- 最多 12 个 CPU 的启动、在线管理和独立内核栈；
+- 8 个 CPU 的启动、在线管理和独立内核栈；
 - 每 CPU 当前任务、idle 上下文、运行队列和调度计时；
 - CPU 间 IPI、远程唤醒、停止和 TLB shootdown；
 - 用户任务在不同 CPU 上并行执行和迁移；
@@ -64,14 +64,14 @@ related_docs:
 
 只有同时满足以下条件，本文档状态才可改为 <code>implemented</code>：
 
-- RV64 1/2/4/8 核与 LA64 1/2/4/8/12 核运行矩阵全部通过；
+- 双架构 1/2/4/8 核运行矩阵全部通过；
 - 不再存在全局 PROCESSOR、全局 current-task 裸指针或全局 ready queue；
 - 任一 TCB 不可能同时处于两个运行队列或两个 CPU 的 current 槽；
 - 所有已发布页表的 PTE 修改均经过统一 TLB shootdown 协议；
 - LoongArch ASID 不再由单个 TCB 持有或未经跨核失效直接复用；
 - RISC-V ASID 由 MM 持有，且复用前已经过全 CPU 失效；
 - 所有以“当前为单核”为依据的 unsafe Send/Sync 和 static mut 均已消除或重新证明；
-- RV64 8 核、LA64 12 核连续压力测试无 panic、死锁、任务丢失、重复执行或 stale TLB；
+- 双架构 8 核连续压力测试无 panic、死锁、任务丢失、重复执行或 stale TLB；
 - 单核测试结果不低于 SMP 改造前基线。
 
 ## 2. 当前状态与目标架构
@@ -80,7 +80,7 @@ related_docs:
 
 | 子系统 | 当前状态 | SMP 风险 |
 |---|---|---|
-| 启动 | 12 槽共享 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | 正式拓扑仍须分别以 RV64 8 核、LA64 12 核做运行门禁 |
+| 启动 | 双架构 8 槽 boot/idle stack、BSP/AP 入口、online、scheduler-ready/entered 和 STOP/ack 已完成 | AP 仅运行受控任务；B29 的单个迁移探针不代表通用生产任务能力 |
 | 初始化 | CPU0 独占 BSS/MM/驱动/FS；AP 安装 PerCpu、页表根、本地 trap/IPI 和调度 tick 后进入调度循环 | 共享子系统的完整 global/local init 审计仍未完成 |
 | trap | 双架构用户 trap 已恢复 CPU-local 寄存器；`current_trap_task()` 校验 `Running(cpu)`；B33 的 trap-return 安全点可消费远端 RESCHEDULE；B39 已开放所有在线 CPU 的本地 timer | 任意内核位置仍不可抢占，外设 IRQ 仍由 CPU0 独占；长 syscall 只处理硬中断，不在中断帧直接切换 |
 | console | B55 以本地 irq-save + 全局 `OUTPUT_LOCK` 串行化跨 CPU 输出；panic 单向切换到绕过 console/UART 锁的 raw HAL writer；LA64 恢复 THR-ready 等待并按 slice 只锁一次 UART | raw panic 路径只保证不等待 Rust 锁，硬件发送仍可能阻塞；未为测试增加持锁 panic hook |
@@ -123,7 +123,7 @@ flowchart TD
 ### 2.3 核心接口
 
 ~~~rust
-pub const MAX_CPUS: usize = 12;
+pub const MAX_CPUS: usize = 8;
 pub type CpuId = usize;
 
 pub struct CpuMask(u64);
@@ -138,7 +138,7 @@ pub fn cpu_idle();
 ~~~
 
 <code>configured_cpu_count()</code> 使用构建变量
-<code>MANGO_CORE_NUM</code>；RV64 允许 1、2、4、8，LA64 额外允许 12。Makefile 必须把同一个
+<code>MANGO_CORE_NUM</code>，允许值固定为 1、2、4、8。Makefile 必须把同一个
 <code>CORE_NUM</code> 同时传给 Cargo 和 QEMU，避免内核与虚拟机拓扑不一致。
 
 ~~~rust
@@ -371,7 +371,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
 
 #### 退出条件
 
-- RV64 1/2/4/8 核与 LA64 1/2/4/8/12 核均能打印一次且仅一次的 CPU online 记录；
+- 1/2/4/8 核均能打印一次且仅一次的 CPU online 记录；
 - 每个 CPU 的 boot stack、idle stack、cpu_id() 和 PerCpu 地址互不混淆；
 - 全局初始化计数始终为 1；
 - 双 CPU 并发启动日志不会交叉破坏，panic fallback 不等待被其他 CPU 持有的 console 锁；
@@ -401,7 +401,7 @@ flush、等待 ack、递增 epoch，再统一重新分配。
   hart 映射为逻辑 CPU0，不能假设物理 hart 0 固定先启动；
 - LoongArch QEMU 已按官方 slave boot ROM 协议实现 mailbox 写入口、`dbar`
   和 IPI vector 0 唤醒；2K1000LA 多核调用明确返回不支持；
-- RV64 `CORE_NUM=1/2/4/8`、LA64 `CORE_NUM=1/2/4/8/12` 均达到期望 online mask，现有 waitqueue ktest
+- 双架构 `CORE_NUM=1/2/4/8` 均达到期望 online mask，现有 waitqueue ktest
   通过；比赛式省略 `-accel`、使用 `-smp 8` 的双架构命令也通过；
 - 双架构 `CORE_NUM=2` 用户态 regression 均达到 `online_mask=0x3`，6/6
   用例通过；最终 ELF 反汇编确认用户寄存器保存、slot 70 CPU-local 加载和
@@ -1318,7 +1318,7 @@ timer 均有双架构证据，才进入调度状态迁移；“能完成请求/�
 - T2 启动/per-CPU/共享原子改动按实际行为选择 CORE_NUM=1/2 focused QEMU；
 - T3 trap、IPI、调度、TLB/ASID、锁序和 unsafe 生命周期执行双架构构建与对应并发测试；
 - 只有 Phase 退出或合并门禁固定执行双架构 build、CORE_NUM=1 回归和该阶段
-  RV64 CORE_NUM=1/2/4/8 与 LA64 CORE_NUM=1/2/4/8/12 focused 矩阵。
+  CORE_NUM=1/2/4/8 focused 矩阵。
 
 改变普通用户任务执行路径的 T3 节点、Phase 退出和合并候选还必须执行双架构
 `CORE_NUM=8`、`mask=0x003` 初赛非回归门禁。它同时要求启动/组完整性硬条件和
@@ -1357,7 +1357,7 @@ focused test，也不因纯文档收尾重复运行。
 最终候选版本对两种架构分别执行以下基线矩阵；若某子系统本阶段未改变，可以引用同一候选
 commit 上已有的新鲜结果，不重复制造等价运行：
 
-- RV64 CORE_NUM=1/2/4/8、LA64 CORE_NUM=1/2/4/8/12 的 SMP focused ktest；
+- CORE_NUM=1/2/4/8 的 SMP focused ktest；
 - CORE_NUM=1 和 CORE_NUM=8 的 basic + busybox（mask 0x003）；
 - CORE_NUM=1 和 CORE_NUM=8 的竞赛 12 组全量（mask 0xFFF）；
 - 每种架构的 1 核和 8 核至少连续启动 3 次；
@@ -1412,7 +1412,7 @@ T0/T1 只需在 Work Log 记录静态检查或构建结果；T2 保存命令、�
 
 ## 5. 固定假设与实施纪律
 
-- MAX_CPUS=12，configured CPU ID 连续为 0..N-1，CPU0 固定为 BSP；
+- MAX_CPUS=8，configured CPU ID 连续为 0..N-1，CPU0 固定为 BSP；
 - v1 使用构建期 MANGO_CORE_NUM，不实现 DTB/ACPI 动态 CPU 枚举；
 - QEMU CPU 拓扑固定为单 socket、N core、单 thread；
 - 内核采用安全点抢占；中断可打断内核，但不得在任意内核中断点切换任务；

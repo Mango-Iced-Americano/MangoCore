@@ -4,7 +4,7 @@ module: "fs/vfs"
 category: fs
 status: draft
 owner: "MangoCore Team"
-last_updated: "2026-08-11"
+last_updated: "2026-07-18"
 code_paths:
   - "os/src/fs/vfs/file.rs"
   - "os/src/fs/vfs/index_node.rs"
@@ -83,11 +83,6 @@ pub struct File {
 - SeekCurrent：当前 offset 加上偏移量。
 - SeekEnd：文件末尾加上偏移量，需要调用 `inode.metadata()` 获取文件大小。
 - 负偏移返回 EINVAL，流式文件返回 ESPIPE。
-
-**目录流语义**：`getdents64()` 在 offset 为 0 时通过一次 `list_dirents()` 建立
-`(name, inode_id, file_type)` 完整快照，后续批次直接从该快照编码 `linux_dirent64`。
-这既保证并发目录修改不会破坏游标，也避免为每个名称再次执行 `find()` 与
-`metadata()`；rewind 到 offset 0 时才重建快照。
 
 **flags 管理**：`set_flags()` 只允许修改状态标志掩码（O_APPEND / O_NONBLOCK / O_DSYNC / O_DIRECT / O_NOATIME / O_ASYNC），访问模式位保持不变。`set_nonblock()` 是对 O_NONBLOCK 位的快捷设置。
 

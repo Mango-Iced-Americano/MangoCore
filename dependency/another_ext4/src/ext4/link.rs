@@ -1,8 +1,6 @@
-use super::{dir::DirEntryLocation, Ext4};
+use super::Ext4;
 use crate::ext4_defs::*;
 use crate::prelude::*;
-
-pub(super) const MAX_DEFERRED_NAMESPACE_BLOCKS: usize = 256;
 
 /// Whether removing one published namespace entry makes the inode an orphan.
 /// Directories cannot have hard-link aliases: once rmdir/rename has verified
@@ -12,50 +10,6 @@ pub(super) fn namespace_removal_is_final(is_dir: bool, link_count: u16) -> bool 
 }
 
 impl Ext4 {
-    /// Link a regular inode through the journal and retain the metadata images
-    /// in the current bounded namespace batch. The caller has already ensured
-    /// that the parent contains an insertion slot.
-    pub(super) fn link_inode_transactional(
-        &self,
-        parent: &mut InodeRef,
-        child: &mut InodeRef,
-        name: &str,
-        allow_orphan_relink: bool,
-    ) -> Result<()> {
-        let orphan_relink = child.inode.link_count() == 0 && allow_orphan_relink;
-        if orphan_relink && !self.legacy_orphan_contains(child.id)? {
-            return Err(Ext4Error::new(ErrCode::EINVAL));
-        }
-        if child.inode.is_dir() {
-            return Err(Ext4Error::new(ErrCode::EPERM));
-        }
-
-        let mut transaction =
-            self.transaction_start_with_deferred_retry(if orphan_relink { 3 } else { 2 })?;
-        if orphan_relink {
-            let mut sb = self.transaction_read_super_block(&transaction)?;
-            self.transaction_orphan_del(&mut transaction, child, &mut sb)?;
-            child.inode.set_next_orphan(0);
-        }
-        self.transaction_dir_add_existing(&mut transaction, parent, child, name)?;
-        let new_link_count = child
-            .inode
-            .link_count()
-            .checked_add(1)
-            .ok_or_else(|| Ext4Error::new(ErrCode::EMLINK))?;
-        child.inode.set_link_count(new_link_count);
-        self.transaction_stage_inode_with_csum(&mut transaction, child)?;
-        if let Err(error) = transaction.defer_or_commit(
-            self.block_device.as_ref(),
-            self,
-            MAX_DEFERRED_NAMESPACE_BLOCKS,
-        ) {
-            self.poison(ErrCode::EIO);
-            return Err(error.error);
-        }
-        Ok(())
-    }
-
     /// Link a child inode to a parent directory.
     pub(super) fn link_inode(
         &self,
@@ -127,7 +81,6 @@ impl Ext4 {
         parent: &mut InodeRef,
         child: &mut InodeRef,
         name: &str,
-        location: DirEntryLocation,
     ) -> Result<Option<InodeReclaimHandle>> {
         let child_link_cnt = child.inode.link_count();
         // Linux clears an empty directory's link count unconditionally after
@@ -141,9 +94,9 @@ impl Ext4 {
             // the same crash invariant here: after recovery the inode is
             // either still named, or unreachable and discoverable from the
             // on-disk orphan head.
-            let mut transaction = self
-                .transaction_start_with_deferred_retry(if child.inode.is_dir() { 4 } else { 3 })?;
-            self.transaction_dir_remove_entry_at(&mut transaction, parent, name, location)?;
+            let mut transaction =
+                self.transaction_start(if child.inode.is_dir() { 4 } else { 3 })?;
+            self.transaction_dir_remove_entry(&mut transaction, parent, name)?;
 
             if child.inode.is_dir() {
                 parent.inode.set_link_count(parent.inode.link_count() - 1);
@@ -151,7 +104,7 @@ impl Ext4 {
             }
             child.inode.set_link_count(0);
             if self.uses_journal() {
-                let mut sb = self.transaction_read_super_block(&transaction)?;
+                let mut sb = self.read_super_block_cached();
                 self.transaction_orphan_add(&mut transaction, child, &mut sb)?;
             } else {
                 // Linux nojournal mode does not enroll newly unlinked inodes in
@@ -161,18 +114,7 @@ impl Ext4 {
                 self.transaction_stage_inode_with_csum(&mut transaction, child)?;
             }
 
-            let result = if child.inode.is_dir() {
-                // Parent nlink updates are kept synchronous until directory
-                // lifetime batching has a dedicated consistency test matrix.
-                transaction.commit(self.block_device.as_ref(), self)
-            } else {
-                transaction.defer_or_commit(
-                    self.block_device.as_ref(),
-                    self,
-                    MAX_DEFERRED_NAMESPACE_BLOCKS,
-                )
-            };
-            if let Err(error) = result {
+            if let Err(error) = transaction.commit(self.block_device.as_ref(), self) {
                 // A commit-path failure may make journal state uncertain.  Do
                 // not let legacy direct writers continue after this boundary.
                 self.poison(ErrCode::EIO);
@@ -184,19 +126,20 @@ impl Ext4 {
             )));
         }
 
-        // A non-final hard-link removal changes only the directory block and
-        // inode link count, so it can safely share the same bounded batch.
-        let mut transaction = self.transaction_start_with_deferred_retry(2)?;
-        self.transaction_dir_remove_entry_at(&mut transaction, parent, name, location)?;
+        // Non-final hard-link removal does not create an orphan.  Preserve the
+        // established path until all namespace writers move under JBD2.
+        self.dir_remove_entry(parent, name)?;
+        if child.inode.is_dir() {
+            parent.inode.set_link_count(parent.inode.link_count() - 1);
+            if let Err(error) = self.write_inode_with_csum(parent) {
+                self.poison(ErrCode::EIO);
+                return Err(error);
+            }
+        }
         child.inode.set_link_count(child_link_cnt - 1);
-        self.transaction_stage_inode_with_csum(&mut transaction, child)?;
-        if let Err(error) = transaction.defer_or_commit(
-            self.block_device.as_ref(),
-            self,
-            MAX_DEFERRED_NAMESPACE_BLOCKS,
-        ) {
+        if let Err(error) = self.write_inode_with_csum(child) {
             self.poison(ErrCode::EIO);
-            return Err(error.error);
+            return Err(error);
         }
         Ok(None)
     }

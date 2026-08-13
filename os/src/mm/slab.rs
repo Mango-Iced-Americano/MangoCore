@@ -548,13 +548,12 @@ impl SlabAllocator {
         let (index, class_bytes) = slab_class_for(layout)?;
         let cache = &mut self.caches[index];
         unsafe {
-            let (ptr, new_page) = cache.alloc(heap, index)?;
+            let (ptr, _new_page) = cache.alloc(heap, index)?;
             self.slab_user_bytes_total += class_bytes;
             Some(SlabAllocResult {
                 ptr,
                 charge: class_bytes,
                 cache_index: index,
-                new_page,
             })
         }
     }
@@ -623,6 +622,4 @@ pub struct SlabAllocResult {
     pub charge: usize,
     /// Which slab cache was used.
     pub cache_index: usize,
-    /// True when this allocation had to acquire and initialise a buddy page.
-    pub new_page: bool,
 }

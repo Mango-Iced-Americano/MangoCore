@@ -3,7 +3,7 @@ title: "缺页处理与用户内存 fault-in"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-10
+last_update: 2026-08-03
 tags: [mm, page-fault, cow, uaccess, mmu-gather]
 ---
 
@@ -93,16 +93,10 @@ if area.vm_allows(ctx.access) {
 | 文件映射，store 且 shared | `FileBackedSharedWrite` |
 | 文件映射，store 且 private | `FileBackedWrite` |
 | 文件映射，load/execute | `FileBackedRead` |
-| ELF PT_LOAD 页 `Unallocated` | `ElfLazy` |
 | 匿名页 `Unallocated` | `LazyAlloc` |
 | 匿名页 `InMemory` 但 PTE 未映射 | `ResidentWithoutPte` |
 | 匿名页 `Compressed` | `Decompress`，仅 `oom_handler` |
 | 匿名页 `SwappedOut` | `SwapIn`，仅 `oom_handler` |
-
-`ElfLazy` 不能只根据 VMA 类型判断。PTE 不存在时仍须先查 `VmPageState`：
-`Unallocated` 才从 ELF 后备装页，`InMemory` 恢复已 resident 页，而
-`Compressed/SwappedOut` 继续走原有解压/换入路径。否则 PTE 撤销、压缩或换出后会错误从
-文件重建页，覆盖进程已修改的私有内容。
 
 这个分类表是理解 MM 行为的核心：VMA 权限只决定“是否允许”，具体动作取决于 PTE 和 `VmPageStore` 状态。
 
@@ -139,8 +133,6 @@ impl PageFaultHandler {
             FaultAction::FileBackedSharedWrite => filemap_shared_write_fault(area, mapper, ctx),
             // 文件映射页首次写入私有映射: 分配私有物理页并从文件填充内容。
             FaultAction::FileBackedWrite => filemap_private_fault(area, mapper, ctx),
-            // ELF PT_LOAD 首次访问：组装私有页，冷源页通过 Retry 在 VM 锁外读取。
-            FaultAction::ElfLazy => return elf_lazy_fault(area, mapper, ctx),
             // 压缩匿名页再次访问: 解压后恢复页表映射。
             #[cfg(feature = "oom_handler")]
             FaultAction::Decompress => {
@@ -184,14 +176,6 @@ impl PageFaultHandler {
         }
 
         match area.vm_kind() {
-            VmAreaKind::ElfLazy => match area.vm_page_state(ctx.vpn)? {
-                VmPageState::InMemory => Ok(FaultAction::ResidentWithoutPte),
-                VmPageState::Unallocated => Ok(FaultAction::ElfLazy),
-                #[cfg(feature = "oom_handler")]
-                VmPageState::Compressed => Ok(FaultAction::Decompress),
-                #[cfg(feature = "oom_handler")]
-                VmPageState::SwappedOut => Ok(FaultAction::SwapIn),
-            },
             VmAreaKind::FileBacked => Ok(match ctx.access {
                 FaultAccess::Store if area.vm_mapping() == VmAreaMapping::Shared => {
                     FaultAction::FileBackedSharedWrite
@@ -212,7 +196,7 @@ impl PageFaultHandler {
 }
 ```
 
-这段代码可以直接解释上表的优先级：只要页表已经有 PTE，分类就不会进入文件/ELF/匿名的“未映射”分支；store fault 在已映射 PTE 上优先按 shared、stale lazy、COW 分流。页表没有 PTE 时才看 `VmAreaKind` 和 `VmPageState`。
+这段代码可以直接解释上表的优先级：只要页表已经有 PTE，分类就不会进入文件/匿名的“未映射”分支；store fault 在已映射 PTE 上优先按 shared、stale lazy、COW 分流。页表没有 PTE 时才看 `VmAreaKind` 和 `VmPageState`。
 
 ## 5. 匿名 lazy allocation
 
@@ -230,19 +214,6 @@ Ok(ctx.offset_phys(ppn))
 3. 通过 `UserMapper` 安装 PTE，并让当前 `MmuGather` 记录该 VPN。
 4. 失败时回滚 `VmPageStore`；成功后由外层 `AddressSpace::write()` 根据 cached
    CPU mask 选择无失效、本地失效或远端 shootdown。
-
-内核默认在 demand page 成功映射后执行有界匿名 fault-around；启动参数
-`mango.mm.anon_fault_around=off` 可关闭它以执行严格 A/B。该机制只适用于 private
-anonymous `LazyAlloc`，不改变 shared、file-backed、ELF、CoW、swap 或 zram 路径。
-
-方向由 fault 前相邻 PTE 自适应判断：仅前一页已映射时向前，仅后一页已映射时向后；
-没有方向证据或两侧都已映射时不预测。每次最多额外映射 2 页，并同时要求候选 VPN 位于
-同一 VMA、状态仍为 `Unallocated`、PTE 尚未存在。候选页只能来自 idle 预清零池；池空、
-边界、页状态变化或映射失败都会立即停止，不触发同步清零和 OOM recovery。
-
-demand 与 speculative PTE 都通过当前 `UserMapper`/`MmuGather` 发布，因此沿用外层统一
-TLB shootdown 契约。`/sys/kernel/stats/pagefault` 的 schema v4 导出 attempt、trigger、
-映射页数以及 boundary/state/no-prezero/error 停止原因。
 
 ## 6. ResidentWithoutPte
 

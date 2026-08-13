@@ -118,40 +118,23 @@ impl Ext4 {
     }
 
     pub fn flush_device(&self) -> Result<()> {
-        if matches!(self.metadata_mode, MetadataMutationMode::Journal(_))
-            && self.flush_deferred_journal_for(JournalCommitReason::DurabilityBoundary)?
-        {
-            // A journal commit already ended with the TailUpdate persistence
-            // boundary. Issuing another device flush here adds no ordering but
-            // makes every deferred durability boundary five flushes instead of
-            // the required four.
-            return Ok(());
+        if matches!(self.metadata_mode, MetadataMutationMode::Journal(_)) {
+            self.flush_deferred_journal_for(JournalCommitReason::DurabilityBoundary)?;
         }
         self.flush_device_boundary(JournalCommitReason::DurabilityBoundary)
-    }
-
-    /// Whether journaled metadata is waiting for a durability boundary.
-    pub fn has_deferred_journal(&self) -> bool {
-        match &self.metadata_mode {
-            MetadataMutationMode::Journal(core) => core.has_pending_transaction(),
-            MetadataMutationMode::ReadOnly | MetadataMutationMode::Direct(_) => false,
-        }
     }
 
     /// Commit pending writeback metadata before a durability boundary.
     pub fn flush_deferred_journal(&self) -> Result<()> {
         self.flush_deferred_journal_for(JournalCommitReason::Explicit)
-            .map(|_| ())
     }
 
-    /// Returns true when this call committed a deferred transaction. Such a
-    /// commit already includes its final TailUpdate persistence boundary.
-    pub(super) fn flush_deferred_journal_for(&self, reason: JournalCommitReason) -> Result<bool> {
+    pub(super) fn flush_deferred_journal_for(&self, reason: JournalCommitReason) -> Result<()> {
         let MetadataMutationMode::Journal(core) = &self.metadata_mode else {
-            return Ok(false);
+            return Ok(());
         };
         match core.flush_deferred_transaction(self.block_device.as_ref(), self, reason) {
-            Ok(committed) => Ok(committed),
+            Ok(_) => Ok(()),
             Err(error) => {
                 if error.failure != journal_transaction::CommitFailure::BeforeCommit {
                     self.poison(ErrCode::EIO);
@@ -262,24 +245,6 @@ impl Ext4 {
             MetadataMutationMode::ReadOnly => Err(Ext4Error::new(ErrCode::EROFS)),
             MetadataMutationMode::Journal(core) => core.start(credits),
             MetadataMutationMode::Direct(core) => core.start(credits),
-        }
-    }
-
-    /// Start a transaction, committing an existing bounded batch only when
-    /// its accumulated images leave insufficient ring space for this update.
-    pub(super) fn transaction_start_with_deferred_retry(
-        &self,
-        credits: usize,
-    ) -> Result<journal_transaction::Transaction<'_>> {
-        match self.transaction_start(credits) {
-            Err(error)
-                if error.code() == ErrCode::E2BIG
-                    && matches!(&self.metadata_mode, MetadataMutationMode::Journal(_)) =>
-            {
-                self.flush_deferred_journal_for(JournalCommitReason::DeferredThreshold)?;
-                self.transaction_start(credits)
-            }
-            result => result,
         }
     }
 
@@ -400,7 +365,7 @@ impl Ext4 {
             }
             let refreshed = self.block_device.read_block(mapping[0])?;
             journal_sb = JournalSuperblock::parse(&refreshed.data[..], BLOCK_SIZE as u32)?;
-            self.inode_cache.lock().clear();
+            self.inode_cache.lock().entries.clear();
         }
 
         let mut image = Box::new([0u8; 1024]);
@@ -450,26 +415,9 @@ impl Ext4 {
             MetadataMutationMode::ReadOnly | MetadataMutationMode::Direct(_) => false,
         }
     }
-
-    pub(super) fn deferred_journal_block(
-        &self,
-        block_id: PBlockId,
-    ) -> Option<Box<[u8; BLOCK_SIZE]>> {
-        match &self.metadata_mode {
-            MetadataMutationMode::Journal(core) => core.deferred_block(block_id),
-            MetadataMutationMode::ReadOnly | MetadataMutationMode::Direct(_) => None,
-        }
-    }
 }
 
 impl journal_transaction::CachePublisher for Ext4 {
-    fn publish_pending(&self, blocks: &BTreeMap<PBlockId, journal_transaction::StagedBlock>) {
-        // Deferred metadata is the live VFS state even before a durability
-        // boundary. Reuse the idempotent cache publication path so lookups,
-        // inode reads and allocation accounting observe the completed syscall.
-        self.publish(blocks);
-    }
-
     fn publish(&self, blocks: &BTreeMap<PBlockId, journal_transaction::StagedBlock>) {
         // Normal transactions change descriptor counters/checksums, never the
         // validated bitmap/table addresses. Therefore system_metadata_ranges

@@ -3,7 +3,7 @@ title: "OOM、overcommit 与 locked pages"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-11
+last_update: 2026-08-02
 tags: [mm, oom, overcommit, mlock]
 ---
 
@@ -62,22 +62,6 @@ alloc(layout)
 该路径不调度任务退出，避免持锁栈帧无法析构。
 
 堆 OOM 的处理原则是“allocator 返回 null，最终 fatal handler 关机”，不是在分配器内部杀当前进程。这样可以避免分配失败发生在持锁或不可安全调度的路径上。
-
-### 3.1 Heap allocator 诊断口径
-
-`perf_stats` 的 `memory_io` profile 通过 `/sys/kernel/stats/heap` 导出 schema v1。
-正常 profile 关闭时记录函数为 no-op。计数器分为四组：
-
-- 锁归因：alloc/dealloc 各自的 wait/hold 总 ticks，以及每 CPU calls/wait/hold；
-- 分布：wait/hold 使用 `0`、`1..63`、`64..1023`、`1024..16383`、
-  `16384..262143`、`>=262144` 六个原始 tick 桶，区分持续竞争与少数长尾；
-- 路径：各 slab class、slab fast hit、新页 refill、slab fallback 和 direct buddy；
-- 压力：请求字节、buddy failure、recovery attempt/success、retry 和最终失败。
-
-分析时先看 `heap_lock_wait_ticks_total / heap lock calls` 与每 CPU 分布判断全局锁竞争，
-再用 hold histogram 区分临界区本身过长还是排队过长。若 refill/fallback 比例高而 wait
-不高，优先检查 slab page 周转；若 wait 高且各 CPU 均匀增长，则全局 allocator 锁是
-SMP 扩展瓶颈候选。所有时间字段均为架构原始 tick，只能在同架构、同 QEMU 配置下 A/B。
 
 ## 4. 物理页 OOM
 

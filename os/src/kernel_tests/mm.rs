@@ -1,7 +1,6 @@
 //! L3 tests for the page frame allocator.
 
 use crate::config::PAGE_SIZE;
-use crate::fs::vfs::{File, FileFlags};
 use crate::kernel_tests::runner::KernelTest;
 use crate::mm::{
     self, AddressSpace, AddressSpaceInner, FaultAccess, MapFlags, MapPermission, PageTable,
@@ -10,7 +9,6 @@ use crate::mm::{
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::convert::TryInto;
 
 /// Returns all mm-related kernel tests.
 pub fn tests() -> Vec<KernelTest> {
@@ -29,252 +27,12 @@ pub fn tests() -> Vec<KernelTest> {
             "mm::local_mmu_gather_map_protect_unmap",
             test_local_mmu_gather_map_protect_unmap,
         ),
-        KernelTest::new(
-            "mm::elf_ptload_pages_are_demand_paged",
-            test_elf_ptload_pages_are_demand_paged,
-        ),
-        KernelTest::new(
-            "mm::anon_fault_around_is_bounded",
-            test_anon_fault_around_is_bounded,
-        ),
         #[cfg(feature = "oom_handler")]
         KernelTest::new(
             "mm::shared_futex_pin_blocks_reclaim",
             test_shared_futex_pin_blocks_reclaim,
         ),
     ]
-}
-
-/// A forward sequential fault may consume at most two already-zeroed pages.
-/// Production enables the bounded predictor by default; an explicit
-/// `mango.mm.anon_fault_around=off` keeps the escape hatch testable.
-fn test_anon_fault_around_is_bounded() -> Result<(), &'static str> {
-    if !mm::anon_fault_around_enabled() {
-        return Ok(());
-    }
-
-    const TEST_BASE: usize = crate::config::ELF_PIE_BASE + 0x60_0000;
-    const TEST_PAGES: usize = 8;
-    for _ in 0..4 {
-        mm::idle_prezero_refill();
-    }
-
-    let space = AddressSpace::new(AddressSpaceInner::<PageTableImpl>::new_bare());
-    let mapped = space.write(|inner| {
-        inner.mmap(
-            TEST_BASE,
-            TEST_PAGES * PAGE_SIZE,
-            MapPermission::R | MapPermission::W | MapPermission::U,
-            MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED_NOREPLACE,
-            0,
-            None,
-            true,
-            false,
-        )
-    });
-    if mapped != TEST_BASE as isize {
-        return Err("failed to create anonymous fault-around fixture");
-    }
-
-    space
-        .fault_in_user_va_retry(VirtAddr::from(TEST_BASE), FaultAccess::Store)
-        .map_err(|_| "first anonymous demand fault failed")?;
-    let first = VirtAddr::from(TEST_BASE).floor();
-    if space.read(|inner| {
-        inner.translate(first).is_none()
-            || inner
-                .translate(VirtAddr::from(TEST_BASE + PAGE_SIZE).floor())
-                .is_some()
-    }) {
-        return Err("first anonymous fault predicted without a direction");
-    }
-
-    space
-        .fault_in_user_va_retry(VirtAddr::from(TEST_BASE + PAGE_SIZE), FaultAccess::Store)
-        .map_err(|_| "second anonymous demand fault failed")?;
-    space.read(|inner| {
-        for page in 0..=3 {
-            if inner
-                .translate(VirtAddr::from(TEST_BASE + page * PAGE_SIZE).floor())
-                .is_none()
-            {
-                return Err("fault-around did not populate its bounded forward window");
-            }
-        }
-        if inner
-            .translate(VirtAddr::from(TEST_BASE + 4 * PAGE_SIZE).floor())
-            .is_some()
-        {
-            return Err("fault-around populated beyond its two-page bound");
-        }
-        Ok(())
-    })
-}
-
-fn pread_exact(file: &File, mut offset: usize, mut dst: &mut [u8]) -> Result<(), &'static str> {
-    while !dst.is_empty() {
-        let count = file
-            .pread(offset, dst)
-            .map_err(|_| "failed to read ELF test fixture")?;
-        if count == 0 {
-            return Err("short read from ELF test fixture");
-        }
-        offset = offset
-            .checked_add(count)
-            .ok_or("ELF test fixture offset overflow")?;
-        dst = &mut dst[count..];
-    }
-    Ok(())
-}
-
-/// Direct exec must reserve only PT_LOAD VMAs. Target frames, file overlays and
-/// BSS zeros are materialized by the first fault, not by ELF construction.
-fn test_elf_ptload_pages_are_demand_paged() -> Result<(), &'static str> {
-    #[derive(Clone, Copy)]
-    struct Load {
-        flags: u32,
-        offset: usize,
-        vaddr: usize,
-        filesz: usize,
-        memsz: usize,
-    }
-
-    let inode = crate::fs::vfs_lookup_absolute("/init")
-        .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
-        .map_err(|_| "ktest initramfs has no ELF fixture")?;
-    let file =
-        File::new(inode, FileFlags::O_RDONLY).map_err(|_| "failed to open ELF test fixture")?;
-    let mut ehdr = [0u8; 64];
-    pread_exact(&file, 0, &mut ehdr)?;
-    if &ehdr[..4] != b"\x7fELF" || ehdr[4] != 2 || ehdr[5] != 1 {
-        return Err("ELF test fixture is not little-endian ELF64");
-    }
-    let read_u16 = |offset: usize| u16::from_le_bytes([ehdr[offset], ehdr[offset + 1]]) as usize;
-    let read_u64 =
-        |offset: usize| usize::from_le_bytes(ehdr[offset..offset + 8].try_into().unwrap());
-    let elf_entry = read_u64(24);
-    let phoff = read_u64(32);
-    let phentsize = read_u16(54);
-    let phnum = read_u16(56);
-    if phentsize < 56 || phnum == 0 {
-        return Err("ELF test fixture has invalid program headers");
-    }
-    let phdr_bytes = phentsize
-        .checked_mul(phnum)
-        .ok_or("ELF program-header size overflow")?;
-    let mut phdrs = vec![0u8; phdr_bytes];
-    pread_exact(&file, phoff, &mut phdrs)?;
-    let mut loads = Vec::new();
-    loads
-        .try_reserve(phnum)
-        .map_err(|_| "failed to reserve ELF test load headers")?;
-    for index in 0..phnum {
-        let ph = &phdrs[index * phentsize..];
-        let u32_at = |offset: usize| u32::from_le_bytes(ph[offset..offset + 4].try_into().unwrap());
-        let usize_at =
-            |offset: usize| usize::from_le_bytes(ph[offset..offset + 8].try_into().unwrap());
-        if u32_at(0) == 1 {
-            loads.push(Load {
-                flags: u32_at(4),
-                offset: usize_at(8),
-                vaddr: usize_at(16),
-                filesz: usize_at(32),
-                memsz: usize_at(40),
-            });
-        }
-    }
-
-    let (inner, _program_break, info) =
-        AddressSpaceInner::<PageTableImpl>::from_elf_inode(file.clone())
-            .map_err(|_| "direct ELF loader rejected the ktest fixture")?;
-    let bias = info
-        .entry
-        .checked_sub(elf_entry)
-        .ok_or("ELF runtime entry is below its link-time entry")?;
-    let entry_load = loads
-        .iter()
-        .find(|load| {
-            let start = load.vaddr.saturating_add(bias);
-            info.entry >= start && info.entry < start.saturating_add(load.filesz)
-        })
-        .ok_or("ELF entry is not covered by file-backed PT_LOAD bytes")?;
-    let entry_file_offset = entry_load
-        .offset
-        .checked_add(info.entry - entry_load.vaddr.saturating_add(bias))
-        .ok_or("ELF entry file offset overflow")?;
-    let mut expected_entry = [0u8; 1];
-    pread_exact(&file, entry_file_offset, &mut expected_entry)?;
-
-    let mut bss_addr = None;
-    for load in loads
-        .iter()
-        .filter(|load| load.flags & 4 != 0 && load.memsz > load.filesz)
-    {
-        let mut candidate = load
-            .vaddr
-            .checked_add(bias)
-            .and_then(|start| start.checked_add(load.filesz))
-            .ok_or("ELF BSS start overflow")?;
-        let end = load
-            .vaddr
-            .checked_add(bias)
-            .and_then(|start| start.checked_add(load.memsz))
-            .ok_or("ELF BSS end overflow")?;
-        while candidate < end {
-            let covering_end = loads
-                .iter()
-                .filter_map(|other| {
-                    let start = other.vaddr.checked_add(bias)?;
-                    let file_end = start.checked_add(other.filesz)?;
-                    (start <= candidate && candidate < file_end).then_some(file_end)
-                })
-                .max();
-            match covering_end {
-                Some(next) => candidate = next,
-                None => {
-                    bss_addr = Some(candidate);
-                    break;
-                }
-            }
-        }
-        if bss_addr.is_some() {
-            break;
-        }
-    }
-    let bss_addr = bss_addr.ok_or("ELF test fixture has no unobscured readable BSS byte")?;
-
-    let space = AddressSpace::new(inner);
-    let entry_vpn = VirtAddr::from(info.entry).floor();
-    let bss_vpn = VirtAddr::from(bss_addr).floor();
-    if space
-        .read(|inner| inner.translate(entry_vpn).is_some() || inner.translate(bss_vpn).is_some())
-    {
-        return Err("direct ELF loader eagerly allocated a PT_LOAD target frame");
-    }
-
-    let entry_pa = space
-        .fault_in_user_va_retry(VirtAddr::from(info.entry), FaultAccess::Execute)
-        .map_err(|_| "ELF entry demand fault failed")?;
-    let entry_byte = unsafe {
-        entry_pa
-            .floor()
-            .with_bytes(|page| page[entry_pa.page_offset()])
-    };
-    if entry_byte != expected_entry[0] {
-        return Err("ELF entry fault copied the wrong file byte");
-    }
-    if entry_vpn != bss_vpn && space.read(|inner| inner.translate(bss_vpn).is_some()) {
-        return Err("faulting the ELF entry populated an unrelated BSS page");
-    }
-
-    let bss_pa = space
-        .fault_in_user_va_retry(VirtAddr::from(bss_addr), FaultAccess::Load)
-        .map_err(|_| "ELF BSS demand fault failed")?;
-    let bss_byte = unsafe { bss_pa.floor().with_bytes(|page| page[bss_pa.page_offset()]) };
-    if bss_byte != 0 {
-        return Err("ELF BSS demand fault did not zero-fill memory");
-    }
-    Ok(())
 }
 
 /// 验证运行期固件拓扑已经贯穿 RAM 判定和内核恒等映射元数据。
