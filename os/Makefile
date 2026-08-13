@@ -80,11 +80,11 @@ la64_all: prepare-cargo-config
 else
 rv64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-rv)
 	@echo "Building rv64"
-	$(MAKE) ARCH=rv64 PROFILE=normal CORE_NUM=8 -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
+	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
 
 la64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-la)
 	@echo "Building la64"
-	$(MAKE) ARCH=la64 PROFILE=normal CORE_NUM=12 -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
+	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
 endif
 
 publish-compatibility:

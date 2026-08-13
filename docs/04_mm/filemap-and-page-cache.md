@@ -3,7 +3,7 @@ title: "文件映射缺页与 PageCache 交互"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-27
+last_update: 2026-08-11
 tags: [mm, mmap, filemap, page-cache, mmu-gather]
 ---
 
@@ -21,6 +21,8 @@ tags: [mm, mmap, filemap, page-cache, mmu-gather]
 | `os/src/mm/filemap.rs` | `check_within_file()` | 检查 fault 偏移是否在文件大小 round-up 范围内 |
 | `os/src/mm/filemap.rs` | `zero_tail()` | 清零最后一页 EOF 之后的字节 |
 | `os/src/mm/filemap.rs` | `verify_filemap_fault()` | 校验 VMA resident frame 与 PTE 一致 |
+| `os/src/mm/filemap.rs` | `map_resident_filemap_tail()` | demand fault 成功后映射窗口内已 resident 的相邻页 |
+| `os/src/mm/filemap.rs` | `ElfLazyBacking` / `elf_lazy_fault()` | 首次触页时装配私有 ELF PT_LOAD 页 |
 | `os/src/mm/page_fault.rs` | `FaultAction::FileBacked*` | 将缺页分类派发到 filemap |
 | `os/src/fs/` | `PageCache` / inode page cache 接口 | 提供文件页缓存 frame |
 
@@ -42,6 +44,8 @@ do_page_fault()
         │     └── filemap_read_fault()
         ├── FileBackedWrite
         │     └── filemap_private_fault()
+        ├── ElfLazy
+        │     └── elf_lazy_fault()
         └── FileBackedSharedWrite
               └── filemap_shared_write_fault()
 ```
@@ -53,6 +57,10 @@ do_page_fault()
 | 是否文件映射 | `area.vm_kind() == VmAreaKind::FileBacked` |
 | private/shared | `area.vm_mapping()` |
 | fault 类型 | `FaultAccess::Load/Store/Execute` |
+
+ELF PT_LOAD 不等价于普通 `MAP_PRIVATE` 文件映射：同一虚拟页可以被多个非页对齐或
+重叠的 program header 覆盖，并且 BSS 需要保留零填充。因此 `ElfLazyBacking` 保存
+经验证的 PT_LOAD 列表与 PageCache，而不是把一个 VMA 简化为单一文件偏移。
 
 ## 3. 文件偏移计算
 
@@ -118,15 +126,47 @@ filemap_read_fault(area, page_table, ctx)
   ├── file_offset = area.vm_file_offset(ctx.vpn)
   ├── file_size = check_within_file()
   ├── pc = inode.ensure_page_cache()
-  ├── cache_frame = pc.frame_for_read(page_index)
-  ├── zero_tail(file_size, file_offset, cache_frame)
+  ├── window = min(VMA 剩余页, EOF 剩余页, 16)
+  ├── VM 锁内 try_frame_for_filemap_read_ahead()
+  │     ├── resident → 返回 cache frame
+  │     └── miss/transient → 返回 Retry token，不执行 I/O
+  ├── VM 锁外 RetryWait::wait()
+  │     └── 连续读取当前页及最多 15 个前向页
+  ├── 重新取得 VM 锁并重验 VMA/EOF
   ├── map_perm = area.vm_perm()，若含 W 则去掉 W
   ├── area.inner.alloc_in_memory(ctx.vpn, cache_frame)
   ├── UserMapper::map_user_page(ctx.vpn, cache_ppn, map_perm)
+  ├── map_resident_filemap_tail()
+  │     └── 只为连续已 resident/ready 页安装 PTE，首个 miss 即停止
   └── verify_filemap_fault()
 ```
 
 读缺页不复制文件页。VMA resident frame 指向 page cache frame。
+
+前向 fault-around 固定上限为 16 页（64 KiB），同时受当前 VMA 末端和权威 EOF
+约束。它只接入普通文件映射的读/执行缺页，不改变目录、元数据、read syscall、
+private 首次 store 或 shared 首次 store 的 admission。批量读取仍按真正连续的 miss run
+拆分，缓存洞不会被错误地拼成一段后端 I/O；truncate/invalidate 代际变化时放弃发布，
+由单页 demand 路径兜底。
+
+并发 fault-around 在后端 I/O 前先把缺页登记到 `batch_read_claims`。该登记只表达
+I/O 所有权，不把尚未初始化的 `PageEntry` 暴露给普通读路径；其他缺页线程命中同一
+claim 后等待统一的 page-state generation。所有成功、分配失败、I/O 错误和 truncate
+代际冲突出口都会释放 claim 并唤醒等待者，因此相同窗口只由一个 owner 发起后端读取，
+也不会遗留永久 in-flight 状态。schema v3 的 `filemap_fault_around_claim_conflicts`
+用于量化被合并掉的重复读取竞争。
+
+预取页在首次被 filemap、ELF 或普通 PageCache 读写路径消费时清除 readahead 标记；
+若在消费前被 clock、truncate 或 invalidate 丢弃，则记录为 unused discard。该标记只
+用于 `memory_io` 诊断窗口，不参与页面状态机或正确性判断。
+
+demand 页映射成功后，`map_resident_filemap_tail()` 会继续检查同一窗口的
+相邻页。该阶段只使用 `try_resident_frame_for_filemap_map()` 获取已经
+UpToDate/Dirty 的 frame，不创建 PageCache entry、不等待正在进行的回写，也不
+发起后端 I/O。因此它可以在地址空间锁内安全地减少后续 resident
+页的 PTE fault，遇到第一个未就绪页就停止，不改变 demand fault 的成功/失败结果。
+filemap schema v4 分别记录检查数、PTE 映射数、not-ready、VM 状态冲突和
+cache error，便于区分“数据已预取但仍反复 fault”与“后端页未就绪”。
 
 ## 7. 为什么读缺页要清 W
 
@@ -227,7 +267,7 @@ page_table.is_mapped(cursor) || file_backed_page_resident(area, cursor)
 
 | PageCache 操作 | MM 语义 |
 |----------------|---------|
-| `frame_for_read(index)` | 获取可读缓存页，必要时从文件加载 |
+| `try_frame_for_filemap_read_ahead(index, eof, pages)` | VM 锁内只检查 resident；冷页返回锁外 Retry token |
 | `frame_for_write(index)` | 获取可写缓存页，并进入 dirty/write 路径 |
 
 MM 层不直接操作块设备，也不决定脏页何时回写。
@@ -256,3 +296,18 @@ file-backed mmap 的关键是区分“文件页缓存”和“进程私有页”
 | MAP_SHARED 写不回文件 | store fault 是否经过 `frame_for_write()` |
 | mincore 返回 0 但 page cache 已有页 | `file_backed_page_resident()` 的 offset/page_index 计算 |
 | 文件 VMA 分裂后读错位置 | `Vma::into_two()` 是否正确调整 `map_file_offset` |
+
+## 16. ELF PT_LOAD 按需装页
+
+`from_elf_inode()` 只建立按页权限并后的 `ElfLazy` VMA，不为整个可执行映像分配
+目标 frame。首次 fault 的顺序是：
+
+1. 分配清零且尚未安装 PTE 的私有 frame。
+2. 按 program-header 顺序将所有相交 PT_LOAD 文件范围覆盖到该页。
+3. 只访问已 resident 的 PageCache 页；缺页时返回 `RetryWait`，回滚目标 frame。
+4. 外层释放 VM 锁后完成后端 I/O，再重新 fault。
+5. 文件字节覆盖完成后才安装 PTE，避免其它 CPU 观察到半成品页。
+
+最终 resident 页是进程私有 frame，不直接暴露 PageCache frame；因此后续写入不会污染
+可执行文件。后备 `Arc` 在 VMA clone/split/fork 时保留，同时保持主程序和动态解释器
+inode 的 ETXTBSY 生命周期。

@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-13
+last_update: 2026-08-06
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -22,9 +22,8 @@ tags: [process, scheduler, task-manager, processor]
 | `os/src/hal/*` | `__switch` 汇编上下文切换 |
 
 调度器当前处于 SMP 过渡阶段：current 槽、idle context 和 runnable 队列已按 CPU
-拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；底层 TCB 构造保留
-CPU0-only 安全初值，正式 normal PID1 在派生 test-runner 前将 mask 扩为全部在线 CPU；
-首次发布按继承的任务 affinity 和近似负载选点。focused ktest 的短 kernel-only
+拆分，AP 已在 scheduler-ready 后进入精简本地调度循环；普通任务的初始 mask 仍为
+CPU0-only，但首次发布已按任务 affinity 和近似负载选点。focused ktest 的短 kernel-only
 任务可通过同一通用入口远程入队，并能在阻塞后
 由统一 wake 路径回到最近运行 CPU。B28 还允许一个由 ktest 明确构造的用户探针
 发布到 CPU1，验证真实 trap/yield/exit；B29 再让同一探针先在 CPU0 运行，并在真实
@@ -38,8 +37,11 @@ runqueue。B37 又让 clone/fork 继承的 mask 决定新任务的合法候选�
 `last_cpu` 作为 locality 提示。B38 不扩张状态机，用 per-task 请求槽让远程
 Running owner 在安全点真正交出 current；Blocking 则等待其稳定为 Running 或
 Blocked 后复用对应协议。
-B39 又给每个在线 CPU 建立独立 100Hz 绝对调度 tick；timer hard IRQ 仍只发布
+B39 给运行任务的 CPU 建立独立 100Hz 绝对调度 tick；timer hard IRQ 仍只发布
 per-CPU pending，真正的 tick 推进和是否切换延后到 trap-return/scheduler 安全点。
+AP 空闲后停掉本地 one-shot timer，由任务发布或预清零低水位 IPI 唤醒；重新 dispatch
+时从当前时间开始完整的新 quantum。纯 timer tick 若本地没有竞争者、IPI 或迁移请求，
+则只处理 timer/housekeeping 并直接返回当前任务，不再往返 idle 栈。
 全局 kernel timer/timeout/timerfd/net poll 继续由 CPU0 独占。B33 已让远端 RESCHEDULE 在用户 trap-return
 消费：handler 只置位，统一安全点与 timer 请求合并后最多切换一次。显式
 yield/block/exit 仍直接进入切换边界。
@@ -142,9 +144,10 @@ nice-aware 路径只在需要时扫描。`sched_nice_hint` 和 `sched_vruntime_h
 快照，因此选择路径不在持有 runqueue 锁时获取 `task.inner`。
 
 这条路径在每 CPU `VecDeque` 上实现简化公平选择，不维护 Linux CFS 的红黑树或
-调度域。正式用户任务从 PID1 的全核 mask 起步；显式设置过 affinity 的父线程
-clone/fork 时，子任务继续继承该 mask，并由 B37 的通用选择器取得合法首次 owner。受控 ktest 任务也
-走同一入口，单 bit mask 仍保证它精确到达指定 AP。
+调度域。普通任务仍从 CPU0-only mask 起步；显式设置过 affinity 的父线程 clone/fork
+时，子任务会继承该 mask。新任务没有可复用的最近运行位置：允许集合存在真正空闲的
+CPU 时先投递到该 CPU，只有所有允许 CPU 都忙时才回退到 B37 的负载加 locality 选择器。
+受控 ktest 任务也走同一入口，单 bit mask 仍保证它精确到达指定 AP。
 
 B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放入对应
 `PerCpu`。状态 CAS 与队列操作均由 `run_queue.rs` 的专用入口提交；普通业务代码
@@ -152,9 +155,9 @@ B15 先建立 `Queued(cpu)/Running(cpu)` 所有权协议，B18 再把容器放�
 这些任务走真实 Completion/WaitQueue 阻塞，并通过生产 wake 入口回到 `last_cpu`。
 内核初始 affinity 约束已生效，current 线程可在 syscall 中收紧或扩展自己的 mask，远程
 稳定 Blocked 线程可在 wake 前更新 mask，稳定 Queued 线程也可被搬到新 owner；B37 已统一
-新任务与 wake 的 locality/负载选择，B38 已让远程 Running/Blocking 走 owner
-安全点交接。work stealing 可用于 affinity 允许的任务；正式 normal 用户进程树已经
-继承 PID1 的全核 mask，独立测试 TCB 则继续由用例显式设置精确 mask。
+新任务与 wake 的选择基础设施（新任务 idle-first、阻塞 wake 保留 locality），B38 已让远程 Running/Blocking 走 owner
+安全点交接。work stealing 已可用于 affinity 允许的任务，但普通用户任务默认 mask 仍为
+CPU0-only，因此这不等于已经解除共享子系统门禁。
 
 ### 3.1 Work stealing claim 顺序
 
@@ -170,7 +173,9 @@ checked decrement。释放锁后，任务由当前调用方的 `Arc + Migrating`
 若快照非空但所有任务都 pinned 或已有 migration target，只累计
 `steal_no_eligible_candidate`，不能触发 TLB 同步。
 
-core profile 的 scheduler counter schema 为版本 2；成功路径必须满足
+core profile 的 scheduler counter schema 为版本 3；`new_task_idle_available`、
+`new_task_selected_idle` 和 `new_task_kept_busy_parent` 分别记录新任务选择时是否存在
+空闲 CPU、是否实际选中空闲 CPU，以及所有 CPU 忙时是否保留调用 CPU。成功路径必须满足
 `steal_candidate_found == steal_ktlb_sync_calls == steal_success`，兼容旧日志保留的
 `steal_recheck_failed` 应恒为零。KTLB 同步失败表示当前在线 thief CPU 破坏调度不变量，
 因此保持 fail-stop，不尝试把半迁移任务回滚到已变化的远端队列。
@@ -178,10 +183,11 @@ core profile 的 scheduler counter schema 为版本 2；成功路径必须满足
 ### 3.2 首次发布与精确目标入口
 
 `publish_task(task)` 是普通新任务入口。启动期尚无 current 的 init/ktest runner 显式发布到
-CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择目标：preferred
-CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
-`nr_running + current_present` 最小、CPU ID 最小的候选。clone/fork 因而不会再把继承了
-非 CPU0 mask 的子任务错误投递到 CPU0。
+CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择目标：若集合中有
+`nr_running + current_present == 0` 的 CPU，选择其中 ID 最小者；否则 preferred CPU 合法且
+负载不超过最小值 `+1` 时保留 locality，否则选择 `nr_running + current_present` 最小、CPU ID
+最小的候选。clone/fork 因而不会再把继承了非 CPU0 mask 的子任务错误投递到 CPU0，也不会在
+已有空闲 AP 时把新任务继续堆在创建者 CPU 上。
 
 `publish_task_on(task, cpu)` 是首次发布的统一生产入口，kernel-only ktest 和 B28
 用户探针不再各自复制远程入队协议。顺序固定为：
@@ -195,8 +201,7 @@ CPU 合法且负载不超过最小值 `+1` 时保留 locality，否则选择
 
 `publish_task_on()` 本身仍是精确目标提交原语，不做负载选择；普通
 `publish_task()` 已在 B37 按 affinity/locality/近似负载选择目标，然后调用该原语。
-独立构造的 TCB 默认 mask 仍是 bit0；正式 normal 路径会在派生用户任务前由 PID1
-通过 `sched_setaffinity` 扩为全部在线 CPU，因此不会把测试进程树锁死在 CPU0。
+普通任务的默认 mask 仍是 bit0，因此“放置器已通用化”不等于“默认用户任务已全核化”。
 普通 clone 使用可失败的 `try_publish_task_on()`：最终门禁已关闭时返回 `EAGAIN`，
 并由 syscall 层清理尚未发布的用户资源；启动/ktest wrapper 仍把拒绝视为不变量错误。
 
@@ -426,15 +431,15 @@ timer/IPI，立即回到 IRQ-off idle 栈；只有 10ms scheduler tick 发布的
 AP 走独立的精简分支，只执行：
 
 ```text
-短暂开放 IPI/timer → 立即关中断 → 处理 STOP/deferred reason
-  → 推进本 CPU sched tick 并重编程本地 one-shot
+短暂开放 IPI → 立即关中断 → 处理 STOP/deferred reason
+  → 必要时处理合并式 prezero 补充请求
   → drain 本 CPU local_zombies
   → fetch 本 CPU RunQueue
   → 共用 dispatch_task()/current/__switch/switch-out
-  → 空队列时在 IRQ-off 窗口重查后执行 wfi/idle
+  → 空队列时停掉本地 timer，在 IRQ-off 窗口重查后执行 wfi/idle
 ```
 
-AP 只推进本地调度 tick，不执行全局 timeout、kernel timer callback、console、network、
+AP 只在运行任务时推进本地调度 tick，不执行全局 timeout、kernel timer callback、console、network、
 FS reclaim 或 OOM active tracker。B39 的无 syscall 用户忙循环已证明 CPU1 timer 可以在
 trap-return 安全点把 current 交给同核 helper。远程
 发布者遵守“先入队、释放 runqueue 锁、再发 RESCHEDULE”，因此空队列检查到 wait

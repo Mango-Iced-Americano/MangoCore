@@ -32,7 +32,7 @@ use crate::mm::{
     kernel_program_base, AddressSpace, AddressSpaceInner, FaultAccess, PhysPageNum, VirtAddr,
     KERNEL_SPACE,
 };
-use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM};
+use crate::syscall::errno::{EAGAIN, EFAULT, EISDIR, ENOEXEC, ENOMEM, ENOSYS};
 use crate::syscall::{shm_clone_attachments, CloneFlags};
 use crate::timer::{TimeSpec, TimeVal};
 use alloc::string::String;
@@ -273,6 +273,18 @@ pub struct TaskControlBlock {
     pub(crate) wake_enqueued_ticks: AtomicUsize,
     /// 最近一次取得 Running owner 的时间戳，仅用于诊断运行片段长度。
     pub(crate) run_started_ticks: AtomicUsize,
+    /// `perf_stats` 构建中累计的阻塞时间，单位微秒。
+    blocked_time_us: AtomicU64,
+    /// 当前 Blocking/Blocked 区间起点；0 表示任务当前不在阻塞区间。
+    blocked_since_us: AtomicU64,
+    /// 已结算的 runqueue 等待时间，单位微秒。
+    runnable_wait_us: AtomicU64,
+    /// 等待点临时发布的精确阻塞类别；0 表示按 syscall 推导。
+    blocked_reason_hint: AtomicUsize,
+    /// 当前或最近一次阻塞类别，供低频任务快照读取。
+    blocked_reason: AtomicUsize,
+    /// 当前或最近一次阻塞所处 syscall ID 加一；0 表示无 syscall。
+    blocked_syscall_id: AtomicUsize,
 }
 
 /// 任务控制块内部状态
@@ -666,6 +678,84 @@ impl TaskControlBlock {
         self.acquire_inner_lock().rusage.cpu_time_us()
     }
 
+    /// 返回低频诊断所需的任务身份和时间分解。
+    pub(crate) fn runtime_diagnostics(
+        &self,
+    ) -> ([u8; 16], u64, u64, u64, u64, BlockedReason, Option<usize>) {
+        let (comm, user_us, system_us) = {
+            let inner = self.acquire_inner_lock();
+            (
+                inner.task_comm,
+                inner.rusage.ru_utime.to_us() as u64,
+                inner.rusage.ru_stime.to_us() as u64,
+            )
+        };
+        let accumulated = self.blocked_time_us.load(Ordering::Acquire);
+        let since = self.blocked_since_us.load(Ordering::Acquire);
+        let blocked_us = if since == 0 {
+            accumulated
+        } else {
+            accumulated.saturating_add((crate::timer::get_time_us() as u64).saturating_sub(since))
+        };
+        let runnable_accumulated = self.runnable_wait_us.load(Ordering::Acquire);
+        let enqueued = self.wake_enqueued_ticks.load(Ordering::Acquire);
+        let runnable_wait_us = if enqueued == 0 {
+            runnable_accumulated
+        } else {
+            runnable_accumulated.saturating_add(crate::timer::ticks_to_us(
+                crate::timer::raw_ticks().wrapping_sub(enqueued as u64),
+            ))
+        };
+        let blocked_reason = BlockedReason::decode(self.blocked_reason.load(Ordering::Acquire));
+        let blocked_syscall = match self.blocked_syscall_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id - 1),
+        };
+        (
+            comm,
+            user_us,
+            system_us,
+            blocked_us,
+            runnable_wait_us,
+            blocked_reason,
+            blocked_syscall,
+        )
+    }
+
+    /// 在一个可能睡眠的内核路径内覆盖默认 syscall 阻塞分类。
+    pub(crate) fn blocked_reason_scope(
+        self: &Arc<Self>,
+        reason: BlockedReason,
+    ) -> BlockedReasonGuard {
+        let previous = if cfg!(feature = "perf_stats") {
+            self.blocked_reason_hint
+                .swap(reason.encode(), Ordering::AcqRel)
+        } else {
+            0
+        };
+        BlockedReasonGuard {
+            task: Arc::clone(self),
+            previous,
+        }
+    }
+
+    /// 结算一次 queued -> running 的本线程等待时间。
+    pub(crate) fn account_runnable_wait_ticks(&self, ticks: usize) {
+        if cfg!(feature = "perf_stats") {
+            self.runnable_wait_us
+                .fetch_add(crate::timer::ticks_to_us(ticks as u64), Ordering::Relaxed);
+        }
+    }
+
+    /// exec 后按 Linux 语义把 comm 更新为可执行文件 basename。
+    pub(crate) fn set_exec_comm(&self, exe_path: &str) {
+        let basename = exe_path.rsplit('/').next().unwrap_or(exe_path).as_bytes();
+        let mut comm = [0u8; 16];
+        let len = basename.len().min(comm.len() - 1);
+        comm[..len].copy_from_slice(&basename[..len]);
+        self.acquire_inner_lock().task_comm = comm;
+    }
+
     /// 把本线程已经结算的 CPU 时间尾数立即并入进程账户。
     ///
     /// 进程级 CPU 时间查询不能等到下一次 trap 返回或调度切出，否则当前
@@ -1027,7 +1117,8 @@ impl TaskControlBlock {
         current: TaskStatus,
         next: TaskStatus,
     ) -> Result<(), TaskStatus> {
-        self.sched_state
+        let result = self
+            .sched_state
             .compare_exchange(
                 current.encode(),
                 next.encode(),
@@ -1035,7 +1126,44 @@ impl TaskControlBlock {
                 Ordering::Acquire,
             )
             .map(|_| ())
-            .map_err(TaskStatus::decode)
+            .map_err(TaskStatus::decode);
+        if result.is_ok() && cfg!(feature = "perf_stats") {
+            self.account_blocked_transition(current, next);
+        }
+        result
+    }
+
+    fn account_blocked_transition(&self, current: TaskStatus, next: TaskStatus) {
+        let current_blocked = matches!(current, TaskStatus::Blocking(_) | TaskStatus::Blocked);
+        let next_blocked = matches!(next, TaskStatus::Blocking(_) | TaskStatus::Blocked);
+        if !current_blocked && next_blocked {
+            let now = (crate::timer::get_time_us() as u64).max(1);
+            let previous = self.blocked_since_us.swap(now, Ordering::AcqRel);
+            debug_assert_eq!(previous, 0, "task entered a nested blocked interval");
+            let syscall_id = crate::task::processor::current_syscall_id();
+            let hint = BlockedReason::decode(self.blocked_reason_hint.load(Ordering::Acquire));
+            let reason = if hint == BlockedReason::None {
+                syscall_id
+                    .map(crate::syscall::default_blocked_reason)
+                    .unwrap_or(BlockedReason::Other)
+            } else {
+                hint
+            };
+            self.blocked_reason.store(reason.encode(), Ordering::Release);
+            self.blocked_syscall_id.store(
+                syscall_id.map(|id| id + 1).unwrap_or(0),
+                Ordering::Release,
+            );
+        } else if current_blocked && !next_blocked {
+            let since = self.blocked_since_us.swap(0, Ordering::AcqRel);
+            debug_assert_ne!(since, 0, "task left an unaccounted blocked interval");
+            if since != 0 {
+                self.blocked_time_us.fetch_add(
+                    (crate::timer::get_time_us() as u64).saturating_sub(since),
+                    Ordering::Release,
+                );
+            }
+        }
     }
     /// 执行不允许失败的状态迁移。
     ///
@@ -1203,23 +1331,31 @@ impl TaskControlBlock {
             };
         }
 
-        // 将ELF文件映射到内核空间
-        init_task_trace!("01 map init ELF into kernel space");
-        let elf_data = elf.map_to_kernel_space(kernel_program_base());
-        if elf_data.is_empty() {
-            panic!("[TCB::new] initproc ELF is empty");
-        }
-        init_task_trace!("02 init ELF mapped: {} bytes", elf_data.len());
-        // 带有ELF程序头/跳板的用户地址空间（AddressSpaceInner）
-        // 解析ELF文件，初始化内存映射
-        let (mut memory_set, _user_heap, elf_info) =
-            AddressSpaceInner::<PageTableImpl>::from_elf(elf_data)
-                .expect("initproc ELF is invalid");
+        // PID1 uses the same PageCache-backed PT_LOAD demand pager as execve.
+        // Filesystems without a PageCache retain the established eager loader
+        // as a compatibility fallback; only that fallback creates a temporary
+        // kernel-global ELF mapping that needs a synchronized teardown.
+        init_task_trace!("01 parse init ELF through inode/PageCache");
+        let direct = AddressSpaceInner::<PageTableImpl>::from_elf_inode(elf.clone());
+        let (mut memory_set, _user_heap, elf_info) = match direct {
+            Ok(result) => result,
+            Err(error) if error == ENOSYS => {
+                init_task_trace!("02 init filesystem has no PageCache; use eager fallback");
+                let elf_data = elf.map_to_kernel_space(kernel_program_base());
+                if elf_data.is_empty() {
+                    panic!("[TCB::new] initproc ELF is empty");
+                }
+                let result = AddressSpaceInner::<PageTableImpl>::from_elf(elf_data)
+                    .expect("initproc ELF is invalid");
+                crate::mm::remove_kernel_mapping_synchronized(
+                    VirtAddr::from(kernel_program_base()).floor(),
+                )
+                .unwrap();
+                result
+            }
+            Err(error) => panic!("[TCB::new] initproc ELF is invalid: {}", error),
+        };
         init_task_trace!("03 ELF parsed: user entry={:#x}", elf_info.entry);
-        // 在内核空间中删除ELF区域（与上面 map_to_kernel_space 同一基底）
-        crate::mm::remove_kernel_mapping_synchronized(VirtAddr::from(kernel_program_base()).floor())
-            .unwrap();
-        init_task_trace!("04 temporary kernel ELF mapping removed");
 
         // 获取用户资源槽位分配器
         let user_res_slot_allocator = Arc::new(Mutex::new(RecycleAllocator::new()));
@@ -1347,6 +1483,12 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             wake_enqueued_ticks: AtomicUsize::new(0),
             run_started_ticks: AtomicUsize::new(0),
+            blocked_time_us: AtomicU64::new(0),
+            blocked_since_us: AtomicU64::new(0),
+            runnable_wait_us: AtomicU64::new(0),
+            blocked_reason_hint: AtomicUsize::new(0),
+            blocked_reason: AtomicUsize::new(0),
+            blocked_syscall_id: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
@@ -1475,6 +1617,12 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             wake_enqueued_ticks: AtomicUsize::new(0),
             run_started_ticks: AtomicUsize::new(0),
+            blocked_time_us: AtomicU64::new(0),
+            blocked_since_us: AtomicU64::new(0),
+            runnable_wait_us: AtomicU64::new(0),
+            blocked_reason_hint: AtomicUsize::new(0),
+            blocked_reason: AtomicUsize::new(0),
+            blocked_syscall_id: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             cpus_allowed: AtomicUsize::new(1usize << crate::smp::BOOT_CPU_ID),
@@ -1723,7 +1871,7 @@ impl TaskControlBlock {
         )
     }
 
-    /// 加载ELF文件（零拷贝路径：直接通过 PageCache 映射，无需内核空间临时映射）。
+    /// 加载 ELF 文件（PageCache 后备的 PT_LOAD 按需装页，无需内核空间临时映射）。
     /// 若文件所在文件系统无 PageCache，返回 `ENOSYS` 以触发回退到 `load_elf`。
     pub fn load_elf_direct(
         &self,
@@ -2050,6 +2198,12 @@ impl TaskControlBlock {
             sched_vruntime_hint: AtomicU64::new(0),
             wake_enqueued_ticks: AtomicUsize::new(0),
             run_started_ticks: AtomicUsize::new(0),
+            blocked_time_us: AtomicU64::new(0),
+            blocked_since_us: AtomicU64::new(0),
+            runnable_wait_us: AtomicU64::new(0),
+            blocked_reason_hint: AtomicUsize::new(0),
+            blocked_reason: AtomicUsize::new(0),
+            blocked_syscall_id: AtomicUsize::new(0),
             sched_state: AtomicUsize::new(TaskStatus::New.encode()),
             last_cpu: AtomicUsize::new(usize::MAX),
             // Linux affinity 是 per-thread 属性；fork 子线程/进程继承父 mask，
@@ -2318,6 +2472,74 @@ impl Drop for TaskControlBlock {
                 .user_res_slot_allocator()
                 .lock()
                 .dealloc(self.user_res_slot);
+        }
+    }
+}
+
+/// BuildStorm 任务快照使用的低基数阻塞分类。
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(usize)]
+pub(crate) enum BlockedReason {
+    None,
+    FileRead,
+    FileWrite,
+    PageCache,
+    BlockDevice,
+    Futex,
+    Pipe,
+    WaitChild,
+    Timer,
+    Other,
+}
+
+impl BlockedReason {
+    const fn encode(self) -> usize {
+        self as usize
+    }
+
+    const fn decode(raw: usize) -> Self {
+        match raw {
+            1 => Self::FileRead,
+            2 => Self::FileWrite,
+            3 => Self::PageCache,
+            4 => Self::BlockDevice,
+            5 => Self::Futex,
+            6 => Self::Pipe,
+            7 => Self::WaitChild,
+            8 => Self::Timer,
+            9 => Self::Other,
+            _ => Self::None,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "-",
+            Self::FileRead => "FileRead",
+            Self::FileWrite => "FileWrite",
+            Self::PageCache => "PageCache",
+            Self::BlockDevice => "BlockDevice",
+            Self::Futex => "Futex",
+            Self::Pipe => "Pipe",
+            Self::WaitChild => "WaitChild",
+            Self::Timer => "Timer",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// 恢复嵌套等待点覆盖值，避免未实际睡眠时污染下一个阻塞区间。
+pub(crate) struct BlockedReasonGuard {
+    task: Arc<TaskControlBlock>,
+    previous: usize,
+}
+
+impl Drop for BlockedReasonGuard {
+    fn drop(&mut self) {
+        if cfg!(feature = "perf_stats") {
+            self.task
+                .blocked_reason_hint
+                .store(self.previous, Ordering::Release);
         }
     }
 }

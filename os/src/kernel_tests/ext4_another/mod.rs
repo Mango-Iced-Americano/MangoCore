@@ -88,6 +88,10 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
                     "requires disk-backed another_ext4 fixture",
                 ),
                 KernelTest::skip(
+                    "ext4_another::consecutive_unlinks_batch_until_sync",
+                    "requires disk-backed another_ext4 fixture",
+                ),
+                KernelTest::skip(
                     "ext4_another::global_sys_sync_persists_across_unwrapped_device_view",
                     "requires disk-backed another_ext4 fixture",
                 ),
@@ -169,6 +173,18 @@ pub fn tests() -> alloc::vec::Vec<KernelTest> {
             KernelTest::new(
                 "ext4_another::fsync_and_syncfs_surface_flush_failures",
                 sync::test_fsync_and_syncfs_surface_flush_failures,
+            ),
+            KernelTest::new(
+                "ext4_another::consecutive_unlinks_batch_until_sync",
+                sync::test_consecutive_unlinks_batch_until_sync,
+            ),
+            KernelTest::new(
+                "ext4_another::regular_namespace_mutations_share_one_sync_batch",
+                sync::test_regular_namespace_mutations_share_one_sync_batch,
+            ),
+            KernelTest::new(
+                "ext4_another::failed_fsync_retains_dirty_generation_for_retry",
+                sync::test_failed_fsync_retains_dirty_generation_for_retry,
             ),
             KernelTest::new(
                 "ext4_another::global_sys_sync_persists_across_unwrapped_device_view",

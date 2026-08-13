@@ -3,7 +3,7 @@ title: "进程与任务子系统 (Process and Task Subsystem)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-13
+last_update: 2026-08-02
 tags: [process, task, scheduler, signal, futex]
 ---
 
@@ -18,10 +18,8 @@ MangoCore 的执行实体分为线程级 `TaskControlBlock` 和进程级 `Proces
 interruptible/timer registry，切离 current 的退出 TCB 则进入 owner CPU 的本地 zombie
 队列并由该 CPU 的 idle 栈析构。AP 已进入精简本地调度循环；focused ktest 的短
 kernel-only 任务可显式远程入队，并可在阻塞后由统一 wake 路径重新发布到最近运行的 AP。
-B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1。底层 TCB 构造仍以
-CPU0-only 作为未发布安全默认值；正式 normal 启动会在执行 test-runner 前将 PID1
-affinity 扩为全部在线 CPU，后续 fork/exec 子任务继承该 mask，并由通用负载选择与
-work stealing 分布到各 CPU。
+B29 还让同一受控用户探针在显式 yield 后从 CPU0 迁移到 CPU1；普通新任务和用户任务仍
+默认首次发布到 CPU0，通用 affinity、负载均衡和迁移尚未开放。
 默认 nice 为 0 的本地队列按 FIFO 取任务；存在非零 nice 任务时进入简化公平选择路径。
 
 ## 依据范围
@@ -77,7 +75,7 @@ work stealing 分布到各 CPU。
 | 状态 | 枚举 | 说明 |
 |------|------|------|
 | 任务未发布 | `TaskStatus::New` | 已构造但尚未进入调度器 |
-| 任务排队 | `TaskStatus::Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有；正式用户任务可按继承的全核 mask 分布 |
+| 任务排队 | `TaskStatus::Queued(cpu)` | 由 CPU `cpu` 的 runqueue 拥有；普通任务当前仍固定 CPU0 |
 | 任务运行 | `TaskStatus::Running(cpu)` | 由 CPU `cpu` 的 current slot 拥有；受控 kernel-only 任务可在 AP 运行 |
 | 任务准备阻塞 | `TaskStatus::Blocking(cpu)` | 已登记到 interruptible registry，但仍由 CPU `cpu` 执行；早到 wake 可取消阻塞 |
 | 任务阻塞 | `TaskStatus::Blocked` | 已切离 CPU，位于 interruptible registry，可被唤醒或信号打断 |

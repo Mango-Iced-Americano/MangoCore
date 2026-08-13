@@ -83,6 +83,30 @@ pub fn sleep(period_ms: usize) {
         sys_yield();
     }
 }
+
+/// Sleep without keeping the task runnable.
+///
+/// The legacy `sleep` helper deliberately yields in a polling loop and is
+/// still used by existing test runners.  BuildStorm diagnostics need a real
+/// blocking wait so the collector does not consume a guest CPU while it is
+/// waiting between snapshots.
+pub fn sleep_blocking(period_ms: usize) {
+    let mut request = TimeSpec {
+        tv_sec: period_ms / 1000,
+        tv_nsec: (period_ms % 1000) * 1_000_000,
+    };
+    let mut remaining = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    loop {
+        let result = sys_nanosleep(&request, &mut remaining);
+        if result == 0 {
+            return;
+        }
+        if result != -4 {
+            return;
+        }
+        request = remaining;
+    }
+}
 pub fn kill(pid: usize, sig: usize) -> isize {
     sys_kill(pid, sig)
 }

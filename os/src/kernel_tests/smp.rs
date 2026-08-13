@@ -2212,14 +2212,16 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
         return Err("timer hard IRQ switched the current task");
     }
 
-    // 生产安全点可能因为 quantum 到期主动调度；恢复运行后必须仍是同一测试
-    // 任务，且 pending 已被完整消费。
+    // 生产安全点可能因为 quantum 到期或同时到期的 callback 主动调度；恢复运行后
+    // 必须仍是同一测试任务，且本轮 pending 至少完成一批。切换期间若下一个
+    // one-shot 已到期，idle 栈合法地再完成一批，不能把它误判成 hard-IRQ 越权。
     crate::task::run_task_safe_point();
     if crate::smp::local_timer_pending() {
         return Err("timer safe point left pending work behind");
     }
-    if crate::smp::timer_deferred_count(cpu_id) != deferred_before.wrapping_add(1) {
-        return Err("timer safe point did not complete exactly one batch");
+    let deferred_after = crate::smp::timer_deferred_count(cpu_id);
+    if deferred_after == deferred_before {
+        return Err("timer safe point did not complete its pending batch");
     }
     if crate::task::current_tid() != expected_tid {
         return Err("timer safe point resumed a different task");
@@ -3147,7 +3149,7 @@ fn pinned_victim_skips_ktlb_sync() -> Result<(), &'static str> {
     #[cfg(feature = "perf_stats")]
     let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
     #[cfg(not(feature = "perf_stats"))]
-    let timer_before = crate::smp::timer_irq_count(1);
+    let reschedule_before = crate::smp::reschedule_count(1);
 
     let result = (|| {
         crate::smp::request_reschedule(1)
@@ -3159,7 +3161,7 @@ fn pinned_victim_skips_ktlb_sync() -> Result<(), &'static str> {
             let attempted = crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE.load(Ordering::Acquire)
                 > no_eligible_before;
             #[cfg(not(feature = "perf_stats"))]
-            let attempted = crate::smp::timer_irq_count(1) > timer_before;
+            let attempted = crate::smp::reschedule_count(1) > reschedule_before;
             if attempted {
                 break;
             }

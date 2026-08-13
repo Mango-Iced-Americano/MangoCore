@@ -351,9 +351,20 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(15),
 ];
 
-// build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
+const fn parse_configured_cpu_count(value: &[u8]) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < value.len() {
+        count = count * 10 + (value[index] - b'0') as usize;
+        index += 1;
+    }
+    count
+}
+
+// build.rs 会拒绝架构构建合同之外的参数，因此这里可以无分支解析十进制值。
 // FDT `/cpus` 探测失败（如 LA64 静态板级）时作为运行时 CPU 数的兜底值。
-const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
+const CONFIGURED_CPU_COUNT: usize =
+    parse_configured_cpu_count(env!("MANGO_CORE_NUM").as_bytes());
 
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
@@ -363,6 +374,11 @@ const STOP_TIMEOUT_SECONDS: usize = 1;
 // those protocols, but give this sequence/ack protocol its own budget so a
 // slow emulated vCPU is not mistaken for a lost mapping publication.
 const KERNEL_TLB_TIMEOUT_SECONDS: usize = 5;
+// User shootdowns use the same level-triggered mailbox protocol as kernel
+// shootdowns.  Under MTTCG a target vCPU can retain the published reason while
+// its one-shot hardware doorbell is coalesced, so allow delivery retries before
+// treating a still-live CPU as a correctness failure.
+const USER_TLB_TIMEOUT_SECONDS: usize = 5;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 
 /// CPU0 等待 AP 停止时唯一可能返回的错误。
@@ -1233,14 +1249,17 @@ pub(crate) fn synchronize_user_tlb(
                     context.mark_cpu_observed(generation, self::cpu_id());
                 }
             }
-            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
+            let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
             let _irq_guard = IpiWaitIrqGuard::enter();
-            let deadline = crate::hal::get_time().saturating_add(
-                crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
-            );
+            let clock_freq = crate::hal::get_clock_freq();
+            let deadline = crate::hal::get_time()
+                .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+            let kick_interval = (clock_freq / 100).max(1);
+            let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
             loop {
                 let acknowledged = slot.acknowledged();
-                let missing = remote & !stopped_cpu_mask() & !acknowledged;
+                let stopped = stopped_cpu_mask();
+                let missing = remote & !stopped & !acknowledged;
                 if missing == 0 {
                     slot.release();
                     record_tlb_shootdown(
@@ -1251,7 +1270,19 @@ pub(crate) fn synchronize_user_tlb(
                     );
                     return Ok(());
                 }
-                if crate::hal::get_time() >= deadline {
+                let now = crate::hal::get_time();
+                if now >= next_kick {
+                    // The slot payload and target bits remain unchanged until
+                    // every target acks. Re-publishing the idempotent reason
+                    // only repairs a delayed/coalesced LA64 QEMU doorbell.
+                    if let Err(error) = send_ipi_mask(missing, IpiReason::USER_TLB_RANGE_SYNC) {
+                        if send_error.is_none() {
+                            send_error = Some(error);
+                        }
+                    }
+                    next_kick = now.saturating_add(kick_interval);
+                }
+                if now >= deadline {
                     // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
                     // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
                     record_tlb_shootdown(
@@ -1286,13 +1317,16 @@ pub(crate) fn synchronize_user_tlb(
     if live_targets & current_bit != 0 {
         crate::hal::user_tlb_invalidate();
     }
-    let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
+    let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
 
     // 等待者本身也可能同时成为另一轮 user/kernel shootdown 的目标。临时开放
     // 本地中断后双方都能进入只做原子操作的 handler，不会形成 ack 环形等待。
     let _irq_guard = IpiWaitIrqGuard::enter();
+    let clock_freq = crate::hal::get_clock_freq();
     let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+        .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+    let kick_interval = (clock_freq / 100).max(1);
+    let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
     let result = loop {
         let stopped = stopped_cpu_mask();
         let mut missing = None;
@@ -1309,7 +1343,29 @@ pub(crate) fn synchronize_user_tlb(
         let Some((cpu_id, observed)) = missing else {
             break Ok(());
         };
-        if crate::hal::get_time() >= deadline {
+        let now = crate::hal::get_time();
+        if now >= next_kick {
+            let mut kick_targets = 0usize;
+            for target in 0..runtime_cpu_count() {
+                let bit = 1usize << target;
+                if remote & bit != 0
+                    && stopped & bit == 0
+                    && PER_CPUS[target].user_tlb_ack.load(Ordering::Acquire)
+                        < expected[target]
+                {
+                    kick_targets |= bit;
+                }
+            }
+            if kick_targets != 0 {
+                if let Err(error) = send_ipi_mask(kick_targets, IpiReason::USER_TLB_SYNC) {
+                    if send_error.is_none() {
+                        send_error = Some(error);
+                    }
+                }
+            }
+            next_kick = now.saturating_add(kick_interval);
+        }
+        if now >= deadline {
             break Err(UserTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],
@@ -1362,6 +1418,18 @@ pub(crate) fn local_sched_tick_deadline() -> u64 {
     PER_CPUS[self::cpu_id()]
         .sched_tick_deadline_ns
         .load(Ordering::Acquire)
+}
+
+/// Restart the current CPU's scheduler tick after an idle timer park.
+///
+/// AP idle deliberately quiesces its one-shot timer.  The next runnable task
+/// must receive a fresh full quantum rather than inheriting the stale deadline
+/// from before the CPU entered WFI.
+pub(crate) fn restart_local_sched_tick(deadline_ns: u64) {
+    assert_ne!(deadline_ns, 0, "scheduler tick deadline cannot be zero");
+    PER_CPUS[self::cpu_id()]
+        .sched_tick_deadline_ns
+        .store(deadline_ns, Ordering::Release);
 }
 
 /// 若本地调度 tick 已到期，则按绝对时间推进到下一周期。
@@ -1502,8 +1570,8 @@ pub(crate) fn schedulers_released() -> bool {
 /// 发布 scheduler-ready，并等待所有 AP 进入各自的本地调度循环。
 ///
 /// 该函数必须在 VFS、任务 registry 等 kernel-only 任务依赖的全局对象完成
-/// 初始化后调用。PID1 仍首次发布到 CPU0；正式 normal 用户态会在 fork/exec
-/// test-runner 前扩展 affinity，其余精确目标任务继续服从显式 mask。
+/// 初始化后调用。普通用户任务仍默认首次发布到 CPU0；B29 的受控迁移不能据此
+/// 外推为已经解除用户 MM 与共享子系统限制。
 pub fn release_secondary_schedulers() {
     assert_eq!(self::cpu_id(), BOOT_CPU_ID);
     let online = online_cpu_mask();

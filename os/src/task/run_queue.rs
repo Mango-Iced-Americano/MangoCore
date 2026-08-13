@@ -122,12 +122,7 @@ fn sub_running(cpu: usize, count: usize) {
     }
 }
 
-/// 从允许集合中选择一个当前可调度的 CPU。
-///
-/// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`
-/// 时保留原 CPU；否则选择近似负载最小、编号最小的 CPU。所有计数都是无锁
-/// 快照，只影响放置质量，真正 owner 仍由后续 runqueue 临界区提交。
-pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+fn runnable_cpu_mask(allowed: usize) -> usize {
     let online = crate::smp::online_cpu_mask();
     let schedulers = crate::smp::scheduler_cpu_mask();
     let stopped = crate::smp::stopped_cpu_mask();
@@ -137,20 +132,82 @@ pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> u
         "task has no runnable CPU: allowed={:#x} online={:#x} schedulers={:#x} stopped={:#x}",
         allowed, online, schedulers, stopped
     );
+    runnable
+}
 
-    let load = |cpu| nr_running(cpu) + super::processor::cpu_current_count(cpu);
-    let minimum = (0..crate::smp::configured_cpu_count())
+#[inline(always)]
+fn cpu_load(cpu: usize) -> usize {
+    nr_running(cpu) + super::processor::cpu_current_count(cpu)
+}
+
+#[inline(always)]
+fn record_runnable_enqueue(task: &TaskControlBlock) {
+    #[cfg(feature = "perf_stats")]
+    task.wake_enqueued_ticks.store(
+        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE),
+        Ordering::Release,
+    );
+}
+
+fn minimum_runnable_cpu(runnable: usize) -> usize {
+    (0..crate::smp::configured_cpu_count())
         .filter(|cpu| runnable & (1usize << cpu) != 0)
-        .min_by_key(|cpu| (load(*cpu), *cpu))
-        .expect("runnable CPU mask is empty");
+        .min_by_key(|cpu| (cpu_load(*cpu), *cpu))
+        .expect("runnable CPU mask is empty")
+}
+
+/// Returns whether the allowed set contains an actually idle runnable CPU.
+///
+/// This is a diagnostic-only snapshot used to distinguish a legitimate
+/// locality-preserving wake from a wake that kept a busy last CPU while an
+/// idle destination was available. It does not reserve the CPU or affect
+/// placement by itself.
+pub(crate) fn has_idle_runnable_cpu(allowed: usize) -> bool {
+    let runnable = runnable_cpu_mask(allowed);
+    (0..crate::smp::configured_cpu_count()).any(|cpu| {
+        runnable & (1usize << cpu) != 0 && cpu_load(cpu) == 0
+    })
+}
+
+/// 从允许集合中选择一个当前可调度的 CPU。
+///
+/// `preferred` 只表达 locality，不拥有任务。它合法且负载不超过最小值 `+1`
+/// 时保留原 CPU；否则选择近似负载最小、编号最小的 CPU。所有计数都是无锁
+/// 快照，只影响放置质量，真正 owner 仍由后续 runqueue 临界区提交。
+pub(crate) fn select_runnable_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+    let runnable = runnable_cpu_mask(allowed);
+    let minimum = minimum_runnable_cpu(runnable);
 
     preferred
         .filter(|cpu| {
             *cpu < crate::smp::configured_cpu_count()
                 && runnable & (1usize << *cpu) != 0
-                && load(*cpu) <= load(minimum).saturating_add(1)
+                && cpu_load(*cpu) <= cpu_load(minimum).saturating_add(1)
         })
         .unwrap_or(minimum)
+}
+
+/// Select the initial CPU for a newly created task.
+///
+/// A new task has no cache-local wake history to preserve. If any allowed CPU
+/// is genuinely idle, place the task there so a sleeping CPU can take useful
+/// work immediately. Only when every allowed CPU is busy do we fall back to
+/// the ordinary load-plus-locality selector used by blocked-task wakeups.
+pub(crate) fn select_new_task_cpu(allowed: usize, preferred: Option<usize>) -> usize {
+    let runnable = runnable_cpu_mask(allowed);
+    let idle_cpu = (0..crate::smp::configured_cpu_count())
+        .filter(|cpu| runnable & (1usize << cpu) != 0)
+        .filter(|cpu| cpu_load(*cpu) == 0)
+        .min();
+    let idle_available = idle_cpu.is_some();
+    let target = idle_cpu.unwrap_or_else(|| select_runnable_cpu(allowed, preferred));
+    let kept_busy_parent = !idle_available && preferred == Some(target) && cpu_load(target) != 0;
+    crate::task::perf::record_new_task_placement(
+        idle_available,
+        idle_available && idle_cpu == Some(target),
+        kept_busy_parent,
+    );
+    target
 }
 
 /// 首次把构造完成的任务发布到目标 CPU。
@@ -159,6 +216,7 @@ pub(crate) fn publish(task: Arc<TaskControlBlock>, cpu: usize) {
     task.require_cpu_allowed(cpu, "publish new task");
     let mut queue = state(cpu).run_queue.lock();
     task.require_sched_transition(TaskStatus::New, TaskStatus::Queued(cpu), "publish new task");
+    record_runnable_enqueue(&task);
     queue.push_back(task);
     add_running(cpu);
 }
@@ -181,6 +239,7 @@ pub(crate) fn requeue_after_switch(
         TaskStatus::Queued(target_cpu),
         "requeue task after switch-out",
     );
+    record_runnable_enqueue(&task);
     queue.push_back(task);
     add_running(target_cpu);
 }
@@ -195,10 +254,7 @@ pub(crate) fn enqueue_woken(task: Arc<TaskControlBlock>, cpu: usize) {
         TaskStatus::Queued(cpu),
         "wake blocked task",
     );
-    task.wake_enqueued_ticks.store(
-        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE),
-        Ordering::Release,
-    );
+    record_runnable_enqueue(&task);
     queue.push_front(task);
     add_running(cpu);
 }
@@ -224,12 +280,17 @@ fn finish_running_claim(cpu: usize, task: Arc<TaskControlBlock>) -> Arc<TaskCont
     if task.note_running_cpu(cpu) {
         state(cpu).record_migration();
     }
-    let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
-    let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
-    if enqueued != 0 {
-        crate::task::perf::record_wake_to_run(now.wrapping_sub(enqueued));
+    #[cfg(feature = "perf_stats")]
+    {
+        let now = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
+        let enqueued = task.wake_enqueued_ticks.swap(0, Ordering::AcqRel);
+        if enqueued != 0 {
+            let wait_ticks = now.wrapping_sub(enqueued);
+            crate::task::perf::record_wake_to_run(wait_ticks);
+            task.account_runnable_wait_ticks(wait_ticks);
+        }
+        task.run_started_ticks.store(now, Ordering::Release);
     }
-    task.run_started_ticks.store(now, Ordering::Release);
     task
 }
 
@@ -336,9 +397,10 @@ fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 
 /// 在 owner runqueue 内更新 queued 任务 affinity，必要时搬到另一 CPU。
 ///
-/// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知目标 CPU；
-/// `Ok(None)` 表示旧 owner 仍合法、只更新了 mask；`Err(status)` 表示任务已被
-/// fetch、阻塞或退出。两个并发写侧通过 `Migrating` 重试并按实际完成顺序线性化。
+/// 返回 `Ok(Some(cpu))` 表示调用者需在所有队列锁释放后通知该 CPU：它可能是
+/// 实际搬队目标，也可能是 affinity 扩大后可窃取该任务的 idle CPU。`Ok(None)`
+/// 表示无需 doorbell；`Err(status)` 表示任务已被 fetch、阻塞或退出。两个并发
+/// 写侧通过 `Migrating` 重试并按实际完成顺序线性化。
 pub(crate) fn set_queued_affinity(
     task: &Arc<TaskControlBlock>,
     mask: usize,
@@ -394,7 +456,21 @@ pub(crate) fn set_queued_affinity(
                 TaskStatus::Queued(source_cpu),
                 "update queued affinity",
             );
-            return Ok(None);
+            // Tickless APs no longer poll remote queues every 10ms. If this
+            // update makes a queued task stealable, ring one idle legal CPU
+            // after the caller has left the source runqueue lock.
+            let idle_stealer = (super::processor::cpu_current_count(source_cpu) != 0)
+                .then(|| {
+                    mask & crate::smp::online_cpu_mask()
+                        & crate::smp::scheduler_cpu_mask()
+                        & !crate::smp::stopped_cpu_mask()
+                        & !(1usize << source_cpu)
+                })
+                .and_then(|runnable| {
+                    (0..crate::smp::configured_cpu_count())
+                        .find(|cpu| runnable & (1usize << cpu) != 0 && cpu_load(*cpu) == 0)
+                });
+            return Ok(idle_stealer);
         };
 
         // 状态先从源 owner 交给迁移调用方，再摘除容器；源 rq 锁使 fetch
