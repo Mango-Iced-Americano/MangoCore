@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-02
+last_update: 2026-08-13
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -14,9 +14,10 @@ tags: [process, task, scheduler, signal, futex, ipc]
 MangoCore 的执行模型分为线程级 `TaskControlBlock` 和进程级 `ProcessControlBlock`。TCB 是调度实体，持有内核栈、trap context、线程信号状态、调度字段和退出清理信息；PCB 是资源容器，持有地址空间、fd table、文件系统状态、namespace、sighand、futex 表、子进程关系和进程生命周期状态。
 
 调度器采用 Per-CPU current/idle/RunQueue 和安全点抢占，核心位于
-`task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。普通用户任务在共享
-子系统审计完成前仍默认限制在 CPU0，但受控任务已能在 AP 运行、
-唤醒、迁移和退出。系统调用层通过 `syscall/process/*` 进入 clone、exec、
+`task/run_queue.rs`、`task/manager.rs` 和 `task/processor.rs`。底层 TCB 构造保留
+CPU0-only 安全默认值；正式 normal 启动会把 PID1 affinity 扩为全部在线 CPU，
+使后续普通用户任务可在 AP 运行、唤醒、迁移和退出。系统调用层通过
+`syscall/process/*` 进入 clone、exec、
 exit/wait、signal、futex、IPC、time、ids、rlimit 和 sched 兼容路径。
 
 ## 2. 设计目标
@@ -181,7 +182,8 @@ Running(cpu) --exit--> Zombie --switch complete--> local_zombies(cpu)
 
 RunQueue 和 local_zombies 由每个 `CpuTaskState` 独占；TaskManager 只保护
 interruptible 与 timer 全局 registry。远程 enqueue/wake/affinity 已开放给受控
-任务，普通用户任务的初始 affinity 仍为 CPU0-only。
+任务。正式启动的 PID1 在 fork/exec test-runner 前已把 affinity 扩为全核；
+独立构造、尚未发布的 TCB 仍保留 CPU0-only 安全初值。
 
 ### 4.6 WaitQueue
 
@@ -619,7 +621,7 @@ parent wait
 
 | 边界 | 说明 |
 |------|------|
-| 默认 CPU0-only | AP 可运行受控任务；FS/net/driver 并发审计前，普通用户任务初始 mask 仍为 bit0 |
+| TCB 安全初值 | 独立构造的未发布 TCB 初始 mask 为 bit0；正式 normal PID1 在派生用户任务前扩为全部在线 CPU |
 | namespace | net/mnt/ipc namespace 对象可切换，隔离能力以对应 namespace 实现为准 |
 | signal | trap return 前统一交付；`rt_sigreturn` 由 trap 后端特殊处理 |
 | futex PI/WakeOp | `FutexCmd` 枚举存在，未接入的命令分支返回 `EINVAL` |

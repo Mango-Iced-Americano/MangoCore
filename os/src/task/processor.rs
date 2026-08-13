@@ -656,8 +656,8 @@ pub fn run_tasks() -> ! {
 /// 空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的 doorbell 或本地 tick
 /// 都必定使 wait 返回。
 ///
-/// AP 上的 timer callback 不会进入共享子系统；普通用户任务仍需等待共享 FS/net/
-/// driver 审计完成后再解除默认 CPU0 affinity。
+/// AP 上的 timer callback 不会进入共享子系统；正式 normal 进程树继承 PID1
+/// 的全核 affinity，独立内核任务和 focused probes 仍使用显式 placement。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
     let _ = crate::hal::local_irq_save();
     loop {

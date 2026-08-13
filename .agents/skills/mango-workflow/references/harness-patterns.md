@@ -1442,3 +1442,24 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   - **本地 4 核 TCG 双实例共享 CPU 时编译时间远超 2B，time 分必然为 0；要验 time 分需 8 核单实例。**
 - **教训**: 评测分数必须以官方 judge 脚本对完整串口日志的输出为准，不要按脚本注释或印象估算；验证 buildstorm time 分前先确认 CPU 核数满足 baseline 前提。
 - **相关文件**: `oscomp/testsuits-for-oskernel/judge/judge_cagent-glibc.py`, `judge_buildstorm-glibc.py`；`docs/Work_Log/2026-08-10.md`
+
+## 正式 SMP 验收必须同时闭合宿主、构建和继承三层合同
+
+- **现象**：QEMU 命令显示 `-smp 8`，内核也启动了 8 个 hart，但 CAgent/BuildStorm
+  仍只使用一个宿主核；专用性能 profile 的多核测试正常，正式 `mode=run` 却退化为
+  单核。
+- **根因**：SMP 拓扑不是单一开关。至少有三层独立合同：宿主 runner 的 QEMU
+  `-smp/-m`，编译期 `MANGO_CORE_NUM`，以及 PID1 经 fork/exec 传给工作负载的
+  affinity。只修专用 profile 会掩盖 normal test-runner 链路仍继承 CPU0-only 初始
+  mask；仓库内兼容 judge 配置的 `qemu.smp=1` 还可能在启动前再次降级。
+- **修复模式**：保留内核 TCB/工作线程的 CPU0 安全默认值，由 normal PID1 在 AP
+  全部 online 后一次性放开用户态 affinity；正式 RV/LA 构建显式传递 8/12 核；judge
+  配置同时保留兼容默认和架构专属值。若 RV/LA 由两个线程共享同一个 Job 并发启动，
+  必须为每个线程提供复制后的架构配置视图，不能运行期改写共享 `qemu.smp` 形成竞态。
+- **验收**：不要只检查命令行。发烟必须走 normal PID1 → test-runner → chroot 工作负载
+  链路，并在 CAgent 与 BuildStorm 两个真实后代中分别读取 `nproc`（raw
+  `sched_getaffinity`）、在线 CPU 数和 `/proc/cpuinfo`。若 `/proc/[pid]/status` 的
+  `Cpus_allowed` 是占位实现，不得把它用于结论；最终同时保存 OpenSBI hart 数、内核
+  online mask 和两个后代的 `nproc`。
+- **相关文件**：`judge/config.json`、`os/Makefile`、`user/src/bin/init.rs`、
+  `scripts/test-canonical-build-graph.sh`。
