@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-03
+last_update: 2026-08-14
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -282,8 +282,9 @@ OpenSBI SRST，因此不受 U-Boot 已关闭 I2C5 的影响。其他平台仍调
 LA64 继续使用自己的后端重启实现。
 
 watchdog 和 SYSCRG 的直接 MMIO 访问依赖完整 VF2 FDT 的非 RAM `reg` 范围。预堆
-`parse_node_resources()` 记录这些范围，`KernelSpace` 在设备驱动使用前恒等映射它们。
-QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
+`parse_node_resources()` 记录这些范围；`KernelSpace` 在设备驱动使用前把 RV64 资源映射到
+supervisor-only 高半 physmap，LA64 保持既有恒等/DMW 访问语义。QEMU 的
+`is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
 
 ### 6.3 初始化
 

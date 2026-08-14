@@ -64,6 +64,17 @@ impl<'a, T: PageTable> PageMapper<'a, T> {
         self.page_table.try_map_identical_2m(start_vpn, flags)
     }
 
+    /// 建立一个 2 MiB 大页映射。
+    #[cfg(target_arch = "riscv64")]
+    pub fn map_2m(
+        &mut self,
+        start_vpn: VirtPageNum,
+        start_ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> MmResult<()> {
+        self.page_table.try_map_2m(start_vpn, start_ppn, flags)
+    }
+
     /// 解除一个必须存在的映射。
     ///
     /// # Errors

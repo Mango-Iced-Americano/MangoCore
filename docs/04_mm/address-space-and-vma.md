@@ -3,7 +3,7 @@ title: "地址空间、VMA 与用户映射"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-10
+last_update: 2026-08-14
 tags: [mm, address-space, vma, elf, maps, mmu-gather, membarrier]
 ---
 
@@ -663,17 +663,15 @@ len > crate::mm::max_map_count().saturating_add(1)
 self.with_user_mapper(|vmas, mapper| vmas.unmap_all(mapper))
     .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
-let page_table_frames = self.page_table.take_frames();
 self.mmu_gather.record_full_flush();
-self.mmu_gather.retire_frames(&self.page_table, page_table_frames);
 ```
 
-这一步先撤销 resident PTE，再移出页表根/中间页所有权。用户 frame 和页表
-frame 由同一个 `MmuGather` 持有，在 `AddressSpace` 解锁并收齐 TLB ack 后
-统一释放；它不销毁进程等待元数据。僵尸进程仍可被父进程
-`wait4/waitid` 收集，但不继续占用用户页和页表页。
+这一步在 idle 栈已经换走 SATP 根、active mask 为零且 VM 未共享后撤销 resident PTE。
+用户 frame 由 `MmuGather` 持有到 TLB ack；页表根/中间页保留到 `AddressSpace` 最终
+Arc drop，避免仍安装旧根的 CPU 在 ack 后 page walk 已释放页表。它不销毁进程等待
+元数据，僵尸进程仍可被 `wait4/waitid` 收集。
 
-`AddressSpace` 的生命周期和 PCB 不完全相同。进程进入 zombie 后，父进程 wait 仍需要 pid、exit code、rusage、children 等 PCB 元数据，但不需要继续保留用户 VMA 和页表页。`release_for_zombie()` 正是把“可 wait 的进程对象”和“已经没必要保留的用户地址空间资源”拆开释放。
+`AddressSpace` 的生命周期和 PCB 不完全相同。进程进入 zombie 后，父进程 wait 仍需要 pid、exit code、rusage、children 等 PCB 元数据；提前释放只针对用户 VMA/叶子 frame，少量页表结构继续随 VM 存活到 reap。
 
 读 VMA bug 时建议同时检查三张结构：`VmaSet` 的 BTreeMap 是否覆盖目标 VPN，`mmap_holes` 是否正确反映空洞，`VmPageStore` 是否记录 resident/unallocated 状态。`proc_maps` 只看 VMA 范围，`mincore` 和 RSS 还要看 PTE/PageCache/resident frame，因此两个接口输出不同不一定是 bug。
 
@@ -694,4 +692,4 @@ frame 由同一个 `MmuGather` 持有，在 `AddressSpace` 解锁并收齐 TLB a
 | `/proc/[pid]/maps` 权限错误 | `map_perm` 与 `VmAreaMapping` 是否更新 |
 | 栈缺页返回 EFAULT | `MAP_GROWSDOWN` gap、guard gap、VMA 位置 |
 | 大量 mmap 后 ENOMEM | `max_map_count`、`mmap_holes`、overcommit 三者分别核对 |
-| zombie 进程仍占大量内存 | `release_for_zombie()` 是否把 `take_frames()` 结果交给 retirement |
+| zombie 进程仍占大量内存 | VM 是否未共享、active mask 是否清零、idle 收尾是否执行提前释放 |

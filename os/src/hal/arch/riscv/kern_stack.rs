@@ -3,7 +3,8 @@
 //! 通过 slot allocator 为线程分配互不重叠的栈和 trap context 虚拟地址。
 
 use super::config::{
-    KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
+    KERNEL_STACK_MAX_SLOTS, KERNEL_STACK_SIZE, KERNEL_STACK_SLOT_SIZE, KERNEL_STACK_TOP, PAGE_SIZE,
+    TRAP_CONTEXT_BASE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
 use crate::task::pid::RecycleAllocator;
@@ -24,7 +25,12 @@ static KSTACK_RETIRE_QUEUE: Mutex<
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
-    let top = TRAMPOLINE - kstack_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    assert!(
+        kstack_id < KERNEL_STACK_MAX_SLOTS,
+        "RISC-V kernel stack slot {} exceeds the shared stack arena",
+        kstack_id
+    );
+    let top = KERNEL_STACK_TOP - kstack_id * KERNEL_STACK_SLOT_SIZE;
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }
@@ -42,7 +48,7 @@ pub fn kstack_alloc() -> KernelStack {
     KERNEL_SPACE.lock().insert_kernel_stack_area(
         kstack_bottom.into(),
         kstack_top.into(),
-        MapPermission::R | MapPermission::W,
+        MapPermission::R | MapPermission::W | MapPermission::G,
     );
     KernelStack(kstack_id)
 }

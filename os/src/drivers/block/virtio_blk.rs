@@ -181,8 +181,9 @@ impl BlockDevice for VirtIOBlock {
 
 impl VirtIOBlock {
     pub fn try_new(base_addr: usize) -> Option<Self> {
+        let header = PhysAddr(base_addr).direct_map_ptr().cast::<VirtIOHeader>();
         let transport = unsafe {
-            MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?
+            MmioTransport::new(NonNull::new(header)?, 0x1000).ok()?
         };
         if transport.device_type() != DeviceType::Block {
             // `MmioTransport::drop` resets the device. This transport only read the
@@ -275,7 +276,7 @@ unsafe impl Hal for VirtioHal {
                     direction,
                     BufferDirection::DriverToDevice | BufferDirection::Both
                 ) {
-                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                    core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
                         .copy_from_slice(buffer);
                 }
                 return pa;
@@ -292,7 +293,7 @@ unsafe impl Hal for VirtioHal {
                     direction,
                     BufferDirection::DriverToDevice | BufferDirection::Both
                 ) {
-                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                    core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
                         .copy_from_slice(buffer);
                 }
                 return pa;
@@ -321,7 +322,8 @@ unsafe impl Hal for VirtioHal {
             direction,
             BufferDirection::DriverToDevice | BufferDirection::Both
         ) {
-            core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len()).copy_from_slice(buffer);
+            core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
+                .copy_from_slice(buffer);
         }
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
         assert!(
@@ -340,7 +342,7 @@ unsafe impl Hal for VirtioHal {
                 BufferDirection::DeviceToDriver | BufferDirection::Both
             ) {
                 let buffer = buffer.as_mut();
-                let src = paddr as *const u8;
+                let src = PhysAddr(paddr).direct_map_ptr().cast_const();
                 buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
             }
             virtio_dma_pool::dma_pool_finish_unshare(slot);
@@ -358,7 +360,7 @@ unsafe impl Hal for VirtioHal {
             BufferDirection::DeviceToDriver | BufferDirection::Both
         ) {
             let buffer = buffer.as_mut();
-            let src = paddr as *const u8;
+            let src = PhysAddr(paddr).direct_map_ptr().cast_const();
             buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
         }
 
@@ -397,7 +399,7 @@ pub extern "C" fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn virtio_phys_to_virt(paddr: PhysAddr) -> VirtAddr {
-    VirtAddr(paddr.0)
+    VirtAddr(paddr.direct_map_ptr() as usize)
 }
 
 lazy_static! {

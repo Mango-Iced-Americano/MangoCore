@@ -3,7 +3,7 @@ title: "RISC-V 64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-14
 tags: [architecture, riscv64, hal]
 ---
 
@@ -225,16 +225,16 @@ RISC-V `trap_return()`：
 
 ```rust
 let task = do_signal();
-set_user_trap_entry();
 let trap_cx_ptr = task.trap_cx_user_va();
-let user_satp = current_user_token();
+let user_vm = task.process.activate_user_vm(); // switch_user_vm installs SATP
 let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+drop(task);
+set_user_trap_entry();
 asm!(
     "fence.i",
     "jr {restore_va}",
     restore_va = in(reg) restore_va,
     in("a0") trap_cx_ptr,
-    in("a1") user_satp,
     options(noreturn)
 );
 ```
@@ -245,7 +245,7 @@ asm!(
 |------|------|
 | `do_signal()` | 返回用户态前交付信号和构造 signal frame |
 | `TRAMPOLINE` | 用户/内核页表都可见的恢复代码映射 |
-| `current_user_token()` | 用户页表 token，即恢复用户态所需 satp |
+| `activate_user_vm()` | 在 IRQ-off transaction 内取得 token/ASID/epoch 并安装目标 SATP |
 | `fence.i` | 保证指令流一致性 |
 | `options(noreturn)` | 恢复汇编不返回 Rust 调用点 |
 
@@ -281,7 +281,8 @@ asm!(
 RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建立 trap 和页表”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并打开 timer；syscall 和 page fault 都从 `trap/mod.rs` 分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
 
 RV64 现在会探测 `SATP.ASID` 的实际位数，并让一个 MM 在所有 hart 使用同一 versioned
-ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。有界区间由同一 `MmuGather` 主链
+ASID。用户根共享 supervisor kernel 映射，普通 trap 入口/返回保持当前 SATP；调度、exec
+或进入 idle 时才由 `switch_user_vm()` 换根。ASIDLEN=0 的平台仅在真实换根时全刷。有界区间由同一 `MmuGather` 主链
 冻结，RFENCE 不可用时改走每发起 CPU 固定 slot，不建立第二套 MM 提交结构。它仍没有 LA64 的用户非对齐访存
 模拟路径；未对齐兼容必须在 syscall/uaccess 或测试适配层显式处理，不能指望 trap 后端
 解码并模拟 load/store。
@@ -294,7 +295,7 @@ ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。有界区间由�
 | syscall 编号错误 | `trap_handler()` syscall 分支 | `a7` 和 `a0..a5` 保存位置 |
 | 用户缺页反复触发 | `sv39.rs`, `page_fault.rs` | PTE 权限和 `sfence.vma` |
 | timer 不抢占 | `trap::enable_timer_interrupt()`、`time.rs` | `sie::set_stimer()` 和 timer delta |
-| 返回用户态失败 | `trap_return()`、`trap.S` | trampoline、satp、trap context VA |
+| 返回用户态失败 | `trap_return()`、`trap.S` | shared kernel roots、SATP epoch、trampoline、trap context VA |
 
 ## 12. 测试映射
 

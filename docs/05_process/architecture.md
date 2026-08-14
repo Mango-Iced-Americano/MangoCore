@@ -3,7 +3,7 @@ title: "进程与任务架构详解 (Process and Task Architecture)"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-13
+last_update: 2026-08-14
 tags: [process, task, scheduler, signal, futex, ipc]
 ---
 
@@ -503,7 +503,7 @@ mark_zombie(exit_code, rusage)
 | `take_children()` | 当前进程的子进程需要被最近 child reaper 收养，避免孤儿失去 wait 归属。 |
 | `child_exit_wait.wake_all()` | 正在 `wait4/waitid` 中睡眠的父进程通过这个队列被唤醒。 |
 | `exit_signal` | 非线程 clone 的退出信号通常是 SIGCHLD；线程组内线程退出不走同一进程 wait 语义。 |
-| `release_for_zombie()` | 当 VM 引用只剩进程/zombie 路径时释放用户页，降低 zombie 占用。 |
+| `release_for_zombie()` | idle 栈已换根、active mask 为零且 VM 未共享时释放用户 VMA/叶子页；页表根保留到 Arc drop。 |
 | `close_files_on_exit()` | 进程退出关闭 fd table 中需要关闭的文件对象。 |
 
 这条路径把 exit 和 wait 连在一起：exit 不是直接删除 PCB，而是把 PCB 变成 parent 可观察的 zombie；wait 成功消费后才释放 pid、解除父子关系并完成最终回收。

@@ -1516,3 +1516,11 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**：在被安全省略的 tick 上，仅在诊断 feature 下把 `now - run_started_ticks` 累计到全局运行时间，并将该任务的 `run_started_ticks` 更新为 `now`；后续真实 schedule-out 只结算新的区间，避免重复计数。同步提升 schema，并要求 monitor 启动时 fail-closed 握手。
 - **教训**：任何消除 context switch、锁获取、I/O completion 或状态迁移的性能优化，都必须审计依赖该事件结算的计数器。先保证可观测量仍表示原概念，再做前后 A/B；不能把计数下降直接解释成工作量下降。
 - **相关文件**：`os/src/task/manager.rs`、`os/src/task/perf.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## ASID rollover 后 software active 不能代替真实 SATP 安装
+
+- **现象**：ASID rollover 之后，原本应使用按页/按区间失效的并发 PTE 测试突然退化为全量用户 TLB flush；如果为了让测试恢复而直接把 rollover ack 记作 CPU 已观察新 epoch，则会重新打开旧 ASID 翻译漏刷窗口。
+- **根因**：rollover IPI ack 只证明旧 epoch 的 non-global 翻译已经失效，不证明 CPU 已经安装新 epoch 的 SATP。`AddressSpace::activate_on()` 只分配 MM context、推进 generation 并设置 software active bit，本身不执行 `csrw satp`。若测试或生产路径把 CPU 标成 active 却没有完成真实安装，MMU gather 看到 `CPU_ASID_EPOCH < mm_epoch` 时升级为 Full 是必要的安全降级。
+- **修复**：生产切换必须在同一个本地 IRQ-off 事务中完成 `activate_on → install_page_table → 必要的 full fence → 发布 CPU observed epoch`，并在写入新根前 pin 旧根；切离时先安装内核根，再 deactivate/drop。`install_page_table()` 用硬断言 fail-closed。需要模拟 active MM 的 ktest 使用 RAII guard 复用同一协议，退出路径无论成功与否都先恢复内核根。
+- **教训**：必须区分三个独立事实：shootdown 已 ack、software active mask 已置位、硬件已安装某 root/ASID/epoch。测试夹具不能只伪造其中一个来代表另外两个；per-CPU observed epoch 只能在实际安装和必要 fence 完成后发布，不能在 rollover 广播处批量推进。
+- **相关文件**：`os/src/hal/arch/riscv/sv39.rs`、`os/src/mm/{address_space,mmu_gather,tlb}.rs`、`os/src/task/processor.rs`、`os/src/kernel_tests/smp.rs`

@@ -287,22 +287,22 @@ pub fn trap_handler() -> ! {
             // 缺页修复与 LA64 software-dirty PTE 更新合并在同一 VM 锁
             // 持有期；helper 先解锁再完成远端 shootdown。
             let pf_result = loop {
-                let outcome = vm_ref.write(|vm| {
-                    match vm.do_page_fault(addr, access) {
-                        crate::mm::FaultOutcome::Completed(pa) => {
-                            if matches!(
-                                cause,
-                                Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
-                            ) {
-                                if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
-                                    return crate::mm::FaultOutcome::Error(error);
-                                }
+                let outcome = vm_ref.write(|vm| match vm.do_page_fault(addr, access) {
+                    crate::mm::FaultOutcome::Completed(pa) => {
+                        if matches!(
+                            cause,
+                            Trap::Exception(
+                                Exception::PageModifyFault | Exception::PageInvalidStore
+                            )
+                        ) {
+                            if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
+                                return crate::mm::FaultOutcome::Error(error);
                             }
-                            crate::mm::FaultOutcome::Completed(pa)
                         }
-                        crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
-                        crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
+                        crate::mm::FaultOutcome::Completed(pa)
                     }
+                    crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
+                    crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
                 });
                 match outcome {
                     crate::mm::FaultOutcome::Completed(_) => break Ok(()),
@@ -551,14 +551,16 @@ pub fn trap_return() -> ! {
     // 页表根、ASID 和 CPU 驻留登记必须来自同一个 AddressSpace 快照；不能再从
     // TCB 单独读取 ASID，否则 CLONE_VM 线程会破坏共享 MM 的标签一致性。
     let user_vm = task.process.activate_user_vm();
+    debug_assert_eq!(
+        user_vm.asid_epoch, 0,
+        "LA64 context carried an RV ASID epoch"
+    );
     if user_vm.asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
     // 安全点调度、信号处理和 ASID/MM 激活都属于 system time。只有在真正
     // ERTN 前才开启 user 计时，避免把任务离 CPU 的区间算进 utime。
-    let (user_us, system_us) = task
-        .acquire_inner_lock()
-        .update_process_times_enter_user();
+    let (user_us, system_us) = task.acquire_inner_lock().update_process_times_enter_user();
     task.process.account_cpu_time(user_us, system_us);
     let restore_va = __restore as usize;
     let user_trap_entry = strampoline as usize;

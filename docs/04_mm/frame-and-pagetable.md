@@ -3,7 +3,7 @@ title: "页帧、VmPageStore 与页表映射关系"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-07-29
+last_update: 2026-08-14
 tags: [mm, frame, pagetable, vm-page-store, mmu-gather, smp]
 ---
 
@@ -267,14 +267,14 @@ COW 复制时同步顺序很重要：
 
 ## 13. 页表释放
 
-地址空间释放分两层：
+zombie 地址空间提前释放分两层：
 
 1. `vmas.unmap_all(mapper)` 先清除 resident PTE，并把 VMA frame 交给当前 `MmuGather`。
-2. `page_table.take_frames()` 移出页表自身持有的根页和中间页，不立即释放。
+2. 收齐 user-TLB ack 后释放叶子 frame；页表根和中间页继续由 `AddressSpace` 持有。
 
-不能直接 drop VMA frame：旧 TLB 可能仍持有对应 PPN；页表页本身也可能正被
-远端 page walk 使用。两类 frame 由同一个 `MmuGather` 保留，并在本轮目标 CPU
-全部完成 user-TLB 失效后释放。
+不能直接 drop VMA frame：旧 TLB 可能仍持有对应 PPN。也不能仅凭 TLB ack 提前
+drop 页表根：仍安装该 SATP 的 CPU 可以在 ack 后发起新 page walk。提前清理因此
+必须发生在 idle 栈换根并清空 active mask 之后，根页最终由 Arc 生命周期释放。
 
 ## 14. TLB 同步
 
@@ -298,9 +298,9 @@ shootdown。只有对应同步成功后才 drop frame。
 
 Frame 和 PTE 的对应关系不是自动维护的。`VmPageStore` 持有 `FrameTracker`，保证物理页生命周期；PTE 持有 PPN，供硬件翻译。正确状态要求两边同时指向同一页：如果 PTE 指向一个没有 `FrameTracker` 引用的页，页可能被 allocator 回收后重用；如果 `VmPageStore` 有 frame 但 PTE 没有映射，页面只 resident，不可被用户直接访问，可能是 lazy/shared anonymous 或被暂时撤销权限的状态。
 
-释放地址空间也要分两步：先经 mapper 撤销用户 PTE，再用 `take_frames()`
-移出页表页；两类 frame 共用同一个锁外 retirement 完成点。只做前者
-会泄漏页表页，提前 drop 任一类则会造成 stale translation/page-walk 访问已复用物理页。
+释放地址空间也要区分叶子 frame 与页表根：前者经 mapper 撤销并在锁外 retirement
+完成点释放，后者必须等没有 active CPU 且 `AddressSpace` 最终析构。提前 drop 任一类
+都会造成 stale translation/page-walk 访问已复用物理页。
 
 ## 15. 调试核对点
 

@@ -864,10 +864,7 @@ impl ExecutableMappingGuard {
         if let Some(key) = key {
             register_exec_key(key);
         }
-        Self {
-            _inode: inode,
-            key,
-        }
+        Self { _inode: inode, key }
     }
 }
 
@@ -2671,10 +2668,6 @@ impl ProcessControlBlock {
             Self::wake_child_waiters(&child_reaper);
         }
 
-        let vm = self.vm();
-        if Arc::strong_count(&vm) <= 2 {
-            vm.write(|vm| vm.release_for_zombie());
-        }
         self.close_files_on_exit();
     }
 }

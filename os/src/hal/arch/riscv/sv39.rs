@@ -10,7 +10,7 @@ use alloc::{sync::Arc, vec::Vec};
 use bitflags::*;
 use core::arch::asm;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use riscv::register::satp;
 use spin::Mutex;
 
@@ -39,6 +39,14 @@ static ASID_ALLOCATOR: Mutex<AsidAllocator> = Mutex::new(AsidAllocator {
 });
 static ASID_ROLLOVER: AtomicBool = AtomicBool::new(false);
 static ASID_ROLLOVERS: AtomicUsize = AtomicUsize::new(0);
+/// 已经发布、可重新分配硬件 ASID 的软件 epoch。
+static CURRENT_ASID_EPOCH: AtomicU64 = AtomicU64::new(1);
+/// CPU 只有在目标 SATP 已安装并执行全量 `sfence.vma` 后才能确认新 epoch。
+/// rollover IPI 本身不能确认：handler 返回旧根后仍可能通过 uaccess 重新填充
+/// 旧 ASID 翻译。
+static CPU_ASID_EPOCH: [AtomicU64; crate::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
+static HARDWARE_ASIDS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// 在 BSP 已启用 Sv39 后探测 SATP 实际实现的 ASID 位数。
 fn probe_asid_width() -> usize {
@@ -97,6 +105,7 @@ pub fn init_asid_allocator() -> usize {
     );
     allocator.initialized = true;
     allocator.max = max;
+    HARDWARE_ASIDS_ENABLED.store(max != 0, Ordering::Release);
     max as usize
 }
 
@@ -170,15 +179,16 @@ pub fn rollover_asids() {
         allocator.epoch
     };
 
-    // 软件 IPI 的 ack 同时证明目标 CPU 已离开旧用户 SATP；它再次返回用户态
-    // 前会经过 activate_on()，因此新 epoch 发布后不会继续使用旧 context。
+    // 软件 IPI 的 ack 证明旧 epoch 的 non-global 翻译已经失效。CPU 可在共享
+    // 内核映射下继续保留旧根，但再次返回用户态前必经 IRQ-off 的
+    // activate_on()/install_page_table()，不会把旧 context 直接交给 SRET。
     if let Err(error) =
         crate::smp::synchronize_user_tlb(crate::smp::online_cpu_mask(), KERN_ASID, None, None)
     {
         panic!("RISC-V ASID rollover TLB flush failed: {:?}", error);
     }
 
-    {
+    let new_epoch = {
         let mut allocator = ASID_ALLOCATOR.lock();
         assert_eq!(
             allocator.epoch, old_epoch,
@@ -193,7 +203,11 @@ pub fn rollover_asids() {
         );
         allocator.epoch = new_epoch;
         allocator.next = USER_ASID_BASE;
-    }
+        new_epoch
+    };
+    // 先完成 allocator 状态，再发布 epoch。try_assign_asid() 在 rollover
+    // 标志清除前仍会拒绝分配，因此观察到新 epoch 的 CPU 必定能取得新 context。
+    CURRENT_ASID_EPOCH.store(new_epoch, Ordering::Release);
     ASID_ROLLOVERS.fetch_add(1, Ordering::Relaxed);
     ASID_ROLLOVER.store(false, Ordering::Release);
 }
@@ -206,9 +220,89 @@ pub fn asid_rollover_count() -> usize {
     ASID_ROLLOVERS.load(Ordering::Acquire)
 }
 
+/// 本轮 PTE 修改若覆盖尚未确认当前 ASID epoch 的 CPU，就不能只按 MM 的
+/// 最新 ASID 做定向失效；这些 CPU 的 SATP 仍可能带着旧 ASID。
+pub(crate) fn targets_require_full_asid_flush(targets: usize, mm_epoch: u64) -> bool {
+    if targets == 0 || !HARDWARE_ASIDS_ENABLED.load(Ordering::Acquire) {
+        return false;
+    }
+    assert_ne!(mm_epoch, 0, "active RISC-V MM has no software ASID epoch");
+    (0..crate::smp::configured_cpu_count()).any(|cpu| {
+        targets & (1usize << cpu) != 0 && CPU_ASID_EPOCH[cpu].load(Ordering::Acquire) < mm_epoch
+    })
+}
+
+/// 返回已经完成全 CPU rollover flush、可以安装的当前软件 epoch。
+pub(crate) fn current_asid_epoch() -> u64 {
+    if HARDWARE_ASIDS_ENABLED.load(Ordering::Acquire) {
+        CURRENT_ASID_EPOCH.load(Ordering::Acquire)
+    } else {
+        0
+    }
+}
+
+/// 在写 SATP 前验证本次 context 仍属于已发布 epoch，并判断本 CPU 是否需要
+/// epoch 全刷。调用方必须保持本地 IRQ 关闭直到 SATP 写入与 observed 发布完成，
+/// 使 rollover 无法在检查与安装之间越过本 CPU 的 ack。
+fn local_asid_epoch_needs_flush(target_epoch: u64) -> bool {
+    if !HARDWARE_ASIDS_ENABLED.load(Ordering::Acquire) {
+        assert_eq!(target_epoch, 0, "ASIDLEN=0 context carried an epoch");
+        return false;
+    }
+    let cpu = crate::smp::cpu_id();
+    let published = CURRENT_ASID_EPOCH.load(Ordering::Acquire);
+    assert_eq!(
+        target_epoch, published,
+        "attempted to install a stale RISC-V ASID context"
+    );
+    let observed = CPU_ASID_EPOCH[cpu].load(Ordering::Acquire);
+    assert!(
+        observed <= target_epoch,
+        "RISC-V CPU ASID epoch moved backwards"
+    );
+    observed < target_epoch
+}
+
 /// 在保留页表根和 Sv39 MODE 的同时，把 MM-owned ASID 编入 SATP。
 pub const fn satp_with_asid(page_table_token: usize, asid: u16) -> usize {
     (page_table_token & !(SATP_ASID_MASK << SATP_ASID_SHIFT)) | ((asid as usize) << SATP_ASID_SHIFT)
+}
+
+/// Install a page-table root only when the encoded SATP value actually
+/// changes.  All roots share identical supervisor mappings, so a nonzero ASID
+/// switch needs no architectural full fence.  ASIDLEN=0 retains the required
+/// compatibility flush after every real root change.
+pub fn install_page_table(page_table_token: usize, asid: u16, asid_epoch: u64) -> bool {
+    assert!(
+        !crate::hal::irq_enabled(),
+        "RISC-V SATP install requires an IRQ-off epoch transaction"
+    );
+    let target = satp_with_asid(page_table_token, asid);
+    let needs_epoch_flush = local_asid_epoch_needs_flush(asid_epoch);
+    let current: usize;
+    // Safety: reading SATP has no memory side effects.
+    unsafe { asm!("csrr {value}, satp", value = out(reg) current, options(nostack)) };
+    if current == target && !needs_epoch_flush {
+        return false;
+    }
+
+    let start = crate::task::perf::perf_time_now();
+    // Safety: callers keep both the target root and the currently installed
+    // root pinned across this write.  Kernel mappings are shared by contract.
+    unsafe { asm!("csrw satp, {target}", target = in(reg) target, options(nostack)) };
+    if !HARDWARE_ASIDS_ENABLED.load(Ordering::Acquire) {
+        tlb_invalidate();
+    } else if needs_epoch_flush {
+        // Only publish the epoch carried by the context actually installed;
+        // never jump directly to a newer global epoch.
+        tlb_invalidate();
+        CPU_ASID_EPOCH[crate::smp::cpu_id()].store(asid_epoch, Ordering::Release);
+    }
+    crate::task::perf::record_tlb_activate_cycles(
+        crate::task::perf::perf_time_now().wrapping_sub(start),
+    );
+    crate::task::perf::record_tlb_activate();
+    true
 }
 
 /// 将 vpn 转换为字节地址后做单页 TLB 刷新
@@ -359,6 +453,20 @@ impl Sv39PageTableEntry {
 pub struct Sv39PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<Arc<FrameTracker>>,
+    role: PageTableRole,
+}
+
+const SHARED_KERNEL_ROOT_START: usize = 256;
+const SHARED_KERNEL_ROOT_END: usize = 511;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageTableRole {
+    /// Owns every page-table frame and may create shared supervisor branches.
+    KernelOwned,
+    /// Owns its user/root frames but borrows kernel root entries 256..510.
+    UserOwned,
+    /// Non-owning translation view built from a token; all mutators are banned.
+    Borrowed,
 }
 
 /// Assume that it won't encounter oom when creating/mapping.
@@ -370,6 +478,12 @@ impl Sv39PageTable {
         vpn: VirtPageNum,
     ) -> Result<&mut Sv39PageTableEntry, MemoryError> {
         let idxs: [usize; 3] = vpn.indexes();
+        if self.role == PageTableRole::Borrowed
+            || (self.role == PageTableRole::UserOwned
+                && (SHARED_KERNEL_ROOT_START..SHARED_KERNEL_ROOT_END).contains(&idxs[0]))
+        {
+            return Err(MemoryError::BadAddress);
+        }
         let mut ppn = self.root_ppn;
         for i in 0..3 {
             // Safety: 可变 self 独占本页表；PPN 只来自根或有效非叶子 PTE，
@@ -419,6 +533,12 @@ impl Sv39PageTable {
     /// Find and return reference the page table entry denoted by `vpn`, `None` if not found.
     fn find_pte_refmut(&mut self, vpn: VirtPageNum) -> Option<&mut Sv39PageTableEntry> {
         let idxs: [usize; 3] = vpn.indexes();
+        if self.role == PageTableRole::Borrowed
+            || (self.role == PageTableRole::UserOwned
+                && (SHARED_KERNEL_ROOT_START..SHARED_KERNEL_ROOT_END).contains(&idxs[0]))
+        {
+            return None;
+        }
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut Sv39PageTableEntry> = None;
         for i in 0..3 {
@@ -451,6 +571,7 @@ impl PageTable for Sv39PageTable {
                 vec.push(frame);
                 vec
             },
+            role: PageTableRole::KernelOwned,
         }
     }
     fn new() -> Self {
@@ -462,7 +583,61 @@ impl PageTable for Sv39PageTable {
                 vec.push(frame);
                 vec
             },
+            role: PageTableRole::KernelOwned,
         }
+    }
+    fn new_user_space(kernel_token: usize) -> Self
+    where
+        Self: Sized,
+    {
+        let mut page_table = Self::new();
+        let kernel_root = PhysPageNum::from(kernel_token & ((1usize << 44) - 1));
+        // Safety: KERNEL_SPACE owns the source root for the kernel lifetime;
+        // the freshly allocated destination root is exclusively owned here.
+        let source = unsafe { kernel_root.get_pte_array::<Sv39PageTableEntry>() };
+        let destination = unsafe {
+            page_table
+                .root_ppn
+                .get_pte_array_mut::<Sv39PageTableEntry>()
+        };
+        destination[SHARED_KERNEL_ROOT_START..SHARED_KERNEL_ROOT_END]
+            .copy_from_slice(&source[SHARED_KERNEL_ROOT_START..SHARED_KERNEL_ROOT_END]);
+        page_table.role = PageTableRole::UserOwned;
+        page_table
+    }
+
+    fn prepare_shared_kernel_range(
+        &mut self,
+        start: VirtAddr,
+        end: VirtAddr,
+    ) -> Result<(), MemoryError> {
+        // Only the kernel-owned root may create shared subtrees.  A user root
+        // contains borrowed root entries and must never mutate their children.
+        if self.role != PageTableRole::KernelOwned || start >= end {
+            return Err(MemoryError::BadAddress);
+        }
+        let first = start.floor().indexes::<3>()[0];
+        let last = VirtAddr::from(end.0 - 1).floor().indexes::<3>()[0];
+        if first < SHARED_KERNEL_ROOT_START || last >= SHARED_KERNEL_ROOT_END || first > last {
+            return Err(MemoryError::BadAddress);
+        }
+        for index in first..=last {
+            let root_pte =
+                &mut unsafe { self.root_ppn.get_pte_array_mut::<Sv39PageTableEntry>() }[index];
+            if root_pte.is_valid() {
+                if root_pte.is_leaf() {
+                    return Err(MemoryError::AlreadyMapped);
+                }
+                continue;
+            }
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| MemoryError::OutOfMemory)?;
+            let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+            *root_pte = Sv39PageTableEntry::new(frame.ppn, PTEFlags::V);
+            self.frames.push(frame);
+        }
+        Ok(())
     }
     /// Create an empty page table from `satp`
     /// # Argument
@@ -471,6 +646,7 @@ impl PageTable for Sv39PageTable {
         Self {
             root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
             frames: Vec::new(),
+            role: PageTableRole::Borrowed,
         }
     }
     /// Predicate for the valid bit.
@@ -521,20 +697,25 @@ impl PageTable for Sv39PageTable {
         *pte = Sv39PageTableEntry::new(ppn, pte_flags);
         Ok(())
     }
-    fn try_map_identical_2m(
+    fn try_map_2m(
         &mut self,
         start_vpn: VirtPageNum,
+        start_ppn: PhysPageNum,
         flags: MapPermission,
     ) -> Result<(), MemoryError> {
         const PAGES_PER_2M: usize = 512;
-        if start_vpn.0 % PAGES_PER_2M != 0 {
+        if start_vpn.0 % PAGES_PER_2M != 0 || start_ppn.0 % PAGES_PER_2M != 0 {
             return Err(MemoryError::BadAddress);
         }
         let idxs: [usize; 3] = start_vpn.indexes();
-        let root_pte = &mut unsafe {
-            self.root_ppn
-                .get_pte_array_mut::<Sv39PageTableEntry>()
-        }[idxs[0]];
+        if self.role == PageTableRole::Borrowed
+            || (self.role == PageTableRole::UserOwned
+                && (SHARED_KERNEL_ROOT_START..SHARED_KERNEL_ROOT_END).contains(&idxs[0]))
+        {
+            return Err(MemoryError::BadAddress);
+        }
+        let root_pte =
+            &mut unsafe { self.root_ppn.get_pte_array_mut::<Sv39PageTableEntry>() }[idxs[0]];
         if !root_pte.is_valid() {
             self.frames
                 .try_reserve(1)
@@ -555,8 +736,10 @@ impl PageTable for Sv39PageTable {
         if flags.contains(MapPermission::G) {
             pte_flags |= PTEFlags::G;
         }
-        *pte = Sv39PageTableEntry::new(PhysPageNum(start_vpn.0), pte_flags);
-        tlb_invalidate_vpn!(start_vpn);
+        *pte = Sv39PageTableEntry::new(start_ppn, pte_flags);
+        // A one-address fence does not invalidate cached negative/leaf entries
+        // for the remaining 511 pages covered by the new huge leaf.
+        tlb_invalidate();
         Ok(())
     }
     #[allow(unused)]
@@ -583,11 +766,15 @@ impl PageTable for Sv39PageTable {
     /// Translate the virtual address into its corresponding `PhysAddr` if mapped in current page table.
     /// `None` is returned if nothing is found.
     fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
-            let aligned_pa: PhysAddr = pte.ppn().into();
-            let offset = va.page_offset();
-            let aligned_pa_usize: usize = aligned_pa.into();
-            (aligned_pa_usize + offset).into()
+        let vpn = va.floor();
+        self.find_pte_with_level(vpn).map(|(pte, level)| {
+            let lower_vpn_bits = (2 - level) * 9;
+            let ppn = PhysPageNum(pte.ppn().0 | (vpn.0 & ((1usize << lower_vpn_bits) - 1)));
+            PhysAddr::from(ppn)
+                .0
+                .checked_add(va.page_offset())
+                .unwrap()
+                .into()
         })
     }
     fn block_and_ret_mut(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
@@ -697,6 +884,11 @@ impl PageTable for Sv39PageTable {
         }
     }
     fn activate(&self) {
+        assert_ne!(
+            self.role,
+            PageTableRole::Borrowed,
+            "cannot activate a non-owning RISC-V page-table view"
+        );
         let satp = self.token();
         debug_assert_eq!(
             (satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK,
@@ -737,9 +929,5 @@ impl PageTable for Sv39PageTable {
             }
             (!access.needs_read() || pte.readable()) && (!access.needs_write() || pte.writable())
         })
-    }
-
-    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>> {
-        core::mem::take(&mut self.frames)
     }
 }

@@ -243,7 +243,7 @@ pub fn enumerate_virtio_pci(device_type: DeviceType) -> Option<PciTransport> {
 pub fn enumerate_all_virtio_pci(
     device_type: DeviceType,
 ) -> alloc::vec::Vec<(DeviceFunction, PciTransport)> {
-    let mmconfig_base = pci_ecam_base() as *mut u8;
+    let mmconfig_base = PhysAddr(pci_ecam_base()).direct_map_ptr();
     println!("[PCI] ECAM base: {:#x}", mmconfig_base as usize);
 
     let mmio_cam = unsafe { MmioCam::new(mmconfig_base, Cam::Ecam) };
@@ -409,7 +409,7 @@ unsafe impl Hal for VirtioHal {
                 perf::record_virtio_dma_share(0);
 
                 if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
-                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                    core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
                         .copy_from_slice(buffer);
                 }
                 return pa;
@@ -422,7 +422,7 @@ unsafe impl Hal for VirtioHal {
             if let Some((_slot, pa)) = virtio_dma_pool::dma_pool_try_alloc_small() {
                 perf::record_virtio_dma_share(pool_kind);
                 if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
-                    core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len())
+                    core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
                         .copy_from_slice(buffer);
                 }
                 return pa;
@@ -445,7 +445,8 @@ unsafe impl Hal for VirtioHal {
         let frames = frames_alloc(1).expect("share: failed to alloc frame");
         let pa = frames[0].ppn.start_addr().0;
         if matches!(dir, BufferDirection::DriverToDevice | BufferDirection::Both) {
-            core::slice::from_raw_parts_mut(pa as *mut u8, buffer.len()).copy_from_slice(buffer);
+            core::slice::from_raw_parts_mut(PhysAddr(pa).direct_map_ptr(), buffer.len())
+                .copy_from_slice(buffer);
         }
         let old = QUEUE_FRAMES.lock().insert(pa, frames);
         assert!(
@@ -460,7 +461,7 @@ unsafe impl Hal for VirtioHal {
         if let Some(slot) = virtio_dma_pool::dma_pool_lookup(paddr) {
             if matches!(dir, BufferDirection::DeviceToDriver | BufferDirection::Both) {
                 let buffer = buffer.as_mut();
-                let src = paddr as *const u8;
+                let src = PhysAddr(paddr).direct_map_ptr().cast_const();
                 buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
             }
             virtio_dma_pool::dma_pool_finish_unshare(slot);
@@ -474,7 +475,7 @@ unsafe impl Hal for VirtioHal {
 
         if matches!(dir, BufferDirection::DeviceToDriver | BufferDirection::Both) {
             let buffer = buffer.as_mut();
-            let src = paddr as *const u8;
+            let src = PhysAddr(paddr).direct_map_ptr().cast_const();
             buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
         }
 
@@ -509,7 +510,7 @@ pub fn virtio_dma_dealloc(pa: PhysAddr, _pages: usize) -> i32 {
 }
 
 pub fn virtio_phys_to_virt(paddr: PhysAddr) -> VirtAddr {
-    VirtAddr(paddr.0)
+    VirtAddr(paddr.direct_map_ptr() as usize)
 }
 
 lazy_static! {

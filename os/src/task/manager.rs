@@ -330,11 +330,9 @@ impl TaskManager {
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
     let last_cpu = task.last_cpu();
     let target = super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu));
-    let load = super::run_queue::nr_running(target)
-        + super::processor::cpu_current_count(target);
-    let last_busy = super::run_queue::nr_running(last_cpu)
-        + super::processor::cpu_current_count(last_cpu)
-        != 0;
+    let load = super::run_queue::nr_running(target) + super::processor::cpu_current_count(target);
+    let last_busy =
+        super::run_queue::nr_running(last_cpu) + super::processor::cpu_current_count(last_cpu) != 0;
     let idle_available = super::run_queue::has_idle_runnable_cpu(task.cpus_allowed());
     crate::task::perf::record_wake_selection(
         target == last_cpu,
@@ -457,9 +455,7 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
             TaskStatus::Running(owner) if owner == cpu => {
                 #[cfg(feature = "perf_stats")]
                 {
-                    let run_started = task
-                        .run_started_ticks
-                        .swap(0, AtomicOrdering::AcqRel);
+                    let run_started = task.run_started_ticks.swap(0, AtomicOrdering::AcqRel);
                     if run_started != 0 {
                         crate::task::perf::record_task_run_slice(
                             crate::task::perf::perf_time_now_for(
@@ -527,6 +523,13 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
                 // processor 已在 idle 栈撤销 current 槽；到这里才能允许
                 // 非 leader exec 交换旧 leader 的 TID。
                 task.process.publish_exit_inactive(&task);
+                // processor 已先在 idle 栈安装 kernel root 并清除 active bit。
+                // 只有到这里，未共享 zombie MM 才能安全提前丢弃用户叶子映射；
+                // 页表根继续由 AddressSpace 持有到最终 Arc drop。
+                if task.process.is_zombie() {
+                    let vm = task.process.vm();
+                    let _ = vm.release_zombie_mappings_if_inactive();
+                }
                 // 当前代码已运行在退出 CPU 的 idle 栈；把最后一个调度 owner
                 // 交给本 CPU 回收队列，不再跨核竞争全局 TaskManager。
                 super::processor::enqueue_zombie(cpu, task);
@@ -2329,9 +2332,8 @@ pub fn run_task_safe_point() {
                     // Periodic switch-out used to keep TASK_RUN_SLICE current.
                     // Tick elision removes that boundary, so perf builds split
                     // the still-running slice here without changing ownership.
-                    let now = crate::task::perf::perf_time_now_for(
-                        crate::task::perf::STATS_PROFILE_CORE,
-                    );
+                    let now =
+                        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
                     let started = current.run_started_ticks.swap(now, AtomicOrdering::AcqRel);
                     if started != 0 {
                         crate::task::perf::record_task_run_slice(now.wrapping_sub(started));

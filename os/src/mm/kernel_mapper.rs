@@ -90,6 +90,36 @@ impl<'a, T: PageTable> KernelMapper<'a, T> {
         Ok(())
     }
 
+    /// 对不与既有映射重叠的连续 VA/PA 范围优先使用 2 MiB 叶子。
+    #[cfg(target_arch = "riscv64")]
+    pub(super) fn map_unmapped_range(
+        &mut self,
+        start_va: VirtAddr,
+        start_pa: PhysPageNum,
+        end_va: VirtAddr,
+        flags: MapPermission,
+    ) -> MmResult<()> {
+        let mut vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut ppn = start_pa;
+        while vpn < end_vpn {
+            let remaining = end_vpn.0 - vpn.0;
+            if vpn.0 % Self::PAGES_PER_2M == 0
+                && ppn.0 % Self::PAGES_PER_2M == 0
+                && remaining >= Self::PAGES_PER_2M
+            {
+                self.mapper.map_2m(vpn, ppn, flags)?;
+                vpn = VirtPageNum(vpn.0 + Self::PAGES_PER_2M);
+                ppn = PhysPageNum(ppn.0 + Self::PAGES_PER_2M);
+            } else {
+                self.map_page(vpn, ppn, flags)?;
+                vpn = VirtPageNum(vpn.0 + 1);
+                ppn = PhysPageNum(ppn.0 + 1);
+            }
+        }
+        Ok(())
+    }
+
     /// Map a virtual range to a physically contiguous range of equal length.
     pub(super) fn map_range(
         &mut self,

@@ -35,7 +35,9 @@ pub fn jh7110_l2cc_flush_range(physical_address: usize, length: usize) {
             // offset is identity-mapped MMIO on the supported RISC-V board.
             unsafe {
                 core::ptr::write_volatile(
-                    (JH7110_L2CC_BASE + JH7110_L2CC_FLUSH64) as *mut u32,
+                    crate::mm::PhysAddr(JH7110_L2CC_BASE + JH7110_L2CC_FLUSH64)
+                        .direct_map_ptr()
+                        .cast::<u32>(),
                     line as u32,
                 );
             }

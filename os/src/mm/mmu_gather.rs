@@ -106,33 +106,6 @@ impl MmuGather {
         }
     }
 
-    /// 延迟释放页表根/中间页；它们可能仍被远端硬件 page walk 使用。
-    pub(crate) fn retire_frames<T: PageTable>(
-        &mut self,
-        page_table: &T,
-        frames: Vec<Arc<FrameTracker>>,
-    ) {
-        if self.range == FlushRange::None {
-            self.leak_retired_frames();
-            core::mem::forget(frames);
-            panic!("retired page-table frames without a full TLB flush");
-        }
-        if self.retired_frames.try_reserve(frames.len()).is_ok() {
-            self.retired_frames.extend(frames);
-            return;
-        }
-
-        self.handle_retire_oom(page_table);
-        if self.active_cpus_at_begin == 0
-            || self.active_cpus_at_begin == 1usize << crate::smp::cpu_id()
-        {
-            drop(frames);
-        } else {
-            core::mem::forget(frames);
-            panic!("cannot reserve page-table retirement entries");
-        }
-    }
-
     /// 把锁内记录冻结成一个锁外执行对象。
     pub(crate) fn seal<'a>(&mut self, context: &'a TlbContext) -> Option<TlbFlush<'a>> {
         if self.range == FlushRange::None {
@@ -151,7 +124,18 @@ impl MmuGather {
         );
         // ASID 必须和 `range` 在同一个 VM 锁持有期冻结；解锁后可能发生
         // 全局 ASID rollover，不能再从 MM 中临时拼装另一份失效上下文。
+        #[cfg(target_arch = "loongarch64")]
         let asid = context.flush_asid(targets);
+        #[cfg(target_arch = "riscv64")]
+        let asid = {
+            let (asid, asid_epoch) = context.flush_asid_context(targets);
+            if crate::hal::arch::riscv::sv39::targets_require_full_asid_flush(targets, asid_epoch) {
+                // 该 MM 已取得新 epoch，而 targets 中仍有 CPU 运行旧 context。
+                // 定向失效最新硬件 ASID 会漏掉旧翻译，必须全刷后才能释放 frame。
+                self.range = FlushRange::Full;
+            }
+            asid
+        };
         let gather = core::mem::replace(self, Self::new());
         // 即使当前没有活跃 CPU，也必须推进 generation：已经切离的 CPU
         // 仍可能缓存旧 ASID 翻译，它在下次进入前要据此执行本地补刷。

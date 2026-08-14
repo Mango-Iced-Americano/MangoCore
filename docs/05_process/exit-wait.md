@@ -3,7 +3,7 @@ title: "exit、exit_group、wait4 与 waitid"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-14
 tags: [process, exit, wait, zombie]
 ---
 
@@ -71,8 +71,8 @@ process.finish_exit(task, exit_code)
 7. 判断 auto-reap。
 8. 唤醒 parent 的 `child_exit_wait`。
 9. 按 child `exit_signal` 向 parent live thread 投递信号。
-10. 若 VM 未共享，`release_for_zombie()`。
-11. 关闭所有 fd。
+10. 关闭所有 fd。
+11. 调度器回到 idle 栈并换走旧页表根后，若 VM 未共享且 active mask 为零，执行 `release_for_zombie()`。
 
 线程级退出和进程级退出分开，是为了支持线程组语义。普通线程退出只清理自己的内核栈、trap context、clear_child_tid、robust list 和 live count；只要同一进程还有其他 live thread，PCB 的 fd table、VM、children 和 exit code 都不能进入 zombie。最后一个线程退出时才执行 `finish_exit()`，父进程才能通过 wait 观察到进程退出。
 
@@ -170,17 +170,13 @@ pub fn finish_exit(&self, exit_task: &TaskControlBlock, exit_code: u32) {
         Self::wake_child_waiters(&child_reaper);
     }
 
-    let vm = self.vm();
-    if Arc::strong_count(&vm) <= 2 {
-        vm.update(|address_space| address_space.release_for_zombie());
-    }
     self.close_files_on_exit();
 }
 ```
 
 `notify_pidfd_exit()` 仅在 PCB 进入 `Zombie` 后执行：先原子发布 `exited = true`，再调用共享 `EventWaitQueue::notify_events_all(EPOLLIN | EPOLLRDNORM)`。它先从 PCB 的弱引用槽位升级 `Arc<PidFdState>` 并释放 PCB 锁，随后才唤醒等待者，因此不会把 PCB 或 `inner` 锁跨越 wake 路径；PID reaping 发生在该通知之后。
 
-这段代码的顺序决定 wait 可见性：先 `mark_zombie()` 保存 exit status/rusage，再处理 parent wait queue 和 SIGCHLD，最后释放 VM 数据页并关闭 fd。auto-reap 分支会立即 detach child、释放 pid、注销 process 并移除 zombie TCB。
+这段代码的顺序决定 wait 可见性：先 `mark_zombie()` 保存 exit status/rusage，再处理 parent wait queue 和 SIGCHLD，并关闭 fd。VM 数据页清理由 idle 栈上的 `finish_switch_out()` 延后执行；它先安装 kernel root、清 active bit，再尝试提前释放。auto-reap 分支会立即 detach child、释放 pid、注销 process 并移除 zombie TCB。
 
 ## 5. exit_current_and_run_next
 

@@ -3,7 +3,7 @@ title: "ProcessControlBlock 进程级资源"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-14
 tags: [process, pcb, fd, namespace, lifecycle]
 ---
 
@@ -106,7 +106,7 @@ pub struct ProcessControlBlock {
 |------|------------|-----------|----------------|
 | `files` | `CLONE_FILES` 共享，否则 clone fd table | 共享时先复制，再关闭当前 PCB 副本的 CLOEXEC fd | 进程退出关闭 fd |
 | `fs` | `CLONE_FS` 共享，否则复制 cwd/root/umask | 保留 | 退出时随 PCB 释放 |
-| `vm` | `CLONE_VM` 共享，否则由 `AddressSpaceInner::from_existing_user()` 构造新 `AddressSpace` | `replace_vm(new)` | zombie 时可 `write(|vm| vm.release_for_zombie())` |
+| `vm` | `CLONE_VM` 共享，否则由 `AddressSpaceInner::from_existing_user()` 构造新 `AddressSpace` | `replace_vm(new)` | zombie 在 idle 切离后尝试释放用户叶子映射，根保留到 Arc drop |
 | `sighand` | `CLONE_SIGHAND` 共享，否则复制 | 共享时先复制；清用户 handler，保留 `SIG_IGN` | PCB drop 释放 |
 | `futex` | 共享 VM 时共享，否则新建 private table | 换成新 private table，不清空可能被其它 PCB 使用的旧表 | 退出时处理 robust/clear child tid |
 | `children/parent` | 非 `CLONE_THREAD` child 发布到父进程 | 保留 | wait/auto-reap 消费 |
@@ -358,7 +358,7 @@ mark_zombie(exit_code, rusage)
 根据 parent SIGCHLD action 判断 auto-reap
 唤醒 parent child_exit_wait
 按 exit_signal 向 parent live thread 投递信号
-若 VM 未共享，release_for_zombie()
+idle 栈换走页表根后，若 VM 未共享且 active mask 为零，release_for_zombie()
 close_files_on_exit()
 ```
 

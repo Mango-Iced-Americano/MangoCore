@@ -282,9 +282,16 @@ impl CpuTaskState {
 /// 在返回用户态前切换本 CPU 的活跃地址空间。
 ///
 /// 名称与 Linux `switch_mm()` 对齐。槽锁只用于交换 Arc，不跨 VM 锁、ASID
-/// rollover 或 IPI 等待；旧 MM 先 leave，新 MM 再以 generation 协议进入。
+/// rollover 或 IPI 等待。RV64 必须先把硬件切到新根，再允许旧 MM deactivate/drop；
+/// 否则 no-switch trap 模型会让 SATP 指向已经退休的页表页。
 pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmContext {
     let cpu = crate::smp::cpu_id();
+    // The MM context and its SATP installation are one rollover transaction.
+    // A leader cannot publish the next epoch until this CPU handles its IPI;
+    // keeping IRQs disabled here therefore freezes CURRENT_ASID_EPOCH.  The
+    // rollover wait path may temporarily enable IRQs internally before retrying.
+    #[cfg(target_arch = "riscv64")]
+    let irq_was_enabled = crate::hal::local_irq_save();
     let state = crate::smp::local_task_state();
     let (same_mm, previous) = {
         let mut active = state.active_user_vm.lock();
@@ -297,16 +304,44 @@ pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmCont
 
     if same_mm {
         crate::task::perf::record_mm_same_already_active();
-        return vm.activate_on(cpu);
+        let context = vm.activate_on(cpu);
+        #[cfg(target_arch = "riscv64")]
+        crate::hal::arch::riscv::sv39::install_page_table(
+            context.token,
+            context.asid,
+            context.asid_epoch,
+        );
+        #[cfg(target_arch = "riscv64")]
+        crate::hal::local_irq_restore(irq_was_enabled);
+        return context;
     }
+    // LA64 continues to execute the kernel through PGDH while __restore owns
+    // the PGDL switch, so its established deactivate-before-activate order is
+    // unchanged.
+    #[cfg(target_arch = "loongarch64")]
     if let Some(previous) = previous {
         previous.deactivate_on(cpu);
     }
 
     let context = vm.activate_on(cpu);
+    #[cfg(target_arch = "riscv64")]
+    {
+        // `previous` remains pinned and active until this write completes.
+        crate::hal::arch::riscv::sv39::install_page_table(
+            context.token,
+            context.asid,
+            context.asid_epoch,
+        );
+        if let Some(previous) = previous.as_ref() {
+            previous.deactivate_on(cpu);
+        }
+    }
     let mut active = state.active_user_vm.lock();
     assert!(active.is_none(), "active user MM changed during switch");
     *active = Some(vm);
+    drop(active);
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::local_irq_restore(irq_was_enabled);
     context
 }
 
@@ -316,10 +351,25 @@ pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmCont
 /// 改变之前；之后该任务若再次运行，必须重新经过 `switch_user_vm()`。
 fn leave_user_vm(cpu: usize) {
     debug_assert_eq!(cpu, crate::smp::cpu_id());
+    #[cfg(target_arch = "riscv64")]
+    let irq_was_enabled = crate::hal::local_irq_save();
     let active = crate::smp::task_state(cpu).active_user_vm.lock().take();
     if let Some(active) = active {
+        #[cfg(target_arch = "riscv64")]
+        {
+            // The kernel root contains the same shared supervisor subtrees.
+            // Install it before clearing the active bit or dropping the Arc,
+            // so page-table retirement can never race a live SATP root.
+            crate::hal::arch::riscv::sv39::install_page_table(
+                crate::mm::kernel_token(),
+                crate::hal::arch::riscv::sv39::KERN_ASID,
+                crate::hal::arch::riscv::sv39::current_asid_epoch(),
+            );
+        }
         active.deactivate_on(cpu);
     }
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::local_irq_restore(irq_was_enabled);
 }
 
 /// 在退出 CPU 的 idle 栈上接收终态任务的最后一个调度 owner。

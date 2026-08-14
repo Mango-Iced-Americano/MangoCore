@@ -105,6 +105,9 @@ pub struct AddressSpace<T: PageTable> {
     /// 注册是地址空间属性：CLONE_VM 必须共享，fork/exec 的新 AddressSpace
     /// 则从未注册状态开始。
     private_expedited_registered: AtomicBool,
+    /// Zombie user mappings were already released on an idle stack.  The root
+    /// page table itself remains owned until the AddressSpace Arc is dropped.
+    zombie_mappings_released: AtomicBool,
 }
 
 /// 返回用户态时必须成对安装的页表根与硬件 ASID。
@@ -114,6 +117,8 @@ pub struct AddressSpace<T: PageTable> {
 pub(crate) struct UserVmContext {
     pub(crate) token: usize,
     pub(crate) asid: u16,
+    /// RV64 软件 ASID epoch；LA64 固定为 0。
+    pub(crate) asid_epoch: u64,
 }
 
 impl AddressSpace<PageTableImpl> {
@@ -124,6 +129,7 @@ impl AddressSpace<PageTableImpl> {
             inner: Mutex::new(inner),
             tlb: TlbContext::new(),
             private_expedited_registered: AtomicBool::new(false),
+            zombie_mappings_released: AtomicBool::new(false),
         });
         space.inner.lock().vmas.set_owner(Arc::downgrade(&space));
         space
@@ -282,7 +288,7 @@ impl<T: PageTable> AddressSpace<T> {
         loop {
             let context = {
                 let inner = self.inner.lock();
-                self.tlb.assign_asid().map(|asid| {
+                self.tlb.assign_asid().map(|(asid, asid_epoch)| {
                     let caught_up = self.tlb.activate_cpu(cpu_id);
                     crate::task::perf::record_mm_activate(
                         crate::task::perf::perf_time_now_for(
@@ -294,6 +300,7 @@ impl<T: PageTable> AddressSpace<T> {
                     UserVmContext {
                         token: inner.page_table.token(),
                         asid,
+                        asid_epoch,
                     }
                 })
             };
@@ -334,6 +341,33 @@ impl<T: PageTable> AddressSpace<T> {
     pub(crate) fn active_cpu_mask(&self) -> usize {
         let _inner = self.inner.lock();
         self.tlb.active_cpu_mask()
+    }
+
+    /// Best-effort early release for an unshared zombie MM.
+    ///
+    /// This may only succeed after every CPU has installed another SATP root.
+    /// A shootdown ack alone is insufficient because a CPU that retains this
+    /// root can refill translations after acknowledging the flush.  Arc count
+    /// two means the only owners are the zombie PCB and this caller; a larger
+    /// count conservatively leaves cleanup to final AddressSpace drop.
+    pub(crate) fn release_zombie_mappings_if_inactive(self: &Arc<Self>) -> bool {
+        if self.zombie_mappings_released.load(Ordering::Acquire) || Arc::strong_count(self) > 2 {
+            return false;
+        }
+        {
+            let _inner = self.inner.lock();
+            if self.tlb.active_cpu_mask() != 0
+                || Arc::strong_count(self) > 2
+                || self
+                    .zombie_mappings_released
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                return false;
+            }
+        }
+        self.write(|inner| inner.release_for_zombie());
+        true
     }
 
     /// 诊断指定 CPU 的 observed generation 是否已经追上当前 MM generation。
@@ -383,8 +417,12 @@ pub struct AddressSpaceInner<T: PageTable> {
 impl<T: PageTable> AddressSpaceInner<T> {
     /// Create a new struct with no information at all.
     pub fn new_bare() -> Self {
+        #[cfg(target_arch = "riscv64")]
+        let page_table = T::new_user_space(crate::mm::kernel_token());
+        #[cfg(not(target_arch = "riscv64"))]
+        let page_table = T::new_user_space(0);
         Self {
-            page_table: T::new(),
+            page_table,
             vmas: VmaSet::with_capacity(16),
             heap_bottom: 0,
             heap_pt: 0,
@@ -1578,19 +1616,17 @@ impl<T: PageTable> AddressSpaceInner<T> {
         self.locked_pages.clear();
     }
 
-    /// Release all resources for a zombie process: VMA metadata, page table
-    /// frames, and backing Vec storage.  The zombie no longer needs address
-    /// space after exit; only wait4 metadata (pid, exit_code) is required.
+    /// Release zombie VMA metadata, resident leaf frames, and backing storage.
+    /// Root/intermediate page-table frames remain owned until AddressSpace drop.
     pub fn release_for_zombie(&mut self) {
         self.with_user_mapper(|vmas, mapper| vmas.unmap_all(mapper))
             .expect("zombie cleanup failed to clear a resident user PTE");
         self.locked_pages.clear();
-        // 页表根和中间页也可能仍被远端硬件 page walk 使用，必须和叶子 frame
-        // 一起由当前 gather 持有，直到外层 `TlbFlush::execute()` 收齐 ack。
-        let page_table_frames = self.page_table.take_frames();
+        // Do not take the root/intermediate page-table frames here.  A TLB ack
+        // does not stop a hart that still has this SATP installed from starting
+        // a new page walk.  They remain owned until the AddressSpace Arc drops;
+        // only leaf mappings/backing frames are retired by this early cleanup.
         self.mmu_gather.record_full_flush();
-        self.mmu_gather
-            .retire_frames(&self.page_table, page_table_frames);
     }
     pub fn sbrk(&mut self, increment: isize) -> usize {
         super::mmap::do_sbrk(self, increment)
@@ -2364,7 +2400,6 @@ impl<T: PageTable> AddressSpaceInner<T> {
         }
         Ok(())
     }
-
 }
 
 fn memory_error_to_errno(err: MemoryError) -> isize {

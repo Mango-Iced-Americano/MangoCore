@@ -159,12 +159,25 @@ unsafe fn capture_stack(pcs: &mut [usize; STACK_DEPTH]) -> usize {
     pcs[0] = ra;
     let mut count = 1;
 
-    // Kernel stacks live in [TRAMPOLINE - N * STACK_SIZE, TRAMPOLINE].
-    // Use the current sp as lower bound, TRAMPOLINE as upper bound.
-    let kstack_upper = crate::hal::config::TRAMPOLINE;
+    // Resolve the exact guarded stack slot containing SP.  The stack arena is
+    // no longer adjacent to TRAMPOLINE, and accepting the whole gap would let
+    // a corrupt frame pointer cross a guard page before being dereferenced.
+    let arena_bottom = crate::hal::config::KERNEL_STACK_BOTTOM;
+    let arena_top = crate::hal::config::KERNEL_STACK_TOP;
+    if sp < arena_bottom || sp >= arena_top {
+        return count;
+    }
+    let slot = (arena_top - 1 - sp) / crate::hal::config::KERNEL_STACK_SLOT_SIZE;
+    let kstack_upper = arena_top - slot * crate::hal::config::KERNEL_STACK_SLOT_SIZE;
+    let kstack_lower = kstack_upper - crate::hal::config::KERNEL_STACK_SIZE;
+    if sp < kstack_lower || sp >= kstack_upper {
+        return count;
+    }
 
     for i in 1..STACK_DEPTH {
-        if fp < sp || fp > kstack_upper {
+        if fp < core::cmp::max(sp, kstack_lower + 2 * core::mem::size_of::<usize>())
+            || fp > kstack_upper
+        {
             break;
         }
         // Safety: `fp` 已被限制在当前内核栈范围内；读取的是标准栈帧中保存的
@@ -636,8 +649,7 @@ pub fn probe_49152_alloc(layout: Layout) {
         let mut pcs = [0usize; STACK_DEPTH];
         // Safety: 与 capture_stack 文档一致——只在内核栈上下文读 fp/ra。
         let depth = unsafe { capture_stack(&mut pcs) };
-        let heap_current =
-            super::heap_allocator::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed);
+        let heap_current = super::heap_allocator::KERNEL_HEAP_CURRENT_BYTES.load(Ordering::Relaxed);
         let useful = first_useful_pc(&pcs);
         log::error!(
             "[heap-probe] 49152 alloc: size={} align={} heap_current={}K allocs={} deallocs={} site={:#x} depth={} pcs={:#018x},{:#018x},{:#018x},{:#018x},{:#018x},{:#018x}",

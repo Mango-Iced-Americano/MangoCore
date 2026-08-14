@@ -213,14 +213,27 @@ impl Jh7110Trng {
 fn read(base: usize, offset: usize) -> u32 {
     // SAFETY: Categories 6 and 11. FDT discovery validates the aligned TRNG
     // range before construction; CRG offsets are documented aligned registers.
-    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
+    unsafe {
+        core::ptr::read_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+        )
+    }
 }
 
 #[inline(always)]
 fn write(base: usize, offset: usize, value: u32) {
-    // SAFETY: Categories 6 and 11. All calls use validated, identity-mapped
+    // SAFETY: Categories 6 and 11. All calls use validated, supervisor-mapped
     // JH7110 MMIO ranges and documented aligned register offsets.
-    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) }
+    unsafe {
+        core::ptr::write_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+            value,
+        )
+    }
 }
 
 fn update(base: usize, offset: usize, transform: impl FnOnce(u32) -> u32) {

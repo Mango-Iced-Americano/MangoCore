@@ -14,6 +14,8 @@ use alloc::{sync::Arc, vec::Vec};
 #[cfg(feature = "block_virt")]
 use core::ptr::NonNull;
 use spin::Mutex;
+#[cfg(feature = "block_virt")]
+use crate::mm::PhysAddr;
 use virtio_drivers::device::net::{TxBuffer, VirtIONet};
 #[cfg(feature = "block_virt")]
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
@@ -57,8 +59,8 @@ impl VirtIONetWrapper {
         // Platform device discovery supplies a mapped, page-aligned VirtIO MMIO
         // region that remains valid for the kernel lifetime.
         unsafe {
-            let transport =
-                MmioTransport::new(NonNull::new(base_addr as *mut VirtIOHeader)?, 0x1000).ok()?;
+            let header = PhysAddr(base_addr).direct_map_ptr().cast::<VirtIOHeader>();
+            let transport = MmioTransport::new(NonNull::new(header)?, 0x1000).ok()?;
 
             if transport.device_type() != DeviceType::Network {
                 // `MmioTransport::drop` resets the device. This transport only read the
@@ -170,16 +172,20 @@ fn device_interrupt(device: &crate::hal::platform::DeviceInfo) -> Option<usize> 
 fn virtio_net_irq() {
     let base = VIRTIO_NET_MMIO_BASE.load(Ordering::Acquire);
     if base != 0 {
-        // SAFETY: `try_new` publishes only the FDT-validated, identity-mapped
+        // SAFETY: `try_new` publishes only the FDT-validated physical
         // VirtIO MMIO base after queue setup; both registers are aligned u32s.
-        let status = unsafe {
-            core::ptr::read_volatile((base + VIRTIO_MMIO_INTERRUPT_STATUS) as *const u32)
-        };
+        let status_ptr = PhysAddr(base + VIRTIO_MMIO_INTERRUPT_STATUS)
+            .direct_map_ptr()
+            .cast::<u32>();
+        let status = unsafe { core::ptr::read_volatile(status_ptr) };
         if status != 0 {
             // SAFETY: this is the paired VirtIO interrupt-ack register in the
             // same validated MMIO page; acknowledgement is a single W1C store.
             unsafe {
-                core::ptr::write_volatile((base + VIRTIO_MMIO_INTERRUPT_ACK) as *mut u32, status)
+                let ack_ptr = PhysAddr(base + VIRTIO_MMIO_INTERRUPT_ACK)
+                    .direct_map_ptr()
+                    .cast::<u32>();
+                core::ptr::write_volatile(ack_ptr, status)
             };
         }
     }

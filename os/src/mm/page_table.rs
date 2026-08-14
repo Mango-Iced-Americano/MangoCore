@@ -8,10 +8,7 @@
 //! 默认 PTE 修改接口必须自行刷新受影响的 TLB 条目。名字带 `_no_flush`
 //! 的原始接口只允许 `UserMapper` 调用；`MmuGather` 负责把 frame 保留到失效完成。
 
-use super::{
-    FrameTracker, MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
-};
-use alloc::{sync::Arc, vec::Vec};
+use super::{MapPermission, MemoryError, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 
 /// 用户地址访问方向。
 ///
@@ -94,20 +91,36 @@ pub trait PageTable {
     fn map_identical(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: MapPermission) {
         self.map(vpn, ppn, flags)
     }
-    /// 建立一个 2 MiB 的恒等映射。
+    /// 建立一个 2 MiB 映射。
     ///
     /// 默认实现保留 4 KiB 语义；SV39 覆盖此入口以使用二级叶子 PTE。
+    fn try_map_2m(
+        &mut self,
+        start_vpn: VirtPageNum,
+        start_ppn: PhysPageNum,
+        flags: MapPermission,
+    ) -> Result<(), MemoryError> {
+        const PAGES_PER_2M: usize = 512;
+        if start_vpn.0 % PAGES_PER_2M != 0 || start_ppn.0 % PAGES_PER_2M != 0 {
+            return Err(MemoryError::BadAddress);
+        }
+        for offset in 0..PAGES_PER_2M {
+            self.try_map(
+                VirtPageNum(start_vpn.0 + offset),
+                PhysPageNum(start_ppn.0 + offset),
+                flags,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 建立一个 2 MiB 的恒等映射。
     fn try_map_identical_2m(
         &mut self,
         start_vpn: VirtPageNum,
         flags: MapPermission,
     ) -> Result<(), MemoryError> {
-        const PAGES_PER_2M: usize = 512;
-        for offset in 0..PAGES_PER_2M {
-            let vpn = VirtPageNum(start_vpn.0 + offset);
-            self.try_map(vpn, PhysPageNum(vpn.0), flags)?;
-        }
-        Ok(())
+        self.try_map_2m(start_vpn, PhysPageNum(start_vpn.0), flags)
     }
     /// Unmap the `vpn` to `ppn` with the `flags`.
     ///
@@ -224,11 +237,28 @@ pub trait PageTable {
     {
         Self::new()
     }
-    /// 移出页表自身持有的全部页表页，但暂不释放。
+    /// 创建用户页表。架构可从 `kernel_token` 继承 supervisor-only 子树；
+    /// 默认实现继续创建完全独立的页表。
+    fn new_user_space(kernel_token: usize) -> Self
+    where
+        Self: Sized,
+    {
+        let _ = kernel_token;
+        Self::new()
+    }
+
+    /// 预先建立内核动态映射使用的共享页表分支。
     ///
-    /// zombie MM 会把这些 frame 和叶子映射 frame 一起交给 TLB retirement；
-    /// 只有远端 ack 完成后，返回的 Vec 才能被销毁。
-    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>>;
+    /// RV64 用户根只复制顶层 PTE，因此后续动态映射必须修改一个已经共享的
+    /// 下级页表，而不能在发布用户根之后才新建顶层分支。其它架构无需处理。
+    fn prepare_shared_kernel_range(
+        &mut self,
+        start: VirtAddr,
+        end: VirtAddr,
+    ) -> Result<(), MemoryError> {
+        let _ = (start, end);
+        Ok(())
+    }
     /// 从硬件页表 token 构造页表视图。
     ///
     /// # Semantics

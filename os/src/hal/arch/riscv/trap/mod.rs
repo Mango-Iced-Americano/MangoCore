@@ -282,7 +282,6 @@ pub fn trap_return() -> ! {
     } else {
         0
     };
-    set_user_trap_entry();
     // Refresh after signal/exec context changes and on every future migration:
     // the CPU performing this return owns the pointer installed on next trap.
     {
@@ -302,8 +301,9 @@ pub fn trap_return() -> ! {
     );
     // 先登记本 CPU 可能缓存当前 MM，再取得权威 token。后续页表修改方将以
     // 该驻留集合为 shootdown 目标，不能继续只读无锁 token hint。
-    let user_vm = task.process.activate_user_vm();
-    let user_satp = super::sv39::satp_with_asid(user_vm.token, user_vm.asid);
+    // RV switch_mm installs a different root here, before releasing the old
+    // AddressSpace pin.  When the same MM is still active this is a no-op.
+    let _user_vm = task.process.activate_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     if pagefault_return_start != 0 {
         crate::task::perf::record_pagefault_stage(
@@ -314,20 +314,20 @@ pub fn trap_return() -> ! {
     // 安全点、信号递送和 MM 激活都仍属于内核态。必须到真正执行 SRET 前
     // 才闭合 system 区间并开启 user 区间，否则安全点调度出去的时间会被
     // 错算为 user time，并在迁移后归到错误 CPU。
-    let (user_us, system_us) = task
-        .acquire_inner_lock()
-        .update_process_times_enter_user();
+    let (user_us, system_us) = task.acquire_inner_lock().update_process_times_enter_user();
     task.process.account_cpu_time(user_us, system_us);
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
     drop(task);
+    // 从这里到 __restore 不得再等待或临时开中断。若在 ASID rollover 前
+    // 切换 stvec，等待路径收到 IPI 时会把旧 sscratch 当成 TrapContext。
+    set_user_trap_entry();
     unsafe {
         asm!(
             "fence.i",
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_satp,
             options(noreturn)
         );
     }

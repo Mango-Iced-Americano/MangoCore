@@ -3,7 +3,7 @@ title: "陷阱与 syscall 入口 (Trap and Syscall Entry)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-14
 tags: [architecture, trap, syscall, interrupt, smp, asid]
 ---
 
@@ -514,18 +514,25 @@ RISC-V 返回路径：
 
 ```
 let task = do_signal();
-set_user_trap_entry();
 trap_cx.kernel_cpu_local = cpu_local_ptr();
 trap_cx.prepare_return();
 let trap_cx_ptr = task.trap_cx_user_va();
-let user_vm = task.process.activate_user_vm();
+task.process.activate_user_vm();
 let restore_va = __restore - __alltraps + TRAMPOLINE;
 drop(task);
+set_user_trap_entry();
 fence.i;
-jr restore_va(a0=trap_cx_ptr, a1=user_vm.token)
+jr restore_va(a0=trap_cx_ptr)
 ```
 
-`set_user_trap_entry()` 把 `stvec` 设置为 `TRAMPOLINE`。恢复汇编由 trampoline 映射执行。
+`activate_user_vm()` 由 `switch_user_vm()` 在 IRQ-off transaction 中安装 MM-owned
+SATP/ASID/epoch；同一 MM 的普通 trap 返回通常不写 SATP。用户根共享 supervisor-only
+内核分支，所以 trap handler 可继续在当前用户根下执行；`__alltraps` 与 `__restore`
+只保存/恢复现场，不执行 `csrw satp` 或 `sfence.vma`。
+
+`set_user_trap_entry()` 把 `stvec` 设置为 `TRAMPOLINE`。它必须晚于可能临时开放 IRQ 的
+ASID rollover 和所有 Rust 收尾：否则 rollover IPI 会进入用户 trampoline，并把旧
+`sscratch` 错当成当前 `TrapContext`。恢复汇编由 trampoline 映射执行。
 返回前必须把保存态规范为 `SPP=User、SIE=0、SPIE=1`：`__restore` 写入
 `sstatus` 后还要恢复 `sepc` 和通用寄存器，期间仍处于 S-mode；只有最终 `sret`
 才能从 `SPIE` 原子恢复 `SIE`。若保存态提前携带 `SIE=1`，timer/IPI 可在半恢复
@@ -539,7 +546,6 @@ jr restore_va(a0=trap_cx_ptr, a1=user_vm.token)
 #[no_mangle]
 pub fn trap_return() -> ! {
     let task = do_signal();
-    set_user_trap_entry();
     {
         let mut inner = task.acquire_inner_lock();
         let trap_cx = inner.trap_context_mut();
@@ -547,16 +553,17 @@ pub fn trap_return() -> ! {
         trap_cx.prepare_return();
     }
     let trap_cx_ptr = task.trap_cx_user_va();
-    let user_vm = task.process.activate_user_vm();
+    assert!(!sstatus::read().sie());
+    let _user_vm = task.process.activate_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     drop(task);
+    set_user_trap_entry();
     unsafe {
         asm!(
             "fence.i",
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_vm.token,
             options(noreturn)
         );
     }

@@ -99,16 +99,29 @@ pub(super) const MAC_ADDR_ENABLE: u32 = 1 << 31;
 #[inline(always)]
 pub(super) fn read_mmio(base: usize, offset: usize) -> u32 {
     // SAFETY: Categories 6 and 11. Private call sites use documented, aligned
-    // JH7110 register offsets in the kernel's identity-mapped MMIO window.
-    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
+    // JH7110 register offsets in the kernel's supervisor MMIO window.
+    unsafe {
+        core::ptr::read_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+        )
+    }
 }
 
 #[inline(always)]
 pub(super) fn write_mmio(base: usize, offset: usize, value: u32) {
     // SAFETY: Categories 6 and 11. The private base/offset pairs target only
     // aligned documented JH7110 registers or the L2 cache flush trigger in the
-    // identity-mapped MMIO window.
-    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) }
+    // supervisor MMIO window.
+    unsafe {
+        core::ptr::write_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+            value,
+        )
+    }
 }
 
 #[inline(always)]

@@ -231,10 +231,10 @@ impl DwMshcHost {
     fn wait_clear(&self, register: usize, mask: u32, timeout_ms: usize, error: DwMshcError) -> Result<(), DwMshcError> { let deadline = timer::get_time_ms().saturating_add(timeout_ms); while self.read(register) & mask != 0 { if timer::get_time_ms() >= deadline { return Err(error); } core::hint::spin_loop(); } Ok(()) }
     fn wait_command_status(&self, index: u8) -> Result<u32, DwMshcError> { let deadline = timer::get_time_ms().saturating_add(500); loop { let status = self.read(RINTSTS); if status & INT_RTO != 0 { return Err(DwMshcError::CommandTimeout(index)); } if status & (INT_RCRC | INT_RESP_ERR) != 0 { return Err(DwMshcError::ResponseCrc(index)); } if status & INT_HLE != 0 { return Err(DwMshcError::HardwareLocked); } if status & INT_CMD_DONE != 0 { return Ok(status); } if timer::get_time_ms() >= deadline { return Err(DwMshcError::CommandTimeout(index)); } core::hint::spin_loop(); } }
     #[inline(always)] fn read(&self, offset: usize) -> u32 { // SAFETY: Categories 6 and 11. Discovery validates the aligned controller MMIO range before construction.
-        unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) }
+        unsafe { core::ptr::read_volatile(crate::mm::PhysAddr(self.base + offset).direct_map_ptr().cast::<u32>()) }
     }
     #[inline(always)] fn write(&self, offset: usize, value: u32) { // SAFETY: Categories 6 and 11. This private API uses only aligned DesignWare register offsets.
-        unsafe { core::ptr::write_volatile((self.base + offset) as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(crate::mm::PhysAddr(self.base + offset).direct_map_ptr().cast::<u32>(), value) }
     }
 }
 

@@ -8,6 +8,7 @@
 //! PTE 修改通过 `KernelMapper` 进入页表实现。新增直接页表操作时必须保持架构层
 //! 的 TLB 刷新契约。
 
+#[cfg(not(target_arch = "riscv64"))]
 use super::frame_allocator::for_each_usable_frame_region;
 use super::kernel_mapper::KernelMapper;
 use super::{
@@ -32,6 +33,7 @@ extern "C" {
     fn edata();
     fn sbss_with_stack();
     fn ebss();
+    #[cfg(not(target_arch = "riscv64"))]
     fn ekernel();
     fn strampoline();
 }
@@ -43,16 +45,24 @@ extern "C" {
 /// table may legally map the same VA to a different physical page.  Keep such
 /// mappings in the reserved kernel ASID 0 while retaining `G` for disjoint
 /// kernel-only ranges.  Other architectures keep their established policy.
+#[cfg(not(target_arch = "riscv64"))]
 fn kernel_identity_permissions(
     _start: usize,
     _end: usize,
     permissions: MapPermission,
 ) -> MapPermission {
-    #[cfg(target_arch = "riscv64")]
-    if _start < USER_VA_END && USER_VA_BASE < _end {
-        return permissions;
-    }
+    let _ = (_start, _end);
     permissions | MapPermission::G
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_physmap_addr(address: usize) -> usize {
+    assert!(
+        address <= MEMORY_HIGH_SIZE,
+        "physical address {:#x} exceeds the 64 GiB RISC-V physmap",
+        address
+    );
+    MEMORY_HIGH_BASE + address
 }
 
 lazy_static! {
@@ -93,7 +103,6 @@ struct KernelMapping {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum KernelMappingKind {
-    Generic,
     KernelStack,
     Program,
 }
@@ -205,21 +214,21 @@ impl<T: PageTable> KernelSpace<T> {
         let edata = edata as *const () as usize;
         let sbss_with_stack = sbss_with_stack as *const () as usize;
         let ebss = ebss as *const () as usize;
+        #[cfg(not(target_arch = "riscv64"))]
         let ekernel = ekernel as *const () as usize;
         boot_trace!(".text [{:#x}, {:#x})", stext, etext);
         boot_trace!(".rodata [{:#x}, {:#x})", srodata, erodata);
         boot_trace!(".data [{:#x}, {:#x})", sdata, edata);
-        boot_trace!(
-            ".bss [{:#x}, {:#x})",
-            sbss_with_stack,
-            ebss
-        );
+        boot_trace!(".bss [{:#x}, {:#x})", sbss_with_stack, ebss);
         macro_rules! kernel_map {
             ($begin:expr,$end:expr,$permission:expr) => {
                 KernelMapper::new(&mut kernel_space.page_table)
                     .map_range(
                         ($begin as usize).into(),
-                        crate::mm::PhysAddr::from(crate::hal::boot::kernel_linked_to_phys($begin as usize)).floor(),
+                        crate::mm::PhysAddr::from(crate::hal::boot::kernel_linked_to_phys(
+                            $begin as usize,
+                        ))
+                        .floor(),
                         ($end as usize).into(),
                         $permission,
                     )
@@ -230,6 +239,7 @@ impl<T: PageTable> KernelSpace<T> {
                 kernel_map!($begin, $end, $permission);
             };
         }
+        #[cfg(not(target_arch = "riscv64"))]
         macro_rules! kernel_identical_map {
             ($begin:expr,$end:expr,$permission:expr) => {
                 KernelMapper::new(&mut kernel_space.page_table)
@@ -251,7 +261,12 @@ impl<T: PageTable> KernelSpace<T> {
             etext,
             MapPermission::R | MapPermission::X | MapPermission::G
         );
-        kernel_map!(".rodata section", srodata, erodata, MapPermission::R);
+        kernel_map!(
+            ".rodata section",
+            srodata,
+            erodata,
+            MapPermission::R | MapPermission::G
+        );
         kernel_map!(
             ".data section",
             sdata,
@@ -264,6 +279,25 @@ impl<T: PageTable> KernelSpace<T> {
             ebss,
             MapPermission::R | MapPermission::W | MapPermission::G
         );
+        #[cfg(target_arch = "riscv64")]
+        for &(start, end) in crate::hal::firmware::memory_regions() {
+            boot_trace!(
+                "mapping physical memory [{:#x}, {:#x}) at [{:#x}, {:#x})",
+                start,
+                end,
+                riscv_physmap_addr(start),
+                riscv_physmap_addr(end)
+            );
+            KernelMapper::new(&mut kernel_space.page_table)
+                .map_unmapped_range(
+                    VirtAddr::from(riscv_physmap_addr(start)),
+                    PhysAddr::from(start).floor(),
+                    VirtAddr::from(riscv_physmap_addr(end)),
+                    MapPermission::R | MapPermission::W | MapPermission::G,
+                )
+                .unwrap();
+        }
+        #[cfg(not(target_arch = "riscv64"))]
         for_each_usable_frame_region(|start, end| {
             let start = start.start_addr().0;
             let end = end.start_addr().0;
@@ -277,15 +311,21 @@ impl<T: PageTable> KernelSpace<T> {
 
         boot_trace!("mapping memory-mapped registers");
         for &(base, end) in crate::hal::firmware::early_mmio_ranges() {
+            #[cfg(target_arch = "riscv64")]
+            KernelMapper::new(&mut kernel_space.page_table)
+                .map_unmapped_range(
+                    VirtAddr::from(riscv_physmap_addr(base)),
+                    PhysAddr::from(base).floor(),
+                    VirtAddr::from(riscv_physmap_addr(end)),
+                    MapPermission::R | MapPermission::W | MapPermission::G,
+                )
+                .unwrap();
+            #[cfg(not(target_arch = "riscv64"))]
             KernelMapper::new(&mut kernel_space.page_table)
                 .map_unmapped_identical_range(
                     VirtAddr::from(base),
                     VirtAddr::from(end),
-                    kernel_identity_permissions(
-                        base,
-                        end,
-                        MapPermission::R | MapPermission::W,
-                    ),
+                    kernel_identity_permissions(base, end, MapPermission::R | MapPermission::W),
                 )
                 .unwrap();
         }
@@ -293,6 +333,7 @@ impl<T: PageTable> KernelSpace<T> {
         // Map firmware reserved regions (DTB, initrd) as read-only.
         // These pages are not in the frame allocator but must remain
         // accessible for post-heap firmware description parsing.
+        #[cfg(not(target_arch = "riscv64"))]
         for &(base, end) in crate::hal::firmware::firmware_reserved_regions() {
             // QEMU can place the DTB entirely inside the kernel BSS. That
             // range is already mapped above with kernel write permissions.
@@ -306,6 +347,26 @@ impl<T: PageTable> KernelSpace<T> {
                 end,
                 kernel_identity_permissions(base, end, MapPermission::R)
             );
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            // User roots copy only top-level entries.  Pre-create the roots of
+            // every dynamic shared arena before the first process page table
+            // exists, so later stack/program PTE updates remain visible.
+            kernel_space
+                .page_table
+                .prepare_shared_kernel_range(
+                    VirtAddr::from(KERNEL_PROGRAM_BASE),
+                    VirtAddr::from(KERNEL_PROGRAM_END),
+                )
+                .unwrap();
+            kernel_space
+                .page_table
+                .prepare_shared_kernel_range(
+                    VirtAddr::from(KERNEL_STACK_BOTTOM),
+                    VirtAddr::from(KERNEL_STACK_TOP),
+                )
+                .unwrap();
         }
         kernel_space
     }
@@ -330,16 +391,6 @@ impl<T: PageTable> KernelSpace<T> {
 
     pub fn activate(&self) {
         self.page_table.activate()
-    }
-
-    pub fn insert_framed_area(
-        &mut self,
-        start_va: VirtAddr,
-        end_va: VirtAddr,
-        permission: MapPermission,
-    ) {
-        self.try_insert_framed_area(start_va, end_va, permission, KernelMappingKind::Generic)
-            .unwrap();
     }
 
     pub fn insert_kernel_stack_area(
@@ -434,6 +485,8 @@ impl<T: PageTable> KernelSpace<T> {
         }
         self.kernel_mappings.try_reserve(1)?;
 
+        #[cfg(target_arch = "riscv64")]
+        let permission = permission | MapPermission::G;
         let mut mapped_vpns = Vec::new();
         mapped_vpns
             .try_reserve(frames.len())
@@ -495,7 +548,11 @@ impl<T: PageTable> KernelSpace<T> {
     }
 
     pub fn is_dirty(&self, ppn: PhysPageNum) -> Option<bool> {
-        self.page_table.is_dirty((ppn.0).into())
+        #[cfg(target_arch = "riscv64")]
+        let vpn = VirtAddr::from(PhysAddr::from(ppn).direct_map_addr()).floor();
+        #[cfg(not(target_arch = "riscv64"))]
+        let vpn = (ppn.0).into();
+        self.page_table.is_dirty(vpn)
     }
 
     fn rollback_mapped_pages(&mut self, mapped_vpns: &[VirtPageNum]) {
@@ -532,21 +589,12 @@ pub(crate) fn remove_kernel_mapping_synchronized(
 #[allow(unused)]
 pub fn remap_test() {
     let kernel_space = KERNEL_SPACE.lock();
-    let mid_text: VirtAddr = ((
-        stext as *const () as usize
-            + etext as *const () as usize
-    ) / 2)
-        .into();
-    let mid_rodata: VirtAddr = ((
-        srodata as *const () as usize
-            + erodata as *const () as usize
-    ) / 2)
-        .into();
-    let mid_data: VirtAddr = ((
-        sdata as *const () as usize
-            + edata as *const () as usize
-    ) / 2)
-        .into();
+    let mid_text: VirtAddr =
+        ((stext as *const () as usize + etext as *const () as usize) / 2).into();
+    let mid_rodata: VirtAddr =
+        ((srodata as *const () as usize + erodata as *const () as usize) / 2).into();
+    let mid_data: VirtAddr =
+        ((sdata as *const () as usize + edata as *const () as usize) / 2).into();
     assert_eq!(
         kernel_space.page_table.writable(mid_text.floor()).unwrap(),
         false

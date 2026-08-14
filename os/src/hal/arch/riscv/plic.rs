@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::hal::platform::{self, DeviceKind};
+use crate::mm::PhysAddr;
 
 /// Maximum PLIC source ID accepted by the static callback table.
 ///
@@ -190,14 +191,13 @@ fn record_unhandled_irq(irq: usize) {
 
 #[inline(always)]
 fn read_register(address: usize) -> u32 {
-    // SAFETY: PLIC setup validates that all generated register addresses are
-    // aligned and lie in the FDT-described identity-mapped controller range.
-    unsafe { core::ptr::read_volatile(address as *const u32) }
+    // SAFETY: PLIC setup validates that all generated physical register
+    // addresses are aligned and covered by the supervisor MMIO map.
+    unsafe { core::ptr::read_volatile(PhysAddr(address).direct_map_ptr().cast::<u32>()) }
 }
 
 #[inline(always)]
 fn write_register(address: usize, value: u32) {
-    // SAFETY: PLIC setup validates that all generated register addresses are
-    // aligned and lie in the FDT-described identity-mapped controller range.
-    unsafe { core::ptr::write_volatile(address as *mut u32, value) }
+    // SAFETY: same validated supervisor MMIO mapping as read_register.
+    unsafe { core::ptr::write_volatile(PhysAddr(address).direct_map_ptr().cast::<u32>(), value) }
 }
