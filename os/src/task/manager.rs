@@ -395,9 +395,10 @@ pub(crate) fn try_publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) -> Re
     );
 
     if cpu != crate::smp::cpu_id() {
-        crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
-            panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
-        });
+        crate::smp::synchronize_kernel_mapping(cpu, crate::smp::KernelTlbSyncReason::TaskPublish)
+            .unwrap_or_else(|error| {
+                panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
+            });
     }
     let published = process.publish_thread(&task, || super::run_queue::publish(task.clone(), cpu));
     if !published {
@@ -811,7 +812,11 @@ pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> 
                 // 排除 owner 时才需要预先发布目标内核栈映射。不能持
                 // 请求槽锁等待 TLB ack；同步期间的状态变化由下方锁内复核处理。
                 if let Some(target) = target {
-                    crate::smp::synchronize_kernel_mapping(target).unwrap_or_else(|error| {
+                    crate::smp::synchronize_kernel_mapping(
+                        target,
+                        crate::smp::KernelTlbSyncReason::TaskMigration,
+                    )
+                    .unwrap_or_else(|error| {
                         panic!(
                             "failed to synchronize remote task {} stack to CPU {}: {:?}",
                             task.gettid(),

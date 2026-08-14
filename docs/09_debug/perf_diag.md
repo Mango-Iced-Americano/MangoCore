@@ -220,6 +220,9 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `tlb_shootdown_sync_ticks_{total,max}` | counter/max | 发起侧等待远端同步的累计/最大 raw timebase tick；跨 CPU 求和，不等同 wall time |
 | `tlb_shootdown_<backend>_ticks_{total,max}` | counter/max | 按上述五个最终 backend 拆分的累计/最大 raw ticks；仅在 `memory_io` 记录窗口增长 |
 | `tlb_rfence_bucket_<range>_{calls,ticks,pages,targets}` | histogram | SBI RFENCE range 延迟桶及每桶累计耗时、页数、远端 hart fanout；仅在 `memory_io` 记录窗口增长 |
+| `tlb_kernel_reason_<reason>_{calls,targets,ticks_total,ticks_max}` | counter/max | kernel-global shootdown 按 `task_publish`、`task_migration`、`mapping_retire` 拆分 |
+| `tlb_kernel_bucket_<range>_{calls,ticks,targets}` | histogram | kernel-global shootdown 的延迟、累计耗时和 fanout 分桶 |
+| `tlb_kernel_reason_<reason>_bucket_<range>_calls` | histogram | 各 kernel-global 原因在相同延迟桶内的调用次数 |
 | `tlb_shootdown_{failures,clock_freq_hz}` | counter/gauge | 同步失败数与 ticks 换算频率 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
@@ -245,6 +248,10 @@ RFENCE 延迟桶边界是 `<=1000`、`<=10000`、`<=100000`、`<=1000000`、
 `tlb_shootdown_clock_freq_hz` 换算；例如 10 MHz timebase 下依次为 `<=0.1 ms`、
 `<=1 ms`、`<=10 ms`、`<=100 ms`、`<=1 s`、`>1 s`。每桶 `pages/calls` 与
 `targets/calls` 可区分大 range/fanout 和工作量正常但等待异常的固件/MTTCG 长尾。
+kernel-global 统计复用相同 raw tick 桶。`task_publish` 表示新任务内核栈映射向远端 CPU
+发布，`task_migration` 包括 affinity/migration/steal 的目标栈同步，`mapping_retire`
+表示动态 kernel mapping 撤销后的全 CPU 失效；目标为当前 CPU 的本地同步不会进入远端
+`kernel_full` 计数。
 
 `clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
 

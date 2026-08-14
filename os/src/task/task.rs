@@ -959,7 +959,11 @@ impl TaskControlBlock {
         // 目标栈映射必须先完成；在此之前既不发布新 mask，也不发布迁移目标，
         // 远端 CPU 因而不可能提前取得该任务。
         if let Some(target_cpu) = target_cpu {
-            crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
+            crate::smp::synchronize_kernel_mapping(
+                target_cpu,
+                crate::smp::KernelTlbSyncReason::TaskMigration,
+            )
+            .unwrap_or_else(|error| {
                 panic!(
                     "failed to synchronize task {} kernel stack to CPU {}: {:?}",
                     self.gettid(),
@@ -1074,7 +1078,11 @@ impl TaskControlBlock {
             ),
         }
 
-        crate::smp::synchronize_kernel_mapping(target_cpu).unwrap_or_else(|error| {
+        crate::smp::synchronize_kernel_mapping(
+            target_cpu,
+            crate::smp::KernelTlbSyncReason::TaskMigration,
+        )
+        .unwrap_or_else(|error| {
             panic!(
                 "failed to synchronize task {} kernel stack to CPU {}: {:?}",
                 self.gettid(),

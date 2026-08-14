@@ -1553,3 +1553,22 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   CPU 参数显式关闭扩展后，必须打印并使用 fallback，且 timer/SMP 等相关用例两边都通过。
   长测 A/B 若同时包含多个修复，只能报告合并包效果；没有中间 variant 时不得拆分贡献。
 - **相关文件**：`os/src/hal/arch/riscv/time.rs`、`os/src/hal/arch/riscv/sbi.rs`
+
+## 全局 shootdown 的 backend 归因后还要闭合语义原因、fanout 和延迟桶
+
+- **现象**：按最终 backend 拆分后，`kernel_full` 占据绝大多数同步等待且出现秒级 max；仅看
+  backend 会把所有 kernel-global 更新混在一起，无法判断是新映射发布、任务迁移，还是全 CPU
+  动态映射回收，也容易把少量极端等待误认为每次 full flush 都昂贵。
+- **做法**：在最靠近调用点的位置携带只用于诊断的语义原因，并对每个原因同时累计 calls、
+  remote targets、total/max ticks；全局与逐原因复用同一延迟桶。验收时要求“backend calls =
+  原因 calls 之和 = 全局 bucket calls 之和”，每个原因的 bucket 也必须闭合。目标为当前 CPU 的
+  本地同步要明确排除，避免混入远端协议。
+- **判据**：`targets/calls=1` 且 total 主要集中在少量长尾桶，说明瓶颈是单个目标 hart 的
+  ack/调度尾部，不是大 fanout；若 retire 原因的 fanout 接近 online CPU 数，才优先优化广播或
+  回收批量。一次 BuildStorm 样本中 283/283 次 kernel full 均为单目标 `task_publish`，其中仅
+  14 次超过 100 ms 却贡献 91.3% 的该路径等待，验证了该区分的必要性。
+- **安全边界**：原因标签本身不得改变同步协议。后续旁路只能针对已证明的 PTE 转换类别和硬件
+  能力门禁，例如全 CPU 都支持 Svvptc 时的严格 invalid→valid 发布；unmap、权限/PPN 变化和
+  mapping retire 必须保留失效。先做原因闭合，再设计单变量 bypass A/B。
+- **相关文件**：`os/src/smp.rs`、`os/src/task/manager.rs`、`os/src/task/run_queue.rs`、
+  `os/src/task/task.rs`、`os/src/fs/sysfs/files/diag.rs`

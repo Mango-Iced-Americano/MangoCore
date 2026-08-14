@@ -369,7 +369,11 @@ fn steal(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     // 由当前调用方唯一持有；同步失败表示正在运行的 thief CPU 破坏了调度不变量，
     // 因此保持 fail-stop，不把半迁移任务回滚到已经变化的远端队列。
     let ktlb_start = crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
-    crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
+    crate::smp::synchronize_kernel_mapping(
+        cpu,
+        crate::smp::KernelTlbSyncReason::TaskMigration,
+    )
+    .unwrap_or_else(|error| {
         panic!(
             "failed to synchronize stolen task {} stack on CPU {}: {:?}",
             task.gettid(),
@@ -423,7 +427,11 @@ pub(crate) fn set_queued_affinity(
 
             // 必须在取得源 rq 锁、更不能在进入 Migrating 后等待 shootdown；
             // 同步失败时任务仍完整地留在原队列和旧 mask 下。
-            crate::smp::synchronize_kernel_mapping(target).unwrap_or_else(|error| {
+            crate::smp::synchronize_kernel_mapping(
+                target,
+                crate::smp::KernelTlbSyncReason::TaskMigration,
+            )
+            .unwrap_or_else(|error| {
                 panic!(
                     "failed to synchronize queued task {} stack to CPU {}: {:?}",
                     task.gettid(),

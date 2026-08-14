@@ -695,7 +695,7 @@ fn stats_tlb_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(3072);
+    let mut s = String::with_capacity(6144);
     let remote = crate::smp::tlb_diagnostics();
     let _ = writeln!(
         s,
@@ -770,6 +770,56 @@ fn stats_tlb_content(
             s,
             "tlb_rfence_bucket_{}_targets={}",
             name, remote.rfence_bucket_targets[index]
+        );
+    }
+    for reason in 0..crate::smp::KERNEL_TLB_REASON_COUNT {
+        let name = crate::smp::KERNEL_TLB_REASON_NAMES[reason];
+        let _ = writeln!(
+            s,
+            "tlb_kernel_reason_{}_calls={}",
+            name, remote.kernel_reason_calls[reason]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_kernel_reason_{}_targets={}",
+            name, remote.kernel_reason_targets[reason]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_kernel_reason_{}_ticks_total={}",
+            name, remote.kernel_reason_ticks_total[reason]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_kernel_reason_{}_ticks_max={}",
+            name, remote.kernel_reason_ticks_max[reason]
+        );
+        for bucket in 0..crate::smp::TLB_RFENCE_BUCKET_COUNT {
+            let bucket_name = crate::smp::TLB_RFENCE_BUCKET_NAMES[bucket];
+            let flat = reason * crate::smp::TLB_RFENCE_BUCKET_COUNT + bucket;
+            let _ = writeln!(
+                s,
+                "tlb_kernel_reason_{}_bucket_{}_calls={}",
+                name, bucket_name, remote.kernel_reason_bucket_calls[flat]
+            );
+        }
+    }
+    for bucket in 0..crate::smp::TLB_RFENCE_BUCKET_COUNT {
+        let name = crate::smp::TLB_RFENCE_BUCKET_NAMES[bucket];
+        let _ = writeln!(
+            s,
+            "tlb_kernel_bucket_{}_calls={}",
+            name, remote.kernel_bucket_calls[bucket]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_kernel_bucket_{}_ticks={}",
+            name, remote.kernel_bucket_ticks[bucket]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_kernel_bucket_{}_targets={}",
+            name, remote.kernel_bucket_targets[bucket]
         );
     }
     let _ = writeln!(

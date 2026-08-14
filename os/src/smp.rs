@@ -38,6 +38,11 @@ pub(crate) const TLB_RFENCE_BUCKET_NAMES: [&str; TLB_RFENCE_BUCKET_COUNT] = [
     "le_10000000",
     "gt_10000000",
 ];
+#[allow(dead_code)]
+pub(crate) const KERNEL_TLB_REASON_COUNT: usize = 3;
+#[allow(dead_code)]
+pub(crate) const KERNEL_TLB_REASON_NAMES: [&str; KERNEL_TLB_REASON_COUNT] =
+    ["task_publish", "task_migration", "mapping_retire"];
 #[cfg(feature = "perf_stats")]
 const TLB_RFENCE_BUCKET_UPPER_TICKS: [usize; TLB_RFENCE_BUCKET_COUNT - 1] =
     [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
@@ -101,6 +106,24 @@ struct PerCpu {
     tlb_rfence_bucket_pages: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
     #[cfg(feature = "perf_stats")]
     tlb_rfence_bucket_targets: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    /// kernel-global shootdown 按调用原因和延迟分桶归因。
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_calls: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_targets: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_ticks_total: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_ticks_max: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_calls: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_ticks: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_targets: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_bucket_calls:
+        [AtomicUsize; KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
     /// 本 CPU 必须执行的 membarrier 完整内存屏障序号。
     memory_barrier_request: AtomicUsize,
     /// 本 CPU 执行完整内存屏障后发布的对应确认序号。
@@ -169,6 +192,25 @@ impl PerCpu {
             tlb_rfence_bucket_pages: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
             #[cfg(feature = "perf_stats")]
             tlb_rfence_bucket_targets: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_calls: [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_targets: [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_ticks_total: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_ticks_max: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_calls: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_ticks: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_targets: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_bucket_calls: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
             memory_barrier_request: AtomicUsize::new(0),
             memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
@@ -246,6 +288,15 @@ pub(crate) struct TlbDiagnostics {
     pub(crate) rfence_bucket_ticks: [usize; TLB_RFENCE_BUCKET_COUNT],
     pub(crate) rfence_bucket_pages: [usize; TLB_RFENCE_BUCKET_COUNT],
     pub(crate) rfence_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_reason_calls: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_targets: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_ticks_total: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_ticks_max: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_bucket_calls: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_bucket_ticks: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_reason_bucket_calls:
+        [usize; KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
 }
 
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
@@ -505,7 +556,7 @@ pub(crate) enum UserTlbSyncError {
 /// 五个分支互斥，避免把“原生全刷”和“精准请求退化为全刷”混在同一计数里。
 #[derive(Clone, Copy)]
 enum TlbShootdownKind {
-    KernelFull,
+    KernelFull { reason: KernelTlbSyncReason },
     UserFull,
     UserRangeFirmware { pages: usize },
     UserRangeIpi { pages: usize },
@@ -516,7 +567,7 @@ enum TlbShootdownKind {
 impl TlbShootdownKind {
     const fn index(self) -> usize {
         match self {
-            Self::KernelFull => 0,
+            Self::KernelFull { .. } => 0,
             Self::UserFull => 1,
             Self::UserRangeFirmware { .. } => 2,
             Self::UserRangeIpi { .. } => 3,
@@ -526,7 +577,7 @@ impl TlbShootdownKind {
 }
 
 #[cfg(feature = "perf_stats")]
-fn rfence_latency_bucket(elapsed: usize) -> usize {
+fn tlb_latency_bucket(elapsed: usize) -> usize {
     TLB_RFENCE_BUCKET_UPPER_TICKS
         .iter()
         .position(|upper| elapsed <= *upper)
@@ -545,7 +596,10 @@ fn record_tlb_shootdown(
     debug_assert_ne!(remote_targets, 0);
     let local = &PER_CPUS[self::cpu_id()];
     match kind {
-        TlbShootdownKind::KernelFull => &local.tlb_kernel_full,
+        TlbShootdownKind::KernelFull { reason } => {
+            let _ = reason;
+            &local.tlb_kernel_full
+        }
         TlbShootdownKind::UserFull => &local.tlb_user_full,
         TlbShootdownKind::UserRangeFirmware { pages } => {
             local
@@ -584,12 +638,48 @@ fn record_tlb_shootdown(
         local.tlb_sync_ticks_by_kind_total[kind_index].fetch_add(elapsed, Ordering::Relaxed);
         local.tlb_sync_ticks_by_kind_max[kind_index].fetch_max(elapsed, Ordering::Relaxed);
         if let TlbShootdownKind::UserRangeFirmware { pages } = kind {
-            let bucket = rfence_latency_bucket(elapsed);
+            let bucket = tlb_latency_bucket(elapsed);
             local.tlb_rfence_bucket_calls[bucket].fetch_add(1, Ordering::Relaxed);
             local.tlb_rfence_bucket_ticks[bucket].fetch_add(elapsed, Ordering::Relaxed);
             local.tlb_rfence_bucket_pages[bucket].fetch_add(pages, Ordering::Relaxed);
             local.tlb_rfence_bucket_targets[bucket]
                 .fetch_add(remote_target_count, Ordering::Relaxed);
+        }
+        if let TlbShootdownKind::KernelFull { reason } = kind {
+            let reason_index = reason.index();
+            let bucket = tlb_latency_bucket(elapsed);
+            local.kernel_tlb_reason_calls[reason_index].fetch_add(1, Ordering::Relaxed);
+            local.kernel_tlb_reason_targets[reason_index]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+            local.kernel_tlb_reason_ticks_total[reason_index]
+                .fetch_add(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_reason_ticks_max[reason_index].fetch_max(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_bucket_calls[bucket].fetch_add(1, Ordering::Relaxed);
+            local.kernel_tlb_bucket_ticks[bucket].fetch_add(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_bucket_targets[bucket]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+            local.kernel_tlb_reason_bucket_calls
+                [reason_index * TLB_RFENCE_BUCKET_COUNT + bucket]
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// kernel-global shootdown 的上层触发原因；只影响诊断，不改变同步协议。
+#[derive(Clone, Copy)]
+pub(crate) enum KernelTlbSyncReason {
+    TaskPublish,
+    TaskMigration,
+    MappingRetire,
+}
+
+#[cfg(feature = "perf_stats")]
+impl KernelTlbSyncReason {
+    const fn index(self) -> usize {
+        match self {
+            Self::TaskPublish => 0,
+            Self::TaskMigration => 1,
+            Self::MappingRetire => 2,
         }
     }
 }
@@ -805,6 +895,28 @@ pub(crate) fn tlb_diagnostics() -> TlbDiagnostics {
                 .wrapping_add(cpu.tlb_rfence_bucket_pages[index].load(Ordering::Relaxed));
             total.rfence_bucket_targets[index] = total.rfence_bucket_targets[index]
                 .wrapping_add(cpu.tlb_rfence_bucket_targets[index].load(Ordering::Relaxed));
+            total.kernel_bucket_calls[index] = total.kernel_bucket_calls[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_calls[index].load(Ordering::Relaxed));
+            total.kernel_bucket_ticks[index] = total.kernel_bucket_ticks[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_ticks[index].load(Ordering::Relaxed));
+            total.kernel_bucket_targets[index] = total.kernel_bucket_targets[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_targets[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..KERNEL_TLB_REASON_COUNT {
+            total.kernel_reason_calls[index] = total.kernel_reason_calls[index]
+                .wrapping_add(cpu.kernel_tlb_reason_calls[index].load(Ordering::Relaxed));
+            total.kernel_reason_targets[index] = total.kernel_reason_targets[index]
+                .wrapping_add(cpu.kernel_tlb_reason_targets[index].load(Ordering::Relaxed));
+            total.kernel_reason_ticks_total[index] = total.kernel_reason_ticks_total[index]
+                .wrapping_add(cpu.kernel_tlb_reason_ticks_total[index].load(Ordering::Relaxed));
+            total.kernel_reason_ticks_max[index] = total.kernel_reason_ticks_max[index]
+                .max(cpu.kernel_tlb_reason_ticks_max[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT {
+            total.kernel_reason_bucket_calls[index] = total.kernel_reason_bucket_calls[index]
+                .wrapping_add(cpu.kernel_tlb_reason_bucket_calls[index].load(Ordering::Relaxed));
         }
     }
     total
@@ -840,6 +952,30 @@ pub(crate) fn reset_tlb_diagnostics() {
             counter.store(0, Ordering::Relaxed);
         }
         for counter in &cpu.tlb_rfence_bucket_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_ticks_total {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_ticks_max {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_ticks {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_bucket_calls {
             counter.store(0, Ordering::Relaxed);
         }
     }
@@ -1219,6 +1355,7 @@ pub(crate) fn synchronize_memory(targets: usize) -> Result<(), MemoryBarrierErro
 fn synchronize_kernel_mapping_mask(
     targets: usize,
     stopped_is_ack: bool,
+    reason: KernelTlbSyncReason,
 ) -> Result<(), KernelTlbSyncError> {
     let configured = expected_online_mask();
     if targets == 0 || targets & !configured != 0 {
@@ -1327,7 +1464,7 @@ fn synchronize_kernel_mapping_mask(
         spin_loop();
     };
     record_tlb_shootdown(
-        TlbShootdownKind::KernelFull,
+        TlbShootdownKind::KernelFull { reason },
         remote,
         started_at,
         result.is_err(),
@@ -1336,17 +1473,20 @@ fn synchronize_kernel_mapping_mask(
 }
 
 /// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
-pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
+pub(crate) fn synchronize_kernel_mapping(
+    cpu_id: usize,
+    reason: KernelTlbSyncReason,
+) -> Result<(), KernelTlbSyncError> {
     if cpu_id >= runtime_cpu_count() {
         return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
     }
-    synchronize_kernel_mapping_mask(1usize << cpu_id, false)
+    synchronize_kernel_mapping_mask(1usize << cpu_id, false, reason)
 }
 
 /// 撤销共享内核映射后，使所有仍可能执行内核代码的 CPU 完成失效。
 pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError> {
     let targets = online_cpu_mask() & !stopped_cpu_mask();
-    synchronize_kernel_mapping_mask(targets, true)
+    synchronize_kernel_mapping_mask(targets, true, KernelTlbSyncReason::MappingRetire)
 }
 
 /// 让调用方选定的 CPU 集合同步完成用户 TLB 失效。
