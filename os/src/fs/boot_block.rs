@@ -206,6 +206,30 @@ fn boot_descriptors() -> Vec<BlockDeviceDescriptor> {
             descriptors.push(BlockDeviceDescriptor::new(node, device));
         }
     }
+
+    // 官方 basic 二进制仍把 scratch 分区硬编码为 /dev/vda2，而当前双盘合同
+    // 已固定 x0(root)=vda、x1(tools+scratch)=vdb。仅当系统没有真实 vda2 且
+    // canonical vdb2 存在时发布同一分区的兼容别名；LTP 继续使用权威 vdb2。
+    let has_vda2 = descriptors
+        .iter()
+        .any(|descriptor| descriptor.node().name().as_str() == "vda2");
+    let scratch = descriptors
+        .iter()
+        .find(|descriptor| descriptor.node().name().as_str() == "vdb2")
+        .cloned();
+    if !has_vda2 {
+        if let Some(scratch) = scratch {
+            if let Some(number) = allocator.allocate(scratch.node().number().major()) {
+                if let Ok(node) = BlockDeviceNode::new("vda2", number) {
+                    println!("[mbr] publishing legacy scratch alias vda2 -> vdb2");
+                    descriptors.push(BlockDeviceDescriptor::new(
+                        node,
+                        scratch.device().clone(),
+                    ));
+                }
+            }
+        }
+    }
     descriptors
 }
 

@@ -308,6 +308,9 @@ use crate::{
     timer::{ITimerVal, TimeSpec, TimeVal, Times},
 };
 
+#[cfg(feature = "riscv")]
+use crate::mm::{check_user_range, UserPtrMut};
+
 /// Log each unknown syscall id exactly once (first hit) to stop rseq/fsopen spam.
 static REPORTED_UNSUPPORTED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
@@ -1128,12 +1131,78 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: u32) -> isize {
 }
 
 #[cfg(feature = "riscv")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RiscvHwprobe {
+    key: i64,
+    value: u64,
+}
+
+#[cfg(feature = "riscv")]
+const _: () = assert!(core::mem::size_of::<RiscvHwprobe>() == 16);
+
+#[cfg(feature = "riscv")]
+const RISCV_HWPROBE_KEY_BASE_BEHAVIOR: i64 = 3;
+#[cfg(feature = "riscv")]
+const RISCV_HWPROBE_BASE_BEHAVIOR_IMA: u64 = 1 << 0;
+#[cfg(feature = "riscv")]
+const RISCV_HWPROBE_KEY_IMA_EXT_0: i64 = 4;
+
+#[cfg(feature = "riscv")]
 pub fn sys_riscv_hwprobe(
-    _pairs: *const u8,
-    _count: usize,
-    _cpusetsize: usize,
-    _cpuset: usize,
-    _flags: usize,
+    pairs: *const u8,
+    count: usize,
+    cpusetsize: usize,
+    cpuset: usize,
+    flags: usize,
 ) -> isize {
-    errno::ENOSYS
+    // This conservative subset supports the all-online-CPUs query used by
+    // QEMU's host feature detection.  Do not claim support for CPU-mask or
+    // RISCV_HWPROBE_WHICH_CPUS semantics until MangoCore exposes that ABI.
+    if flags != 0 || cpusetsize != 0 || cpuset != 0 {
+        return errno::EINVAL;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    let byte_len = match count.checked_mul(core::mem::size_of::<RiscvHwprobe>()) {
+        Some(len) => len,
+        None => return errno::EFAULT,
+    };
+    if let Err(errno) = check_user_range(pairs as usize, byte_len) {
+        return errno;
+    }
+
+    let token = current_user_token();
+    for index in 0..count {
+        let pair_addr = pairs as usize + index * core::mem::size_of::<RiscvHwprobe>();
+        let user_pair = UserPtrMut::<RiscvHwprobe>::from_addr(pair_addr);
+        let mut pair = match user_pair.read(token) {
+            Ok(pair) => pair,
+            Err(errno) => return errno,
+        };
+
+        match pair.key {
+            RISCV_HWPROBE_KEY_BASE_BEHAVIOR => {
+                pair.value = RISCV_HWPROBE_BASE_BEHAVIOR_IMA;
+            }
+            RISCV_HWPROBE_KEY_IMA_EXT_0 => {
+                // Report no optional extensions.  False negatives only
+                // disable optimized host helpers; false positives could make
+                // QEMU execute an instruction unsupported by the outer CPU.
+                pair.value = 0;
+            }
+            _ => {
+                // Linux marks unsupported keys by replacing key with -1.
+                pair.key = -1;
+                pair.value = 0;
+            }
+        }
+
+        if let Err(errno) = user_pair.write(token, &pair) {
+            return errno;
+        }
+    }
+    0
 }

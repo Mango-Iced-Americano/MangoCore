@@ -1588,7 +1588,6 @@
 - **生命周期**：后备对象不只要保存 PageCache 配方，还要强持有源 inode 并保持 ETXTBSY。该 `Arc` 必须在 VMA clone/split/fork 中保留；动态解释器有独立 inode，不能只依赖 PCB 的主 `exe` 引用。
 - **验收**：构造 ELF 地址空间后 entry/BSS 应无 target frame；分别 fault entry 和不同页 BSS，验证文件字节、零填充和“未触发页仍未 resident”。
 - **相关文件**：`os/src/mm/{address_space,filemap,page_fault,vma}.rs`、`os/src/task/process.rs`、`os/src/kernel_tests/mm.rs`
-
 ## 状态修复成功路径不能广播异常事件
 
 - **危险模式**：trap/syscall 先尝试修复状态，随后不看结果就统一通知 signal、poll 或其他
@@ -1600,3 +1599,46 @@
 - **验收**：先用计数证明成功次数远高于错误次数；再覆盖成功 hot path、真实错误信号和
   非信号状态三类。错误测试必须证明 waiter 仍被唤醒，成功测试则确认没有虚假通知。
 - **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/process.rs`
+
+## 多后端文件系统默认 feature 与旧 C FFI 链接隔离
+
+- **现象**: 默认切换到 Rust another_ext4 后，`cargo check` 可以通过，但完整链接仍报告旧 lwext4 的 `ext4_*` undefined symbol。
+- **根因**: 旧后端模块无条件编译；即使后端分派 cfg 选择 another，公开的 lwext4 Rust 包装仍会被链接，而当前构建只为显式 legacy 路径准备 C 静态库。
+- **修复**: 后端分派使用互斥 feature；`ext4_lwext4` 模块、依赖其符号的诊断和 legacy-only kernel tests 均以 `ext4_lwext4_backend` 条件编译。默认 another 构建不携带旧 FFI 符号；显式 `--no-default-features --features ext4_lwext4_backend` 仍单独检查。
+- **教训**: 多实现 trait/后端迁移时，不能只 cfg 入口函数；必须沿模块、诊断、测试和 FFI 符号引用做完整可达性切片。`cargo check` 不经过最终链接，必须额外执行目标架构 release link。
+- **相关文件**: `os/src/fs/mod.rs`, `os/src/fs/ext4_backend.rs`, `os/src/task/perf.rs`, `os/src/fs/sysfs/files/diag.rs`
+
+## JBD2 checksum-v3 descriptor 误读 UUID
+
+- **现象**：Linux 生成的 ext4 镜像具有 `64BIT + CSUM_V3` journal，superblock 和 descriptor checksum 均有效，但 another_ext4 在挂载恢复阶段返回 `EIO`。
+- **根因**：旧式 checksum-none JBD2 tag 在 `SAME_UUID` 清零时带 16 字节 inline UUID；checksum-v2/v3 的固定宽度 tag 不带这个字段。无条件消费 UUID 会把下一 tag 的偏移前移，随后校验或块号解析失败。
+- **修复**：在通用 descriptor parser 和 recovery parser 中仅当 `ChecksumMode::None && SAME_UUID == 0` 时读取 inline UUID；checksum-v2/v3 直接从固定宽度 tag 进入下一项。
+- **教训**：审计日志格式时必须把 feature bit 与字段布局一起判断，不能把 legacy 扩展字段按 flag 单独套用到新 checksum 版本；遇到挂载 `EIO`，先用 `dumpe2fs`/`debugfs logdump` 校验真实 journal feature 和 tag 边界，再做最小独立 block-device probe。
+- **相关文件**: `dependency/another_ext4/src/jbd2.rs`, `dependency/another_ext4/src/ext4/journal_recovery.rs`
+
+## 嵌套 QEMU 启动前卡死时先隔离 CPU 特性探测
+
+- **现象**：用户态 QEMU 的 ELF、动态库和构造器均已装载，却在 `main()` 前不再输出；去掉 `cpuinfo_init` 或 NOP 掉特性探测指令后可以启动同一内核产物。
+- **根因模式**：`riscv_hwprobe(258)` 返回 `ENOSYS` 后，QEMU 会安装 `SA_SIGINFO` SIGILL handler 并执行可选扩展探针。若内核的 signal-frame/ucontext ABI 与 Linux 有偏移，handler 写回的 PC 不会被 `rt_sigreturn` 从同一位置恢复，非法指令便会重复执行。
+- **根因修复**：Linux RISC-V `__riscv_mc_fp_state` 是以 Q 扩展成员决定大小和 16-byte 对齐的 union，即使内核只保存 D 扩展，用户态 `mcontext_t` 仍须为它保留 528 bytes。用紧凑 `FloatRegs` 直接拼 `MachineContext` 会把 `uc_mcontext` 从 glibc/QEMU 预期的 offset 176 提前到 168；应把内核保存态与用户 ABI 表示分开，并用编译期断言锁定 `MachineContext size=784/alignment=16`、`UserContext mcontext_offset=176/size=960`。
+- **纵深兼容**：同时实现 QEMU 使用的 all-online-CPU hwprobe 查询：保持 Linux 16-byte pair 布局，key 3 只报告 IMA，key 4 报 0 个可选扩展，未知 key 写回 `-1/0`；非零 flags、CPU mask 和 `WHICH_CPUS` fail closed 为 `EINVAL`。绝不能虚报扩展，false negative 只损失优化，false positive 会让 QEMU 在宿主执行不支持的指令。
+- **验证方法**：先用静态 `SA_SIGINFO` 程序触发 SIGILL 并推进保存 PC，验证 signal delivery 与 `rt_sigreturn` 对同一 ABI 位置读写；再用无 libc 小程序校验 syscall 258 的返回 pair；最后必须运行未修改的原版 QEMU 和同一 ArceOS 产物。若测试框架在 NTP、布局或 mount 前置阶段卡住，必须用 marker 和已知可用 QEMU 对照证明是否真正触达目标路径，不能把 harness timeout 写成 syscall 失败或 PASS。
+- **边界**：当前 hwprobe 只是保守子集，依赖 CPU mask/`WHICH_CPUS` 的程序仍可能降级或失败；signal ABI 修复负责保证 fallback 正确，hwprobe 子集负责减少不必要的 SIGILL 探测，两者是纵深防御而不是相互替代。
+- **相关文件**：`os/src/hal/arch/riscv/trap/context.rs`、`os/src/syscall/mod.rs`、`docs/Work_Log/evidence/2026-08-14/develop-eval-adapt-summary.md`
+
+## 官方 raw judge 低分时先分离路径合同、解析器与真实语义
+
+- **路径合同**：双盘系统中 x0 root 未必有 MBR，而旧测试二进制可能仍硬编码 `/dev/vda2`。
+  先核对实际 partition descriptor 与测试字符串；兼容别名只能在真实名字不存在、canonical
+  分区唯一存在时发布，不能改写权威 x0/x1 顺序或让两个不同分区同名。
+- **物理路径**：symlink 看似等价于 bind mount，但 `getcwd(2)` 返回物理解析路径。官方程序若
+  使用固定小 buffer，`/glibc/...` 退化成 `/sdcard/glibc/...` 会得到 `ERANGE`。排查时同时记录
+  syscall size、最终物理 cwd 和 mount 类型，不能只看 `chdir` 成功。
+- **解析器分账**：raw judge 对并发交错输出可能漏记分。例如两个进程的 `cpid:` 行拼接后，
+  只要完整 block 仍包含父子两次输出、PID 集合为 `{0, positive}`、write 成功和 END，就应在
+  semantic 账本中按既有规则归一化；原始分数必须原样保留，不能覆盖或伪造 judge 输出。
+- **验收顺序**：先证明四组 START/END、PID1 exit 0、无 panic/fatal，再列出每个 partial case，
+  最后应用受约束的 semantic normalization。构建 warning、raw parser loss 和真实 syscall
+  failure 必须分别报告。
+- **相关文件**：`os/src/fs/boot_block.rs`、`user/src/bin/init/mounts.rs`、
+  `user/src/bin/test_runner/bootstrap/layout.rs`、`docs/Work_Log/2026-08-14.md`

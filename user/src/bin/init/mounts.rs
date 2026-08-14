@@ -109,4 +109,13 @@ pub(super) fn setup_persistent_mounts() {
         let _ = sys_mkdirat(AT_FDCWD, &tgt_path, 0o755);
         let _ = try_bind_mount(source, target);
     }
+
+    // 测试目录必须作为顶层挂载点暴露。若退化成指向 /sdcard 的符号链接，
+    // getcwd(2) 会按 Linux 语义返回解析后的物理路径，并使官方 basic 的固定
+    // 30 字节缓冲区在 glibc 路径上得到 ERANGE。
+    for (source, target) in [("/sdcard/musl", "/musl"), ("/sdcard/glibc", "/glibc")] {
+        let target_path = format!("{}\0", target);
+        let _ = sys_mkdirat(AT_FDCWD, &target_path, 0o755);
+        let _ = try_bind_mount(source, target);
+    }
 }

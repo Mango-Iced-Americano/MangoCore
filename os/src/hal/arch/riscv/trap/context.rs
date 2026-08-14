@@ -57,11 +57,36 @@ pub struct FloatRegs {
     pub fcsr: u32,
 }
 
-#[repr(C)]
+/// Linux RISC-V userspace floating-point context.
+///
+/// Linux exposes `__riscv_mc_fp_state` as a union whose largest member is the
+/// 16-byte-aligned Q-extension state.  Even when the running task only uses
+/// the D extension, `mcontext_t` must reserve the complete 528-byte union or
+/// libc will calculate the following signal-frame fields at different
+/// offsets.
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct UserFloatState {
+    f: [u64; 32],
+    fcsr: u32,
+    __reserved: [u32; 67],
+}
+
+impl Default for UserFloatState {
+    fn default() -> Self {
+        Self {
+            f: [0; 32],
+            fcsr: 0,
+            __reserved: [0; 67],
+        }
+    }
+}
+
+#[repr(C, align(16))]
 #[derive(Default, Debug, Clone, Copy)]
 pub struct MachineContext {
     gp: GeneralRegs,
-    fp: FloatRegs,
+    fp: UserFloatState,
 }
 
 #[repr(C)]
@@ -115,6 +140,15 @@ impl UserContext {
     }
 }
 
+// Linux UAPI ABI gates. QEMU's RISC-V CPU feature probe accesses the saved PC
+// through `ucontext_t::uc_mcontext`; an eight-byte offset mismatch repeats the
+// same SIGILL instruction forever before QEMU reaches main().
+const _: () = assert!(core::mem::size_of::<UserFloatState>() == 528);
+const _: () = assert!(core::mem::align_of::<MachineContext>() == 16);
+const _: () = assert!(core::mem::size_of::<MachineContext>() == 784);
+const _: () = assert!(UserContext::MCONTEXT_OFFSET == 176);
+const _: () = assert!(core::mem::size_of::<UserContext>() == 960);
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 /// The trap cotext containing the user context and the supervisor level
@@ -150,16 +184,21 @@ impl TrapContext {
     /// 通过字段复制表达 `TrapContext -> MachineContext`，避免调用方依赖两种
     /// 结构当前恰好具有相同前缀布局。
     pub fn machine_context(&self) -> MachineContext {
-        MachineContext {
-            gp: self.gp,
-            fp: self.fp,
+        let mut fp = UserFloatState::default();
+        for (user, kernel) in fp.f.iter_mut().zip(self.fp.f.iter()) {
+            *user = *kernel as u64;
         }
+        fp.fcsr = self.fp.fcsr;
+        MachineContext { gp: self.gp, fp }
     }
 
     /// 恢复信号 ABI 中的用户寄存器，不覆盖内核私有 trap 元数据。
     pub fn set_machine_context(&mut self, context: MachineContext) {
         self.gp = context.gp;
-        self.fp = context.fp;
+        for (kernel, user) in self.fp.f.iter_mut().zip(context.fp.f.iter()) {
+            *kernel = *user as usize;
+        }
+        self.fp.fcsr = context.fp.fcsr;
     }
 
     /// 把保存态规范为“由 SRET 原子地返回用户态并重新开中断”。

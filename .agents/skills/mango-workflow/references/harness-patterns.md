@@ -498,6 +498,13 @@ diag=1
 - **教训**: signal frame 是 libc 可见 ABI，不能按内核内部 bitset 大小直觉拼结构；涉及 `ucontext_t`、`mcontext_t`、`sigset_t` 的偏移时，优先核对“总 ABI 保留区大小”，再判断寄存器数组内容是否需要重排。
 - **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`, `os/src/hal/arch/loongarch64/trap/context.rs`, `os/src/task/signal/mod.rs`, `os/src/syscall/process/signal.rs`
 
+## RISC-V signal mcontext 必须按最大 FP union 布局
+
+- **根因**: 内核内部只需保存 32 个 D 扩展浮点寄存器和 `fcsr`，但 Linux 用户 ABI 的 `__riscv_mc_fp_state` 是 union，大小由 16-byte 对齐的 Q 扩展成员决定。把紧凑内核 `FloatRegs` 直接嵌入 `mcontext_t` 会让后续布局缩短 8 bytes；QEMU 的 SIGILL handler 从 glibc 计算出的 offset 176 修改 PC，而 `rt_sigreturn` 从 offset 168 恢复，形成同一非法指令无限重试。
+- **修复**: 内核 trap 保存态继续保持紧凑；另定义 528-byte、16-byte aligned 的用户 FP state，在 signal frame 构造/恢复处逐字段转换。用 const assertions 固定 `MachineContext size=784/alignment=16`、`UserContext mcontext_offset=176/size=960`，避免未来字段调整静默破坏 ABI。
+- **验收**: 静态 `SA_SIGINFO` SIGILL 程序必须同时打印布局值与 `SIGILL_OK`；随后原版用户态 QEMU 必须越过 CPU probe、启动未修改的 ArceOS 并返回 0。只验证 `riscv_hwprobe` 成功不够，因为其他程序仍可能走 SIGILL fallback。
+- **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`, `docs/Work_Log/evidence/2026-08-14/develop-eval-adapt-rv64-reuse-full.log`
+
 ## POSIX mqueue libc/syscall ABI
 
 - **根因**: POSIX API 要求用户传 `/name`，但 Linux syscall 层接收的是去掉前导 `/` 的裸 name；同时 `mq_timedsend/mq_timedreceive` 的 timeout 是 `CLOCK_REALTIME` 绝对时间，不能直接交给内核单调时间等待队列。`mq_notify(SIGEV_THREAD)` 也不是普通 signal，glibc/musl 会把 32 字节 cookie 和 netlink fd 交给内核，等待内核把 cookie 写回 netlink socket 后再触发用户 callback。
@@ -694,6 +701,13 @@ diag=1
 - **修复**: `tlb_invalidate_page()` 读取当前 ASID 并传给 `invtlb 0x5`；kernel page table 修改走单独的 global-page invalidate (`invtlb 0x6`)。
 - **教训**: “PTE 已改且 full TLB flush 能修复，但 page flush 不能修复”时，应优先检查页级 flush 的 ASID/global 操作数，而不是继续放大全局 flush。
 - **相关文件**: `os/src/hal/arch/loongarch64/tlb.rs`, `os/src/hal/arch/loongarch64/laflex.rs`
+
+## RV64 global PTE 的 VA→PA 含义必须跨所有 ASID 一致
+
+- **根因**: RISC-V TLB 中由 PTE `G` 位生成的 global entry 不受 `SATP.ASID` 区分。如果内核把低地址物理直映标为 global，而该 VA 又落在合法用户地址范围，用户页表即使把同一 VA 映射到另一物理页，也可能命中残留的内核恒等映射。表现为不同 syscall 的合法用户输出缓冲区随机 `EFAULT`，例如先修复 `getcwd` 后又在 `clock_gettime` 暴露，容易被误判为多个独立的 usercopy bug。
+- **修复**: 内核 identity mapping 与 `[USER_VA_BASE, USER_VA_END)` 相交时禁止设置 `G`，固定由内核 ASID 0 使用；仅高半区内核段、共享 trampoline 和完全不与用户 VA 相交的直映可以 global。最终页表激活前对 bootstrap global entry 做全局 flush。
+- **教训**: “多个无关 syscall 在长测中随机 EFAULT、单独 usercopy 检查均正确”时，应比较失败 VA 与内核低地址直映范围，并审计 PTE `G` 位。global 的判据不是“这张页表属于内核”，而是“该 VA→PA 在所有 ASID 下含义完全相同”。
+- **相关文件**: `os/src/mm/kernel_space.rs`, `os/src/hal/arch/riscv/tlb.rs`
 
 ## COW 源帧 helper 返回克隆 Arc 时 strong_count 基准要加一
 
@@ -1458,6 +1472,21 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复模式**：在原 payload 和 request sequence 保持不变期间，只向 `targets & !stopped & !acknowledged` 周期性重发幂等 doorbell；使用子系统独立且有界的超时预算。目标 handler 依据 mailbox bit 和 sequence 幂等执行，全部确认前不得复用 slot、回滚 generation 或提前释放待退休 frame。
 - **安全边界**：重试只能修复通知交付，不能掩盖真实 handler 卡死；超出预算仍需 fail-stop 并打印 missing/ack/pending 快照。不要通过不断改写 payload 或无限等待规避同步错误。
 - **相关文件**：`os/src/smp.rs`
+## BuildStorm 统计采集器必须与内核诊断特性做启动握手
+
+- **现象**: 启动参数包含 `buildstorm.stats=all`，但内核未编译 `perf_diag` 时，采集器仍周期性读取 `/sys/kernel/stats/*`，所有节点返回 `ENOENT`；QEMU 和 BuildStorm 仍可能继续运行，造成“看起来在采样、实际上没有任何计数器”的假诊断。
+- **根因**: 用户态采集器和内核特性是独立构建入口，命令行 profile 不能自动启用 Cargo 的 `perf_diag`；缺失 feature 时 sysfs 诊断目录不会注册。仅观察 `BUILDSTORM_*` 或 QEMU 退出码无法证明计数器有效。
+- **修复**: 诊断构建显式传入 `EXTRA_FEATURES=perf_diag`，启动后先读取 `/sys/kernel/stats/features` 或 schema 文件，确认 `perf_diag=1`、预期 schema 版本和 kernel/submodule SHA，再开始 workload 计时。若首个 stats 节点返回 `ENOENT`，采集器应一次性报告 `unavailable` 并停止周期读取，不能把该轮标记为有效计数器实验。
+- **教训**: 每次性能实验都要把“内核能力握手”作为 fail-closed 门禁；无诊断镜像可以用于 wall-time/功能测试，但不能用于 scheduler、PageCache、VirtIO 或 journal 归因。日志、镜像和构建产物仍保持工作区外或未跟踪，不纳入提交。
+- **相关文件**: `os/Cargo.toml` (`perf_diag`)、`os/src/fs/sysfs/files/mod.rs`、`os/src/fs/sysfs/files/diag.rs`、`user/src/bin/init.rs`、`os/make/rv64.mk`、`docs/Work_Log/2026-08-10.md`
+
+## ktest 文件存在不等于运行时已注册
+
+- **现象**: 新测试文件能随内核编译通过，但 TAP 总数不变、日志中没有测试名；容易把“代码被编译”误报成“ktest 已执行”。
+- **根因**: 项目可能同时保留新旧测试目录和注册入口，例如 `kernel_tests/page_cache/` 存在完整 `tests()`，而根 `all_tests()` 实际仍指向 `page_cache_sync.rs`。只修改未接入根测试表的模块不会改变运行时测试集合。
+- **修复**: 新增测试后同时检查根 `all_tests()` 的真实模块路径；运行后必须验证 TAP 计划数增加、精确测试名出现且结果为 `ok`。仅凭构建成功、QEMU 退出0或总结果PASS都不能声称新测试已覆盖。
+- **教训**: 测试验收采用“三联门禁”：源码注册路径 → TAP 计划数 → 日志精确测试名。发现重复/遗留测试树时，先接入当前权威入口，不因目录命名推断其已生效。
+- **相关文件**: `os/src/kernel_tests/mod.rs`、`os/src/kernel_tests/page_cache_sync.rs`、`os/src/kernel_tests/page_cache/`
 
 ## BuildStorm 固定窗口与完成标记必须独立于字段布局和峰值状态
 
@@ -1466,7 +1495,6 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**：完成标记按行首和键值匹配（`^BUILDSTORM_COMPILE\b.*\bok=true\b`），不固定其他字段的位置；固定窗口另设从 `BUILDSTORM_BEGIN` 起算的 hard timeout，其优先级独立于峰值触发与峰后样本数。每个 A/B variant 仍须使用同一 kernel hash、全新 golden overlay、相同 CPU/内存/MTTCG，并在启动时核对被测运行时开关和 schema。
 - **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
 - **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。
-
 ## 高频架构屏障 A/B 应使用同一诊断镜像和事件计数，不能逐次包时钟
 
 - **问题**：`fence.i`、`ibar` 等每次 trap return 都可能执行，若在每次屏障前后读取硬件
