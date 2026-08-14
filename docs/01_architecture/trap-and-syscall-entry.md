@@ -151,20 +151,24 @@ pub fn trap_handler() -> ! {
             );
             if let Err(error) = pf_result {
                 let mut inner = task.acquire_inner_lock();
-                match error {
+                let signal_enqueued = match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
+                        true
                     }
                     MemoryError::NoPermission => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                        true
                     }
                     MemoryError::BadAddress | MemoryError::NotMapped => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
                     MemoryError::OutOfMemory => {
                         inner.pending_oom_kill = true;
+                        false
                     }
                     other => {
                         log::warn!(
@@ -173,9 +177,14 @@ pub fn trap_handler() -> ! {
                         );
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
+                };
+                drop(inner);
+                if signal_enqueued {
+                    task.process.notify_signal_waiters();
                 }
-            };
+            }
         }
         Trap::Exception(Exception::IllegalInstruction)
         | Trap::Exception(Exception::InstructionMisaligned) => {
@@ -453,6 +462,11 @@ let mut mset_lock = vm_ref.lock();
 | 其他错误 | 打印 warn，注入 `SIGSEGV` + `SEGV_MAPERR` |
 
 该映射在 rv64 和 la64 trap 后端中保持一致。
+
+rv64 的通知边界比错误映射更窄：成功缺页不产生 signal event；只有上表中实际入队
+`SIGBUS`/`SIGSEGV` 的分支才会在释放 `task.inner` 后调用
+`notify_signal_waiters()`。`OutOfMemory` 只发布 `pending_oom_kill`，不唤醒
+signal waiter。该优化不改变 `MemoryError` 到信号/状态的映射。
 
 ### 5.4 la64 dirty bit 补写
 

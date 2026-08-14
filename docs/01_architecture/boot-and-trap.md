@@ -14,6 +14,7 @@ entry_points:
   - "os/src/hal/arch/loongarch64/boot.rs"
 code_paths:
   - "os/src/hal/platform/"
+  - "os/src/hal/arch/riscv/time.rs"
   - "os/src/hal/arch/riscv/trap/"
   - "os/src/hal/arch/loongarch64/trap/"
 ---
@@ -324,7 +325,8 @@ RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上�
 272 字节、16 字节对齐的 frame，保存 `x1`、`x3..x31`、原始 `sp`、
 `sstatus` 和 `sepc`；Rust handler 接受 Supervisor Software Interrupt
 和 Supervisor Timer Interrupt，其他内核异常仍然 panic。IPI 先清 SSIP，
-再消费 per-CPU mailbox；timer 只静默 SBI one-shot 并发布 deferred 状态。
+再消费 per-CPU mailbox；timer 只把已选择 backend 的 one-shot compare 推到最大值
+并发布 deferred 状态。RV64 backend 可能是 Sstc `stimecmp`，也可能是 SBI fallback。
 
 LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
 诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
@@ -401,7 +403,8 @@ pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打
 
 每个在线 CPU 的用户/内核 timer trap 共用同一 hard-IRQ fast path：
 
-1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
+1. RV64 通过启动时选定的 Sstc `stimecmp` 或 SBI fallback，把 timer compare 写成
+   `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
    再写 TICLR 清除 level-triggered pending；
 2. 当前 `PerCpu.timer_irq_count` 只做无锁诊断计数；
 3. 以 Release 发布 `timer_pending=true` 后立即返回被中断现场。

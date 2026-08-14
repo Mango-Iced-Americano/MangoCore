@@ -1588,3 +1588,15 @@
 - **生命周期**：后备对象不只要保存 PageCache 配方，还要强持有源 inode 并保持 ETXTBSY。该 `Arc` 必须在 VMA clone/split/fork 中保留；动态解释器有独立 inode，不能只依赖 PCB 的主 `exe` 引用。
 - **验收**：构造 ELF 地址空间后 entry/BSS 应无 target frame；分别 fault entry 和不同页 BSS，验证文件字节、零填充和“未触发页仍未 resident”。
 - **相关文件**：`os/src/mm/{address_space,filemap,page_fault,vma}.rs`、`os/src/task/process.rs`、`os/src/kernel_tests/mm.rs`
+
+## 状态修复成功路径不能广播异常事件
+
+- **危险模式**：trap/syscall 先尝试修复状态，随后不看结果就统一通知 signal、poll 或其他
+  waiter。高频成功路径会为每次 lazy fault、重试或缓存填充支付无关锁和 listener 扫描，
+  还把“状态已修复”错误表达成“异常事件已产生”。
+- **固定协议**：把结果明确拆成“修复成功”“实际入队事件”“只发布其他状态”。只有事件
+  真正入队后才通知相应 wait queue，并先释放 pending owner 锁；仅设置 OOM/退出等其他
+  状态时，走其自己的安全点或唤醒协议。
+- **验收**：先用计数证明成功次数远高于错误次数；再覆盖成功 hot path、真实错误信号和
+  非信号状态三类。错误测试必须证明 waiter 仍被唤醒，成功测试则确认没有虚假通知。
+- **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/process.rs`

@@ -21,6 +21,7 @@ pub use kern_stack::reclaim_retired_kernel_stacks;
 pub fn machine_init() {
     trap::init();
     trap::enable_ipi_interrupt();
+    time::init_timer_backend();
     let user_asids = sv39::init_asid_allocator();
     if user_asids == 0 {
         crate::println!("[mm] RISC-V SATP.ASID unavailable; using switch-time TLB flushes");

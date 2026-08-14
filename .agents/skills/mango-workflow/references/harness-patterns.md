@@ -1524,3 +1524,17 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **修复**：生产切换必须在同一个本地 IRQ-off 事务中完成 `activate_on → install_page_table → 必要的 full fence → 发布 CPU observed epoch`，并在写入新根前 pin 旧根；切离时先安装内核根，再 deactivate/drop。`install_page_table()` 用硬断言 fail-closed。需要模拟 active MM 的 ktest 使用 RAII guard 复用同一协议，退出路径无论成功与否都先恢复内核根。
 - **教训**：必须区分三个独立事实：shootdown 已 ack、software active mask 已置位、硬件已安装某 root/ASID/epoch。测试夹具不能只伪造其中一个来代表另外两个；per-CPU observed epoch 只能在实际安装和必要 fence 完成后发布，不能在 rollover 广播处批量推进。
 - **相关文件**：`os/src/hal/arch/riscv/sv39.rs`、`os/src/mm/{address_space,mmu_gather,tlb}.rs`、`os/src/task/processor.rs`、`os/src/kernel_tests/smp.rs`
+
+## 固件能力加速后端必须 fail-closed，并动态覆盖 fallback
+
+- **危险模式**：只看 boot hart、用 ISA 字符串子串匹配，或把父节点公共属性当作所有 CPU
+  的能力，就直接进入 CSR/MMIO 加速路径。异构、禁用节点、畸形属性或固件未委托权限时，
+  这种乐观探测会把性能优化变成非法指令或永不触发的中断。
+- **固定协议**：BSP 在 AP 发布和首次使用前枚举所有 enabled CPU；优先解析规范化能力
+  string-list，属性缺失时才回退 legacy 格式，严格按完整 token 匹配。任一 CPU 缺失、
+  畸形、不支持或枚举数与运行时拓扑不一致，都选择已知安全的固件 backend。选择一次发布，
+  热路径只读取不可变结果。
+- **验收**：同一 focused 测试至少跑两次：默认机器必须打印并使用加速 backend；通过 QEMU
+  CPU 参数显式关闭扩展后，必须打印并使用 fallback，且 timer/SMP 等相关用例两边都通过。
+  长测 A/B 若同时包含多个修复，只能报告合并包效果；没有中间 variant 时不得拆分贡献。
+- **相关文件**：`os/src/hal/arch/riscv/time.rs`、`os/src/hal/arch/riscv/sbi.rs`

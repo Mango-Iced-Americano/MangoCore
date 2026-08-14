@@ -210,20 +210,24 @@ pub fn trap_handler() -> ! {
             );
             if let Err(error) = pf_result {
                 let mut inner = task.acquire_inner_lock();
-                match error {
+                let signal_enqueued = match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
+                        true
                     }
                     MemoryError::NoPermission => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                        true
                     }
                     MemoryError::BadAddress | MemoryError::NotMapped => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
                     MemoryError::OutOfMemory => {
                         inner.pending_oom_kill = true;
+                        false
                     }
                     other => {
                         log::warn!(
@@ -232,10 +236,14 @@ pub fn trap_handler() -> ! {
                         );
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
+                };
+                drop(inner);
+                if signal_enqueued {
+                    task.process.notify_signal_waiters();
                 }
-            };
-            task.process.notify_signal_waiters();
+            }
             crate::task::perf::arm_pagefault_return();
         }
         Trap::Exception(Exception::IllegalInstruction)

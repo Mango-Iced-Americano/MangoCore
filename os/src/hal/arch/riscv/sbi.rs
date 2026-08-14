@@ -207,7 +207,7 @@ pub fn remote_sfence_vma_asid(
     }
 }
 
-pub fn set_timer(timer: usize) {
+pub(super) fn set_timer(timer: usize) {
     let profile_start = crate::task::processor::sched_profile_cycle_start();
     sbi_call(SBI_SET_TIMER, timer, 0, 0);
     crate::task::processor::record_sched_sbi_set_timer_cycles(profile_start);

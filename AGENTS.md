@@ -366,7 +366,10 @@ signalfd 的 open file 只保存共享 mask；阻塞 read/poll 的事件队列�
 RV64 从 `a1` 直接取得 FDT；LA64 从 `a2` 的 EFI system table 按 `EFI_FDT_GUID` 查找
 FDT，QEMU 缺失时失败，2K1000 缺失时允许静态板级回退。RV64 timer 频率来自 FDT
 `/cpus/timebase-frequency`，LA64 保持 CPUCFG 探测；两者不能用调度 `TICKS_PER_SEC`
-互相替代。MM 已以运行期固件 region 作为 QEMU 的内存拓扑来源，并让 2K1000 静态
+互相替代。RV64 由 BSP 在 AP 发布和首个 deadline 前检查所有 enabled CPU 的 FDT
+ISA extension；只有整机明确支持 Sstc 且 CPU 数匹配运行时拓扑时才直写 `stimecmp`，
+否则 fail-closed 回退 SBI TIME，backend 选定后不可变。MM 已以运行期固件 region
+作为 QEMU 的内存拓扑来源，并让 2K1000 静态
 fallback 填入同一接口；Driver 切换动态资源前仍须保留现有板级路径，避免半迁移状态。
 早期顺序固定为“冻结入口参数 → 架构 bootstrap → 固件资源发现 → 清 BSS”；LA64
 不得在建立 DMW、异常入口和页表寄存器基线前进入资源解析。

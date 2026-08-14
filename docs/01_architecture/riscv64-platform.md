@@ -11,7 +11,10 @@ tags: [architecture, riscv64, hal]
 
 ## 1. 概述
 
-RISC-V 后端位于 `os/src/hal/arch/riscv/`。该后端面向 `riscv64gc-unknown-none-elf`，通过 OpenSBI 完成 console、timer、shutdown 等底层服务，并向架构无关层提供 `Sv39PageTable`、trap context、内核栈、上下文切换和时间接口。
+RISC-V 后端位于 `os/src/hal/arch/riscv/`。该后端面向 `riscv64gc-unknown-none-elf`，
+通过 OpenSBI 完成 console、shutdown 等底层服务；timer 在固件明确报告整机 Sstc
+时由 S-mode 直写 `stimecmp`，否则回退 OpenSBI TIME。后端向架构无关层提供
+`Sv39PageTable`、trap context、内核栈、上下文切换和时间接口。
 
 统一类型别名位于 `hal/arch/riscv/mod.rs`：
 
@@ -50,10 +53,10 @@ os/src/hal/arch/riscv/
 | `entry.asm` | 架构入口汇编，由 `main.rs` 在 `riscv` feature 下引入 |
 | `config.rs` | 地址空间、页大小、内核堆、内核栈、物理内存和平台常量 |
 | `kern_stack.rs` | 内核栈分配、trap context/user stack 地址计算 |
-| `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
+| `sbi.rs` | OpenSBI 调用、console、timer fallback、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表、PTE flag、TLB 刷新 |
 | `switch.S` | 任务上下文切换汇编 |
-| `time.rs` | 时间读取、时钟频率、timer delta |
+| `time.rs` | 时间读取、时钟频率、Sstc/SBI backend 选择与 timer delta |
 | `trap/mod.rs` | trap handler、syscall、缺页、timer interrupt、返回用户态 |
 | `trap/context.rs` | `TrapContext`、`UserContext`、用户信号 mask 上下文 |
 
@@ -65,6 +68,7 @@ RISC-V 后端在 `mod.rs` 中定义：
 pub fn machine_init() {
     trap::init();
     trap::enable_ipi_interrupt();
+    time::init_timer_backend();
     // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
     // 每个 CPU 的首个 timer deadline 由 timer_cpu_init() 设置。
 }
@@ -86,8 +90,8 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | 调用 | 文件 | 行为 |
 |------|------|------|
 | `trap::init()` | `trap/mod.rs` | 调用 `set_kernel_trap_entry()`，设置 `stvec` 为 kernel trap |
-| `trap::enable_timer_interrupt()` | `trap/mod.rs` | `sie::set_stimer()` 打开 supervisor timer interrupt |
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
+| `time::init_timer_backend()` | `time.rs` | 在 AP 发布和首个 deadline 前按全部 enabled CPU 的 FDT ISA 能力选择 Sstc；任何缺失、畸形或不一致都回退 SBI |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。每个 CPU 都先由
@@ -201,6 +205,10 @@ task.process.vm().write(|vm| vm.do_page_fault(addr, access))
 | `OutOfMemory` | `pending_oom_kill = true` |
 | 其他 | warn + `SIGSEGV` + `SEGV_MAPERR` |
 
+成功缺页没有产生 pending signal，因此不能扫描或唤醒 signalfd/signal waiters。rv64
+只在实际入队 `SIGBUS`/`SIGSEGV` 后，先释放 `task.inner` 锁再通知等待队列；OOM
+分支只设置 `pending_oom_kill`，同样不制造信号事件。
+
 ### 6.2 非法指令
 
 `IllegalInstruction` 和 `InstructionMisaligned` 注入 `SIGILL`，并使用 `SigInfo::ILL_ILLOPC`。其他未支持 trap 进入 panic，输出 cause 和 stval。
@@ -218,6 +226,8 @@ task::timer_interrupt_handler()
 ```
 
 该分支不直接调用 `set_next_trigger` 形式的接口；下一次 timer 触发由 task/timer 路径通过 HAL time 接口编程。
+HAL 对调用者隐藏 backend：整机所有 enabled CPU 都明确报告 Sstc 时直写 RV64
+`stimecmp` CSR，否则调用 SBI TIME。选择由 BSP 在 AP 发布前一次完成，启动后不可变。
 
 ## 8. 返回用户态
 
@@ -271,14 +281,18 @@ asm!(
 | 能力 | 作用 |
 |------|------|
 | console put/get | 支撑 `console_putchar`、`console_getchar` |
-| timer | 设置 timer |
+| timer fallback | 平台未通过 Sstc 能力门禁时设置 timer |
 | shutdown | QEMU/OpenSBI 退出 |
 | local irq save/restore | 本地中断状态保存恢复 |
 | RFENCE FID 2 | 按 hart mask、字节 start/size 与 ASID 同步远端区间失效；跨度超过 64 页由上层改走全刷 |
 
 上层代码通过 `hal/mod.rs` 的 re-export 使用这些能力，不直接引用 `sbi.rs`。
 
-RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建立 trap 和页表”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并打开 timer；syscall 和 page fault 都从 `trap/mod.rs` 分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
+RISC-V 后端的阅读主线是“OpenSBI 提供固件服务，S-mode 内核建立 trap、页表并选择
+timer backend”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并在 Sstc
+直写与 SBI fallback 之间 fail-closed 选择；syscall 和 page fault 都从 `trap/mod.rs`
+分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态
+异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
 
 RV64 现在会探测 `SATP.ASID` 的实际位数，并让一个 MM 在所有 hart 使用同一 versioned
 ASID。用户根共享 supervisor kernel 映射，普通 trap 入口/返回保持当前 SATP；调度、exec
