@@ -1307,6 +1307,8 @@ mod enabled {
     pub static SYSCALL_GETPPID_TOTAL: AtomicUsize = AtomicUsize::new(0);
     pub static SYSCALL_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
     pub static TRAP_ENTER_COST_MAX_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static USER_TRAP_RETURNS: AtomicUsize = AtomicUsize::new(0);
+    pub static USER_RETURN_BARRIERS: AtomicUsize = AtomicUsize::new(0);
 
     // ── P1: Syscall Cost (average + total) ──
     pub static GETPPID_COST_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
@@ -1852,6 +1854,20 @@ mod enabled {
         ECALL_TRAP_COST_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
         update_max(&ECALL_TRAP_COST_TICKS_MAX, ticks);
         update_max(&TRAP_ENTER_COST_MAX_TICKS, ticks);
+    }
+
+    /// 记录一次用户态返回，以及该返回是否实际执行架构指令同步屏障。
+    ///
+    /// 这里只做事件计数，避免在每次 trap return 前后读取时钟并污染 A/B 热路径。
+    #[inline(always)]
+    pub fn record_user_trap_return(barrier_executed: bool) {
+        if !stats_enabled() {
+            return;
+        }
+        USER_TRAP_RETURNS.fetch_add(1, Ordering::Relaxed);
+        if barrier_executed {
+            USER_RETURN_BARRIERS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -3016,6 +3032,8 @@ mod enabled {
         SYSCALL_GETPPID_TOTAL.store(0, Ordering::Relaxed);
         SYSCALL_COST_MAX_TICKS.store(0, Ordering::Relaxed);
         TRAP_ENTER_COST_MAX_TICKS.store(0, Ordering::Relaxed);
+        USER_TRAP_RETURNS.store(0, Ordering::Relaxed);
+        USER_RETURN_BARRIERS.store(0, Ordering::Relaxed);
         // Syscall Cost (P1)
         GETPPID_COST_TICKS_TOTAL.store(0, Ordering::Relaxed);
         GETPPID_COST_TICKS_MAX.store(0, Ordering::Relaxed);
@@ -3494,6 +3512,7 @@ mod enabled {
         EXEC_TARGET_ZERO_TICKS.store(0, Ordering::Relaxed);
         EXEC_PAGECACHE_COPY_TICKS.store(0, Ordering::Relaxed);
         EXEC_FALLBACK_KMAP_WAIT_TICKS.store(0, Ordering::Relaxed);
+        crate::smp::reset_tlb_diagnostics();
     }
 
     /// Print accumulated timing stats, then reset.
@@ -5012,6 +5031,10 @@ pub fn record_trap_cost_ticks(_ticks: usize) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
+pub fn record_user_trap_return(_barrier_executed: bool) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
 pub fn record_user_unaligned_trap(_start: usize, _is_store: bool, _size: usize, _is_float: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
@@ -5503,6 +5526,12 @@ pub static SYSCALL_COST_MAX_TICKS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "perf_stats"))]
 pub static TRAP_ENTER_COST_MAX_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static USER_TRAP_RETURNS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static USER_RETURN_BARRIERS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(not(feature = "perf_stats"))]

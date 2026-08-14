@@ -547,6 +547,10 @@ SATP/ASID/epoch；同一 MM 的普通 trap 返回通常不写 SATP。用户根�
 `set_user_trap_entry()` 把 `stvec` 设置为 `TRAMPOLINE`。它必须晚于可能临时开放 IRQ 的
 ASID rollover 和所有 Rust 收尾：否则 rollover IPI 会进入用户 trampoline，并把旧
 `sscratch` 错当成当前 `TrapContext`。恢复汇编由 trampoline 映射执行。
+`perf_diag` 构建可用启动参数 `mango.rv.trap_return_fence_i=off` 做同一 Image 的诊断 A/B；
+默认值以及所有 production 构建仍无条件执行 `fence.i`。该开关只用于归因，不能作为正式
+正确性配置。`/sys/kernel/stats/syscall` 的 `user_trap_returns` 与
+`user_return_barriers` 用于确认实际分支覆盖，返回热路径不会为此逐次读取时钟。
 返回前必须把保存态规范为 `SPP=User、SIE=0、SPIE=1`：`__restore` 写入
 `sstatus` 后还要恢复 `sepc` 和通用寄存器，期间仍处于 S-mode；只有最终 `sret`
 才能从 `SPIE` 原子恢复 `SIE`。若保存态提前携带 `SIE=1`，timer/IPI 可在半恢复

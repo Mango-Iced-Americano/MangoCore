@@ -253,6 +253,8 @@ fn dump_buildstorm_stats(sample: usize, dump_heavy: bool) -> bool {
             "/sys/kernel/stats/ext4\0",
             "/sys/kernel/stats/mount\0",
             "/sys/kernel/stats/net\0",
+            "/sys/kernel/stats/syscall\0",
+            "/sys/kernel/stats/tlb\0",
         ]
     } else {
         &["/sys/kernel/stats/taskq\0"]

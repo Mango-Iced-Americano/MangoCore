@@ -175,6 +175,24 @@ pub(crate) struct CpuDiagnostics {
     pub(crate) task: crate::task::processor::CpuTaskDiagnostics,
 }
 
+/// 全 CPU 远端 TLB 同步计数的无锁聚合快照。
+///
+/// 这些字段只用于诊断导出；快照期间各 CPU 仍可更新，因此不同字段之间不是
+/// 事务一致的。`sync_ticks_*` 使用 [`crate::hal::get_time`] 的原始 timebase tick。
+#[derive(Default)]
+pub(crate) struct TlbDiagnostics {
+    pub(crate) kernel_full: usize,
+    pub(crate) user_full: usize,
+    pub(crate) user_range_firmware: usize,
+    pub(crate) user_range_ipi: usize,
+    pub(crate) user_range_fallback: usize,
+    pub(crate) user_range_pages: usize,
+    pub(crate) remote_targets: usize,
+    pub(crate) sync_ticks_total: usize,
+    pub(crate) sync_ticks_max: usize,
+    pub(crate) sync_failures: usize,
+}
+
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
 ///
 /// 每个发起 CPU 固定拥有一个槽；当前安全点抢占模型保证同一 CPU 最多等待
@@ -641,6 +659,61 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
             cpu.ipi_reasons_consumed[index].load(Ordering::Relaxed)
         }),
         task: cpu.task_state.read_diagnostics(),
+    }
+}
+
+/// 汇总所有运行时 CPU 的远端 TLB 同步计数，不触碰任务锁或同步协议状态。
+pub(crate) fn tlb_diagnostics() -> TlbDiagnostics {
+    let mut total = TlbDiagnostics::default();
+    for cpu in PER_CPUS.iter().take(runtime_cpu_count()) {
+        total.kernel_full = total
+            .kernel_full
+            .wrapping_add(cpu.tlb_kernel_full.load(Ordering::Relaxed));
+        total.user_full = total
+            .user_full
+            .wrapping_add(cpu.tlb_user_full.load(Ordering::Relaxed));
+        total.user_range_firmware = total.user_range_firmware.wrapping_add(
+            cpu.tlb_user_range_firmware.load(Ordering::Relaxed),
+        );
+        total.user_range_ipi = total
+            .user_range_ipi
+            .wrapping_add(cpu.tlb_user_range_ipi.load(Ordering::Relaxed));
+        total.user_range_fallback = total.user_range_fallback.wrapping_add(
+            cpu.tlb_user_range_fallback.load(Ordering::Relaxed),
+        );
+        total.user_range_pages = total
+            .user_range_pages
+            .wrapping_add(cpu.tlb_user_range_pages.load(Ordering::Relaxed));
+        total.remote_targets = total
+            .remote_targets
+            .wrapping_add(cpu.tlb_remote_targets.load(Ordering::Relaxed));
+        total.sync_ticks_total = total
+            .sync_ticks_total
+            .wrapping_add(cpu.tlb_sync_ticks_total.load(Ordering::Relaxed));
+        total.sync_ticks_max = total
+            .sync_ticks_max
+            .max(cpu.tlb_sync_ticks_max.load(Ordering::Relaxed));
+        total.sync_failures = total
+            .sync_failures
+            .wrapping_add(cpu.tlb_sync_failures.load(Ordering::Relaxed));
+    }
+    total
+}
+
+/// 清零远端 TLB 同步诊断窗口；仅由 perf stats reset 路径调用。
+#[cfg(feature = "perf_stats")]
+pub(crate) fn reset_tlb_diagnostics() {
+    for cpu in PER_CPUS.iter().take(runtime_cpu_count()) {
+        cpu.tlb_kernel_full.store(0, Ordering::Relaxed);
+        cpu.tlb_user_full.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_firmware.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_ipi.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_fallback.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_pages.store(0, Ordering::Relaxed);
+        cpu.tlb_remote_targets.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_ticks_total.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_ticks_max.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_failures.store(0, Ordering::Relaxed);
     }
 }
 

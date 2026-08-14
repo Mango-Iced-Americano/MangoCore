@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-08-11
+last_update: 2026-08-14
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -197,6 +197,8 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `syscall_getppid_total` | counter | getppid（syscall 173）调用次数 |
 | `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（timer timebase tick） |
 | `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（timer timebase tick） |
+| `user_trap_returns` | counter | 进入最终用户恢复跳转的次数；只做事件计数，不在返回热路径读时钟 |
+| `user_return_barriers` | counter | 上述返回中实际执行 `fence.i`（RV）或 `ibar 0`（LA）的次数 |
 | `user_unaligned_traps` | counter | 用户态非对齐访存异常总数（LoongArch） |
 | `user_unaligned_ticks_total/max` | counter/max | 非对齐 Rust handler 的累计/最大耗时；不含汇编 trap entry/restore |
 | `user_unaligned_load_{2,4,8}` | counter | 按访问宽度分类的非对齐 load |
@@ -213,6 +215,10 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `frame_alloc_hits` / `frame_alloc_ticks_total` | counter | frame 分配次数与累计 timer timebase ticks |
 | `frame_free_hits` | counter | frame 释放次数 |
 | `tlb_{full,page,activate,global}` | counter | 各类 TLB 操作；`activate` 不是实际地址空间切换数 |
+| `tlb_shootdown_{kernel_full,user_full,user_range_firmware,user_range_ipi,user_range_fallback}` | counter | 所有 CPU 发起侧聚合的远端 shootdown 最终 backend；五类互斥 |
+| `tlb_shootdown_{range_pages,remote_targets}` | counter | 精确 range backend 处理页数，以及所有远端同步 fanout 之和 |
+| `tlb_shootdown_sync_ticks_{total,max}` | counter/max | 发起侧等待远端同步的累计/最大 raw timebase tick；跨 CPU 求和，不等同 wall time |
+| `tlb_shootdown_{failures,clock_freq_hz}` | counter/gauge | 同步失败数与 ticks 换算频率 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
 | `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
@@ -418,6 +424,7 @@ perf_diag feature 关闭时（默认构建）：
 | `os/src/syscall/mod.rs` | Syscall 入口/出口计时 |
 | `os/src/syscall/process/exec.rs` | direct ELF loader 与 fallback 路径计数 |
 | `os/src/hal/arch/*/trap/mod.rs` | Trap enter 计时 |
+| `os/src/smp.rs` | 远端 TLB backend、range/fanout、同步 ticks 的 per-CPU 记录与聚合快照 |
 | `os/src/trace.rs` | Ring buffer + tracing_on/dropped 运行时控制 |
 | `os/src/fs/sysfs/mod.rs` | sysfs 写支持（write_fn + write_at + resize） |
 | `os/src/fs/sysfs/files/diag.rs` | /sys/kernel/ 文件注册与内容格式化 |

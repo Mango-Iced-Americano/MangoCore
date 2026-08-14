@@ -1467,6 +1467,20 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
 - **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
 - **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。
 
+## 高频架构屏障 A/B 应使用同一诊断镜像和事件计数，不能逐次包时钟
+
+- **问题**：`fence.i`、`ibar` 等每次 trap return 都可能执行，若在每次屏障前后读取硬件
+  时钟，计时探针本身会改变高频返回路径；分别编译 on/off 又会混入链接布局和 feature 结构税。
+- **做法**：只在诊断构建加入启动参数控制的运行时分支，A/B 复用完全相同的 kernel hash；
+  热路径仅累计“返回次数/实际屏障次数”，wall-time 使用固定窗口比较。两个 Relaxed 计数在
+  sysfs 中分别读取，运行中允许出现 1 个事件量级的快照撕裂，窗口末尾再核对最终覆盖关系。
+- **判定**：同时要求相同 golden 的全新 overlay、CPU/内存/MTTCG、正式开始点、crate 进度和
+  minibuild；短窗只用于排除数量级，未完成整轮且没有交替重复时不能声称最终吞吐收益。同步
+  等待类计数必须同时导出 backend、range、fanout、total/max ticks 和失败数；max 达秒级时，
+  total 的单对差异先按长尾噪声处理，下一步补 histogram，不能归因给旁路屏障。
+- **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/perf.rs`、
+  `os/src/smp.rs`、`os/src/fs/sysfs/files/diag.rs`、`scripts/monitor_buildstorm_peak.py`
+
 ## 双架构串行编译要同时校验命令退出和构建进程静默
 
 - **现象**：外层 Docker/Make 命令的输出已经暂停或终端 wrapper 已返回，但 LTO `rustc`

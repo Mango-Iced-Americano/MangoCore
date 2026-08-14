@@ -579,6 +579,7 @@ pub fn trap_return() -> ! {
             restore_va
         );
     }
+    crate::task::perf::record_user_trap_return(true);
     unsafe {
         // trap context、页表根、ASID 和用户 trap 入口是 `__restore` 的固定 ABI
         // 参数，必须直接绑定到 $a0..$a3。若先把多个 `in(reg)` 输入逐个 move，LLVM

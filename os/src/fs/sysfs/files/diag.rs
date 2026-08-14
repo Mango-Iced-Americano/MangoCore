@@ -591,6 +591,16 @@ fn stats_syscall_content(
     );
     let _ = writeln!(
         s,
+        "user_trap_returns={}",
+        read_counter(&crate::task::perf::USER_TRAP_RETURNS)
+    );
+    let _ = writeln!(
+        s,
+        "user_return_barriers={}",
+        read_counter(&crate::task::perf::USER_RETURN_BARRIERS)
+    );
+    let _ = writeln!(
+        s,
         "user_unaligned_traps={}",
         read_counter(&crate::task::perf::USER_UNALIGNED_TRAPS)
     );
@@ -685,7 +695,8 @@ fn stats_tlb_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(192);
+    let mut s = String::with_capacity(768);
+    let remote = crate::smp::tlb_diagnostics();
     let _ = writeln!(
         s,
         "tlb_flushes={}",
@@ -702,6 +713,33 @@ fn stats_tlb_content(
         s,
         "tlb_global={}",
         read_counter(&crate::task::perf::TLB_GLOBAL)
+    );
+    let _ = writeln!(s, "tlb_shootdown_kernel_full={}", remote.kernel_full);
+    let _ = writeln!(s, "tlb_shootdown_user_full={}", remote.user_full);
+    let _ = writeln!(
+        s,
+        "tlb_shootdown_user_range_firmware={}",
+        remote.user_range_firmware
+    );
+    let _ = writeln!(s, "tlb_shootdown_user_range_ipi={}", remote.user_range_ipi);
+    let _ = writeln!(
+        s,
+        "tlb_shootdown_user_range_fallback={}",
+        remote.user_range_fallback
+    );
+    let _ = writeln!(s, "tlb_shootdown_range_pages={}", remote.user_range_pages);
+    let _ = writeln!(s, "tlb_shootdown_remote_targets={}", remote.remote_targets);
+    let _ = writeln!(
+        s,
+        "tlb_shootdown_sync_ticks_total={}",
+        remote.sync_ticks_total
+    );
+    let _ = writeln!(s, "tlb_shootdown_sync_ticks_max={}", remote.sync_ticks_max);
+    let _ = writeln!(s, "tlb_shootdown_failures={}", remote.sync_failures);
+    let _ = writeln!(
+        s,
+        "tlb_shootdown_clock_freq_hz={}",
+        crate::hal::get_clock_freq()
     );
     write_str(offset, len, buf, &s)
 }
