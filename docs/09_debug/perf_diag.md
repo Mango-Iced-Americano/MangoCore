@@ -218,6 +218,8 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `tlb_shootdown_{kernel_full,user_full,user_range_firmware,user_range_ipi,user_range_fallback}` | counter | 所有 CPU 发起侧聚合的远端 shootdown 最终 backend；五类互斥 |
 | `tlb_shootdown_{range_pages,remote_targets}` | counter | 精确 range backend 处理页数，以及所有远端同步 fanout 之和 |
 | `tlb_shootdown_sync_ticks_{total,max}` | counter/max | 发起侧等待远端同步的累计/最大 raw timebase tick；跨 CPU 求和，不等同 wall time |
+| `tlb_shootdown_<backend>_ticks_{total,max}` | counter/max | 按上述五个最终 backend 拆分的累计/最大 raw ticks；仅在 `memory_io` 记录窗口增长 |
+| `tlb_rfence_bucket_<range>_{calls,ticks,pages,targets}` | histogram | SBI RFENCE range 延迟桶及每桶累计耗时、页数、远端 hart fanout；仅在 `memory_io` 记录窗口增长 |
 | `tlb_shootdown_{failures,clock_freq_hz}` | counter/gauge | 同步失败数与 ticks 换算频率 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
@@ -237,6 +239,12 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `wb_tx_journal_{commit_ticks,staged_blocks,tx_first,tx_last}` | counter/gauge | 已提交 journal transaction 的累计 ticks、staged block 数及本窗口 transaction id 范围 |
 | `wb_tx_journal_flush_{count,ticks}` | counter | `ActiveLog`、`CommitRecord`、`Checkpoint`、`TailUpdate` 四个 journal phase 的设备 flush 次数与累计 ticks |
 | `wb_tx_boundary_flush_{count,ticks}` | counter | journal 外明确 durability boundary 的设备 flush 次数与累计 ticks |
+
+RFENCE 延迟桶边界是 `<=1000`、`<=10000`、`<=100000`、`<=1000000`、
+`<=10000000`、`>10000000` raw ticks。应使用同一输出中的
+`tlb_shootdown_clock_freq_hz` 换算；例如 10 MHz timebase 下依次为 `<=0.1 ms`、
+`<=1 ms`、`<=10 ms`、`<=100 ms`、`<=1 s`、`>1 s`。每桶 `pages/calls` 与
+`targets/calls` 可区分大 range/fanout 和工作量正常但等待异常的固件/MTTCG 长尾。
 
 `clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
 

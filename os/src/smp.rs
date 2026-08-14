@@ -21,6 +21,27 @@ pub const MAX_CPUS: usize = 16;
 /// handler 提供确定的工作量上界。
 pub(crate) const MAX_USER_TLB_RANGE_PAGES: usize = 64;
 
+pub(crate) const TLB_SHOOTDOWN_KIND_COUNT: usize = 5;
+pub(crate) const TLB_SHOOTDOWN_KIND_NAMES: [&str; TLB_SHOOTDOWN_KIND_COUNT] = [
+    "kernel_full",
+    "user_full",
+    "user_range_firmware",
+    "user_range_ipi",
+    "user_range_fallback",
+];
+pub(crate) const TLB_RFENCE_BUCKET_COUNT: usize = 6;
+pub(crate) const TLB_RFENCE_BUCKET_NAMES: [&str; TLB_RFENCE_BUCKET_COUNT] = [
+    "le_1000",
+    "le_10000",
+    "le_100000",
+    "le_1000000",
+    "le_10000000",
+    "gt_10000000",
+];
+#[cfg(feature = "perf_stats")]
+const TLB_RFENCE_BUCKET_UPPER_TICKS: [usize; TLB_RFENCE_BUCKET_COUNT - 1] =
+    [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
 /// Phase 1 的 CPU-local 锚点；后续批次只扩展表项，不移动现有地址。
 #[repr(C, align(64))]
 struct PerCpu {
@@ -66,6 +87,20 @@ struct PerCpu {
     tlb_sync_ticks_max: AtomicUsize,
     /// 本 CPU 收到错误返回的 TLB 同步轮数；doorbell 单点失败由 IPI 诊断统计。
     tlb_sync_failures: AtomicUsize,
+    /// 各 backend 的累计/最大同步 raw ticks；只在 perf memory_io 窗口记录。
+    #[cfg(feature = "perf_stats")]
+    tlb_sync_ticks_by_kind_total: [AtomicUsize; TLB_SHOOTDOWN_KIND_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_sync_ticks_by_kind_max: [AtomicUsize; TLB_SHOOTDOWN_KIND_COUNT],
+    /// SBI RFENCE range 的延迟分桶，并关联每桶页数和远端 hart fanout。
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_calls: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_ticks: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_pages: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_targets: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
     /// 本 CPU 必须执行的 membarrier 完整内存屏障序号。
     memory_barrier_request: AtomicUsize,
     /// 本 CPU 执行完整内存屏障后发布的对应确认序号。
@@ -120,6 +155,20 @@ impl PerCpu {
             tlb_sync_ticks_total: AtomicUsize::new(0),
             tlb_sync_ticks_max: AtomicUsize::new(0),
             tlb_sync_failures: AtomicUsize::new(0),
+            #[cfg(feature = "perf_stats")]
+            tlb_sync_ticks_by_kind_total: [const { AtomicUsize::new(0) };
+                TLB_SHOOTDOWN_KIND_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_sync_ticks_by_kind_max: [const { AtomicUsize::new(0) };
+                TLB_SHOOTDOWN_KIND_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_calls: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_ticks: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_pages: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_targets: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
             memory_barrier_request: AtomicUsize::new(0),
             memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
@@ -191,6 +240,12 @@ pub(crate) struct TlbDiagnostics {
     pub(crate) sync_ticks_total: usize,
     pub(crate) sync_ticks_max: usize,
     pub(crate) sync_failures: usize,
+    pub(crate) sync_ticks_by_kind_total: [usize; TLB_SHOOTDOWN_KIND_COUNT],
+    pub(crate) sync_ticks_by_kind_max: [usize; TLB_SHOOTDOWN_KIND_COUNT],
+    pub(crate) rfence_bucket_calls: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_ticks: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_pages: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
 }
 
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
@@ -457,6 +512,27 @@ enum TlbShootdownKind {
     UserRangeFallback,
 }
 
+#[cfg(feature = "perf_stats")]
+impl TlbShootdownKind {
+    const fn index(self) -> usize {
+        match self {
+            Self::KernelFull => 0,
+            Self::UserFull => 1,
+            Self::UserRangeFirmware { .. } => 2,
+            Self::UserRangeIpi { .. } => 3,
+            Self::UserRangeFallback => 4,
+        }
+    }
+}
+
+#[cfg(feature = "perf_stats")]
+fn rfence_latency_bucket(elapsed: usize) -> usize {
+    TLB_RFENCE_BUCKET_UPPER_TICKS
+        .iter()
+        .position(|upper| elapsed <= *upper)
+        .unwrap_or(TLB_RFENCE_BUCKET_COUNT - 1)
+}
+
 /// 在发起 CPU 记录一轮远端 TLB 同步的最终结果。
 ///
 /// 该函数只更新 Relaxed 诊断值，不参与 request/ack、generation 或 frame 退休同步。
@@ -487,9 +563,10 @@ fn record_tlb_shootdown(
     }
     .fetch_add(1, Ordering::Relaxed);
 
+    let remote_target_count = remote_targets.count_ones() as usize;
     local
         .tlb_remote_targets
-        .fetch_add(remote_targets.count_ones() as usize, Ordering::Relaxed);
+        .fetch_add(remote_target_count, Ordering::Relaxed);
     let elapsed = crate::hal::get_time().wrapping_sub(started_at);
     local
         .tlb_sync_ticks_total
@@ -499,6 +576,21 @@ fn record_tlb_shootdown(
         .fetch_max(elapsed, Ordering::Relaxed);
     if failed {
         local.tlb_sync_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "perf_stats")]
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        let kind_index = kind.index();
+        local.tlb_sync_ticks_by_kind_total[kind_index].fetch_add(elapsed, Ordering::Relaxed);
+        local.tlb_sync_ticks_by_kind_max[kind_index].fetch_max(elapsed, Ordering::Relaxed);
+        if let TlbShootdownKind::UserRangeFirmware { pages } = kind {
+            let bucket = rfence_latency_bucket(elapsed);
+            local.tlb_rfence_bucket_calls[bucket].fetch_add(1, Ordering::Relaxed);
+            local.tlb_rfence_bucket_ticks[bucket].fetch_add(elapsed, Ordering::Relaxed);
+            local.tlb_rfence_bucket_pages[bucket].fetch_add(pages, Ordering::Relaxed);
+            local.tlb_rfence_bucket_targets[bucket]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+        }
     }
 }
 
@@ -696,6 +788,24 @@ pub(crate) fn tlb_diagnostics() -> TlbDiagnostics {
         total.sync_failures = total
             .sync_failures
             .wrapping_add(cpu.tlb_sync_failures.load(Ordering::Relaxed));
+        #[cfg(feature = "perf_stats")]
+        for index in 0..TLB_SHOOTDOWN_KIND_COUNT {
+            total.sync_ticks_by_kind_total[index] = total.sync_ticks_by_kind_total[index]
+                .wrapping_add(cpu.tlb_sync_ticks_by_kind_total[index].load(Ordering::Relaxed));
+            total.sync_ticks_by_kind_max[index] = total.sync_ticks_by_kind_max[index]
+                .max(cpu.tlb_sync_ticks_by_kind_max[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..TLB_RFENCE_BUCKET_COUNT {
+            total.rfence_bucket_calls[index] = total.rfence_bucket_calls[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_calls[index].load(Ordering::Relaxed));
+            total.rfence_bucket_ticks[index] = total.rfence_bucket_ticks[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_ticks[index].load(Ordering::Relaxed));
+            total.rfence_bucket_pages[index] = total.rfence_bucket_pages[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_pages[index].load(Ordering::Relaxed));
+            total.rfence_bucket_targets[index] = total.rfence_bucket_targets[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_targets[index].load(Ordering::Relaxed));
+        }
     }
     total
 }
@@ -714,6 +824,24 @@ pub(crate) fn reset_tlb_diagnostics() {
         cpu.tlb_sync_ticks_total.store(0, Ordering::Relaxed);
         cpu.tlb_sync_ticks_max.store(0, Ordering::Relaxed);
         cpu.tlb_sync_failures.store(0, Ordering::Relaxed);
+        for counter in &cpu.tlb_sync_ticks_by_kind_total {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_sync_ticks_by_kind_max {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_ticks {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_pages {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
     }
 }
 

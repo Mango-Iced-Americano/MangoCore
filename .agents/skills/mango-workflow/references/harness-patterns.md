@@ -1476,8 +1476,9 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   sysfs 中分别读取，运行中允许出现 1 个事件量级的快照撕裂，窗口末尾再核对最终覆盖关系。
 - **判定**：同时要求相同 golden 的全新 overlay、CPU/内存/MTTCG、正式开始点、crate 进度和
   minibuild；短窗只用于排除数量级，未完成整轮且没有交替重复时不能声称最终吞吐收益。同步
-  等待类计数必须同时导出 backend、range、fanout、total/max ticks 和失败数；max 达秒级时，
-  total 的单对差异先按长尾噪声处理，下一步补 histogram，不能归因给旁路屏障。
+  等待类计数必须同时导出 backend、range、fanout、total/max ticks 和失败数；总 max 不能静态
+  归到调用次数最多的 backend，必须先补按 backend 的 total/max，再只对实际可疑 backend 做
+  histogram。max 达秒级时，total 的单对差异先按长尾噪声处理，不能归因给旁路屏障。
 - **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/perf.rs`、
   `os/src/smp.rs`、`os/src/fs/sysfs/files/diag.rs`、`scripts/monitor_buildstorm_peak.py`
 

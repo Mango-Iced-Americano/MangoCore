@@ -695,7 +695,7 @@ fn stats_tlb_content(
     len: usize,
     buf: &mut [u8],
 ) -> Result<usize, SyscallErr> {
-    let mut s = String::with_capacity(768);
+    let mut s = String::with_capacity(3072);
     let remote = crate::smp::tlb_diagnostics();
     let _ = writeln!(
         s,
@@ -736,6 +736,42 @@ fn stats_tlb_content(
     );
     let _ = writeln!(s, "tlb_shootdown_sync_ticks_max={}", remote.sync_ticks_max);
     let _ = writeln!(s, "tlb_shootdown_failures={}", remote.sync_failures);
+    for index in 0..crate::smp::TLB_SHOOTDOWN_KIND_COUNT {
+        let name = crate::smp::TLB_SHOOTDOWN_KIND_NAMES[index];
+        let _ = writeln!(
+            s,
+            "tlb_shootdown_{}_ticks_total={}",
+            name, remote.sync_ticks_by_kind_total[index]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_shootdown_{}_ticks_max={}",
+            name, remote.sync_ticks_by_kind_max[index]
+        );
+    }
+    for index in 0..crate::smp::TLB_RFENCE_BUCKET_COUNT {
+        let name = crate::smp::TLB_RFENCE_BUCKET_NAMES[index];
+        let _ = writeln!(
+            s,
+            "tlb_rfence_bucket_{}_calls={}",
+            name, remote.rfence_bucket_calls[index]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_rfence_bucket_{}_ticks={}",
+            name, remote.rfence_bucket_ticks[index]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_rfence_bucket_{}_pages={}",
+            name, remote.rfence_bucket_pages[index]
+        );
+        let _ = writeln!(
+            s,
+            "tlb_rfence_bucket_{}_targets={}",
+            name, remote.rfence_bucket_targets[index]
+        );
+    }
     let _ = writeln!(
         s,
         "tlb_shootdown_clock_freq_hz={}",
