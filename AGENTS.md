@@ -171,6 +171,10 @@ Running owner 时在 per-task 请求槽锁内直接发布；排除 owner 时先�
 切回 idle，完成 `Running(source) -> Queued(target)` 后才发布 Applied；
 Blocking 窗口等待回到 Running 或进入 Blocked 后重试。请求槽锁不得跨 IPI、
 TLB ack、context switch 或其它等待点。
+RV64 的远端任务内核栈发布默认采用目标侧延迟确认：发布方在 runqueue 可见前递增目标
+`kernel_tlb_request`，目标取得任务后仍在 idle 栈上执行本地 full flush，确认 request 后才
+`__switch`。当前 CPU 目标仍立即刷新，LA64 仍使用 eager ack；kernel mapping retire 在双架构
+都必须保持全 CPU 同步等待。该协议不依赖 Svvptc 的 stale-invalid 最终收敛语义。
 B39 把全局调度 deadline 拆为每 CPU 独立的 100 Hz 绝对 deadline。hard timer IRQ
 仍只发布 deferred 标志，真正调度只发生在既有安全点；CPU0 额外独占全局
 timer/timeout/timerfd/net poll，AP 只推进本地 quantum。AP 插入更早的全局 timer 时，

@@ -297,6 +297,10 @@ pub(crate) struct TlbDiagnostics {
     pub(crate) kernel_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
     pub(crate) kernel_reason_bucket_calls:
         [usize; KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_deferred_reason_requests: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_deferred_flushes: usize,
+    pub(crate) kernel_deferred_ticks_total: usize,
+    pub(crate) kernel_deferred_ticks_max: usize,
 }
 
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
@@ -474,6 +478,17 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(14),
     PerCpu::new(15),
 ];
+
+/// 任务映射发布改由目标 CPU 在 context switch 前本地确认时的诊断。
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_REASON_REQUESTS: [AtomicUsize; KERNEL_TLB_REASON_COUNT] =
+    [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT];
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_FLUSHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
 
 const fn parse_configured_cpu_count(value: &[u8]) -> usize {
     let mut count = 0;
@@ -683,6 +698,59 @@ impl KernelTlbSyncReason {
         }
     }
 }
+
+/// RV 默认把远端任务映射确认推迟到目标 CPU 的切换安全点。
+///
+/// `perf_diag` 可显式指定 `eager` 回到旧的同步等待协议，供同镜像 A/B；
+/// LA64 暂时保持 eager，避免在没有配对验证时改变其调度协议。
+#[cfg(all(target_arch = "riscv64", feature = "perf_diag"))]
+pub(crate) fn kernel_task_sync_deferred_enabled() -> bool {
+    static ENABLED: spin::Once<bool> = spin::Once::new();
+    *ENABLED.call_once(|| {
+        let mut enabled = true;
+        for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+            match arg {
+                "mango.rv.kernel_task_sync=eager" => enabled = false,
+                "mango.rv.kernel_task_sync=deferred" => enabled = true,
+                _ => {}
+            }
+        }
+        enabled
+    })
+}
+
+#[cfg(all(target_arch = "riscv64", not(feature = "perf_diag")))]
+pub(crate) const fn kernel_task_sync_deferred_enabled() -> bool {
+    true
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+pub(crate) const fn kernel_task_sync_deferred_enabled() -> bool {
+    false
+}
+
+#[cfg(feature = "perf_stats")]
+fn record_deferred_kernel_tlb_request(reason: KernelTlbSyncReason) {
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        KERNEL_TLB_DEFERRED_REASON_REQUESTS[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "perf_stats"))]
+fn record_deferred_kernel_tlb_request(_reason: KernelTlbSyncReason) {}
+
+#[cfg(feature = "perf_stats")]
+fn record_deferred_kernel_tlb_flush(started_at: usize) {
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        let elapsed = crate::hal::get_time().wrapping_sub(started_at);
+        KERNEL_TLB_DEFERRED_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        KERNEL_TLB_DEFERRED_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        KERNEL_TLB_DEFERRED_TICKS_MAX.fetch_max(elapsed, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "perf_stats"))]
+fn record_deferred_kernel_tlb_flush(_started_at: usize) {}
 
 /// 跨 CPU 完整内存屏障协议可能返回的错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -919,6 +987,17 @@ pub(crate) fn tlb_diagnostics() -> TlbDiagnostics {
                 .wrapping_add(cpu.kernel_tlb_reason_bucket_calls[index].load(Ordering::Relaxed));
         }
     }
+    #[cfg(feature = "perf_stats")]
+    {
+        for index in 0..KERNEL_TLB_REASON_COUNT {
+            total.kernel_deferred_reason_requests[index] =
+                KERNEL_TLB_DEFERRED_REASON_REQUESTS[index].load(Ordering::Relaxed);
+        }
+        total.kernel_deferred_flushes = KERNEL_TLB_DEFERRED_FLUSHES.load(Ordering::Relaxed);
+        total.kernel_deferred_ticks_total =
+            KERNEL_TLB_DEFERRED_TICKS_TOTAL.load(Ordering::Relaxed);
+        total.kernel_deferred_ticks_max = KERNEL_TLB_DEFERRED_TICKS_MAX.load(Ordering::Relaxed);
+    }
     total
 }
 
@@ -979,6 +1058,12 @@ pub(crate) fn reset_tlb_diagnostics() {
             counter.store(0, Ordering::Relaxed);
         }
     }
+    for counter in &KERNEL_TLB_DEFERRED_REASON_REQUESTS {
+        counter.store(0, Ordering::Relaxed);
+    }
+    KERNEL_TLB_DEFERRED_FLUSHES.store(0, Ordering::Relaxed);
+    KERNEL_TLB_DEFERRED_TICKS_TOTAL.store(0, Ordering::Relaxed);
+    KERNEL_TLB_DEFERRED_TICKS_MAX.store(0, Ordering::Relaxed);
 }
 
 /// 向一组 online CPU 发布同一个幂等 reason，再逐个触发硬件 doorbell。
@@ -1472,6 +1557,56 @@ fn synchronize_kernel_mapping_mask(
     result
 }
 
+/// 把任务所需的 kernel-global 映射序号发布给目标 CPU，但不等待远端 ack。
+///
+/// request 的 AcqRel RMW 位于 PTE 写入之后、runqueue 入队之前。目标 CPU 只有在
+/// 成功取得该任务后才会进入 [`service_deferred_kernel_tlb`]，其 Acquire 快照和
+/// 本地失效共同保证新内核栈在 `__switch` 改写 SP 前立即可见。
+fn defer_kernel_mapping_for_task(
+    cpu_id: usize,
+    reason: KernelTlbSyncReason,
+) -> Result<(), KernelTlbSyncError> {
+    if cpu_id >= runtime_cpu_count() {
+        return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+    }
+    let target = 1usize << cpu_id;
+    let online = online_cpu_mask();
+    let available = online & !stopped_cpu_mask();
+    if target & online == 0 || target & available == 0 {
+        return Err(KernelTlbSyncError::UnavailableTargets {
+            targets: target,
+            available,
+        });
+    }
+    let sequence = PER_CPUS[cpu_id]
+        .kernel_tlb_request
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    assert_ne!(sequence, 0, "deferred kernel TLB sequence wrapped");
+    record_deferred_kernel_tlb_request(reason);
+    Ok(())
+}
+
+/// 在目标 CPU 的 idle 栈上、切入已取得任务前完成延迟的 kernel-global 失效。
+///
+/// Svvptc 允许 invalid→valid 偶发一次额外页故障，但新内核栈无法安全承受首次
+/// 压栈时的 spurious fault，因此这里始终保留本地 full flush，不做无 fence 旁路。
+pub(crate) fn service_deferred_kernel_tlb() -> bool {
+    if !kernel_task_sync_deferred_enabled() {
+        return false;
+    }
+    let local = &PER_CPUS[self::cpu_id()];
+    let sequence = local.kernel_tlb_request.load(Ordering::Acquire);
+    if local.kernel_tlb_ack.load(Ordering::Acquire) >= sequence {
+        return false;
+    }
+    let started_at = crate::hal::get_time();
+    crate::hal::kernel_tlb_invalidate();
+    local.kernel_tlb_ack.store(sequence, Ordering::Release);
+    record_deferred_kernel_tlb_flush(started_at);
+    true
+}
+
 /// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
 pub(crate) fn synchronize_kernel_mapping(
     cpu_id: usize,
@@ -1479,6 +1614,18 @@ pub(crate) fn synchronize_kernel_mapping(
 ) -> Result<(), KernelTlbSyncError> {
     if cpu_id >= runtime_cpu_count() {
         return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+    }
+    // Work stealing already runs on the destination CPU while still using its
+    // idle stack. Keep that local case immediate; deferral only replaces the
+    // remote publisher's IPI/ack wait.
+    if cpu_id != self::cpu_id()
+        && kernel_task_sync_deferred_enabled()
+        && matches!(
+            reason,
+            KernelTlbSyncReason::TaskPublish | KernelTlbSyncReason::TaskMigration
+        )
+    {
+        return defer_kernel_mapping_for_task(cpu_id, reason);
     }
     synchronize_kernel_mapping_mask(1usize << cpu_id, false, reason)
 }

@@ -223,6 +223,9 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `tlb_kernel_reason_<reason>_{calls,targets,ticks_total,ticks_max}` | counter/max | kernel-global shootdown 按 `task_publish`、`task_migration`、`mapping_retire` 拆分 |
 | `tlb_kernel_bucket_<range>_{calls,ticks,targets}` | histogram | kernel-global shootdown 的延迟、累计耗时和 fanout 分桶 |
 | `tlb_kernel_reason_<reason>_bucket_<range>_calls` | histogram | 各 kernel-global 原因在相同延迟桶内的调用次数 |
+| `tlb_kernel_task_sync_deferred` | gauge | RV `perf_diag` 是否启用目标 CPU context-switch 前本地确认模式 |
+| `tlb_kernel_deferred_reason_<reason>_requests` | counter | 按原因累计的延迟 kernel mapping request |
+| `tlb_kernel_deferred_{flushes,ticks_total,ticks_max}` | counter/max | 目标 CPU 切换前执行的本地 full flush 次数和 raw ticks |
 | `tlb_shootdown_{failures,clock_freq_hz}` | counter/gauge | 同步失败数与 ticks 换算频率 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
@@ -252,6 +255,12 @@ kernel-global 统计复用相同 raw tick 桶。`task_publish` 表示新任务�
 发布，`task_migration` 包括 affinity/migration/steal 的目标栈同步，`mapping_retire`
 表示动态 kernel mapping 撤销后的全 CPU 失效；目标为当前 CPU 的本地同步不会进入远端
 `kernel_full` 计数。
+
+RV production 默认使用目标 CPU context-switch 前本地确认协议；`perf_diag` 可用
+`mango.rv.kernel_task_sync=eager` 回到旧的同步等待路径，或显式指定 `deferred` 做同镜像 A/B。
+该模式不依赖 Svvptc 直接跳过 fence：远端发布方在 runqueue 可见前递增目标 request，目标 CPU
+取得任务后、`__switch` 改写内核栈指针前执行本地 full flush 并确认序号。目标就是当前 CPU 时
+仍立即本地刷新；LA64 暂时保持 eager；`mapping_retire` 在所有模式下始终保持全 CPU 同步等待。
 
 `clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
 

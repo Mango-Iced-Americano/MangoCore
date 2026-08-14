@@ -223,8 +223,11 @@ slot/IPI 精准区间，或 slot 被占用后的 range→full fallback。另累�
 诊断统计，只有最终同步返回错误才增加 TLB failure。全部计数属于 Relaxed best-effort
 快照，不参与 request/ack、generation、ASID 或 frame 退休同步，也不在 hard IRQ 中计时。
 
-B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
-释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
+B21 的共享内核页表撤映射协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
+释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。RV64 新任务的
+invalid→valid 内核栈发布采用另一条严格受限的顺序：发布方先递增目标 request 再入队，
+目标在 idle 栈取得任务后、本地 full flush 完成前不得 `__switch` 到该栈；这不放宽任何
+撤映射、权限/PPN 修改或 frame/slot 回收的 shootdown 要求。
 
 ## 7. COW 中的页表变化
 

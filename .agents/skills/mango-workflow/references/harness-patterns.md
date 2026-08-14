@@ -1572,3 +1572,23 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   mapping retire 必须保留失效。先做原因闭合，再设计单变量 bypass A/B。
 - **相关文件**：`os/src/smp.rs`、`os/src/task/manager.rs`、`os/src/task/run_queue.rs`、
   `os/src/task/task.rs`、`os/src/fs/sysfs/files/diag.rs`
+
+## Svvptc 的最终收敛不能替代首次内核栈访问前的确定性刷新
+
+- **危险模式**：严格的 invalid→valid PTE 更新在 Svvptc 下最终会自动可见，但规范仍允许一次
+  gratuitous page fault。若新映射承载的是即将切入的内核栈，首次 stale-invalid 可能发生在
+  `__switch` 改写 SP 或 trap 入口压栈时；这时 fault handler 仍依赖当前内核栈，无法像用户缺页
+  那样安全重试。因此不能把“最终收敛”直接推广成新内核栈的 no-fence 发布。
+- **安全协议**：发布方在 PTE 写入之后、runqueue 可见之前，以 AcqRel 递增目标 CPU 的
+  `kernel_tlb_request`，但不等待远端 ack。目标取得任务后仍运行在 idle 栈上，以 Acquire 快照
+  request，执行本地 full flush，再用 Release 确认序号；只有这之后才允许 `__switch` 改写 SP。
+  多个请求可以由一次目标侧 flush 合并。目标就是当前 CPU 时直接本地刷新，不制造延迟请求。
+- **并发边界**：任务发布/迁移只依赖“该任务在切换前可见”，可以延迟到目标安全点；unmap、
+  权限/PPN 改写和 mapping retire 会释放或复用资源，必须继续发送全 CPU shootdown 并等待 ack。
+  request 必须先于 enqueue，flush 必须先于 ack，不能用 reschedule doorbell 本身表达完成关系。
+- **验收**：同镜像 A/B 同时导出 eager reason/calls/ticks 与 deferred request/flush/ticks；要求
+  `deferred requests >= local flushes`、migration 的本地-only 情况不混入延迟计数、两侧 workload
+  进度和正确性 marker 对齐。一次最终 RV8 300 秒 pair 中，275 个 publish request 合并为 250
+  次本地 flush（15.3 ms），远端同步等待从 17.47 CPU-s 降至 1.39 CPU-s，且 retire 仍同步。
+- **相关文件**：`os/src/smp.rs`、`os/src/task/processor.rs`、`os/src/task/manager.rs`、
+  `os/src/fs/sysfs/files/diag.rs`

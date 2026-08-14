@@ -774,6 +774,9 @@ fn dispatch_task(
     if task.is_kernel_only() {
         crate::task::perf::record_task_switch_to_kernel_only();
     }
+    // 延迟发布协议只允许目标 CPU 在取得任务后确认 request；此时仍运行在
+    // idle 栈且尚未发布 current，能够在 `__switch` 改写 SP 前安全完成本地全刷。
+    let _ = crate::smp::service_deferred_kernel_tlb();
     #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_switch =
         cpu == crate::smp::BOOT_CPU_ID && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);

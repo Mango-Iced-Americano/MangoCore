@@ -824,6 +824,34 @@ fn stats_tlb_content(
     }
     let _ = writeln!(
         s,
+        "tlb_kernel_task_sync_deferred={}",
+        usize::from(crate::smp::kernel_task_sync_deferred_enabled())
+    );
+    for reason in 0..crate::smp::KERNEL_TLB_REASON_COUNT {
+        let name = crate::smp::KERNEL_TLB_REASON_NAMES[reason];
+        let _ = writeln!(
+            s,
+            "tlb_kernel_deferred_reason_{}_requests={}",
+            name, remote.kernel_deferred_reason_requests[reason]
+        );
+    }
+    let _ = writeln!(
+        s,
+        "tlb_kernel_deferred_flushes={}",
+        remote.kernel_deferred_flushes
+    );
+    let _ = writeln!(
+        s,
+        "tlb_kernel_deferred_ticks_total={}",
+        remote.kernel_deferred_ticks_total
+    );
+    let _ = writeln!(
+        s,
+        "tlb_kernel_deferred_ticks_max={}",
+        remote.kernel_deferred_ticks_max
+    );
+    let _ = writeln!(
+        s,
         "tlb_shootdown_clock_freq_hz={}",
         crate::hal::get_clock_freq()
     );

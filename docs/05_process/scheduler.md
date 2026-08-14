@@ -3,7 +3,7 @@ title: "调度器与 run_tasks 主循环"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-13
+last_update: 2026-08-14
 tags: [process, scheduler, task-manager, processor]
 ---
 
@@ -194,11 +194,15 @@ CPU0；其余调用从 `cpus_allowed & online & scheduler & !stopped` 中选择�
 用户探针不再各自复制远程入队协议。顺序固定为：
 
 1. 验证目标 CPU 已 configured、online，AP 还必须越过 scheduler-ready；
-2. 快速检查进程没有进入 group exit；若目标是远端 CPU，再完成动态内核栈映射
-   的 TLB 同步；
+2. 快速检查进程没有进入 group exit；若目标是远端 CPU，RV64 在入队前发布目标
+   `kernel_tlb_request` 而不等待，LA64 仍完成动态内核栈映射的同步 ack；
 3. 取得 `process.thread_group` 锁并再次检查退出码，在同一门禁内登记成员、
    live token，并只取一个目标 runqueue 提交 `New -> Queued(cpu)`；
 4. 释放 thread-group/runqueue 锁后，才发送 `RESCHEDULE` doorbell。
+
+RV64 目标 CPU 取得任务后仍运行在 idle 栈上，必须在 `__switch` 改写 SP 前完成本地
+full flush 并确认 request；同 CPU work stealing 继续立即本地刷新。这个延迟确认只覆盖
+任务所需的新内核栈映射，内核映射退休仍必须等待所有目标 ack。
 
 `publish_task_on()` 本身仍是精确目标提交原语，不做负载选择；普通
 `publish_task()` 已在 B37 按 affinity/locality/近似负载选择目标，然后调用该原语。

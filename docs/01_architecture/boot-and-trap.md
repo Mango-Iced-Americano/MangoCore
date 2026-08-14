@@ -176,7 +176,8 @@ mailbox 表示“待处理原因集合”，不是可累计的事件队列。B95
 发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
 已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
 
-B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射发布协议：
+B19 为远程任务的动态内核栈增加了一个受限的映射发布协议。当前 LA64 保留原始
+eager 协议：
 
 1. CPU0 在 `KERNEL_SPACE` 锁内建立 stack PTE，然后释放页表锁；
 2. CPU0 递增目标 CPU 的 `kernel_tlb_request`，发送 `KERNEL_TLB_SYNC`；
@@ -186,7 +187,14 @@ B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射
 
 sequence 允许合并同一目标的并发发布请求；ack 覆盖该序号之前的 PTE 写入。
 
-B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映射协议：
+RV64 production 已把新增任务映射改为目标侧延迟确认：发布方在 runqueue 可见前以
+AcqRel 递增目标 `kernel_tlb_request`，但不发送 `KERNEL_TLB_SYNC`、不等待 ack；目标 CPU
+取得任务后仍运行在 idle 栈上，在 `__switch` 改写 SP 前 Acquire 快照 request、执行本地
+全 TLB 失效并 Release ack。目标就是当前 CPU 时仍立即本地失效。该路径不依赖 Svvptc
+跳过 fence，因为新内核栈的首次压栈不能安全承受 stale-invalid 引发的偶发页故障。
+
+B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映射协议；它不使用
+上述任务发布快路：
 
 1. 在 `KERNEL_SPACE` 锁内清除 PTE，并把含 `FrameTracker` 的映射对象移出集合；
 2. 释放页表锁后，先为所有远端目标发布独立 request 序号，再做本地全量失效并广播 IPI；

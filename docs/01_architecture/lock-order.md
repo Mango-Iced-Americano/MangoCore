@@ -3,7 +3,7 @@ title: "MangoCore SMP 锁序与中断上下文约束"
 category: architecture
 status: proposed
 owner: MangoCore Team
-last_updated: 2026-08-05
+last_updated: 2026-08-14
 tags: [smp, locking, irq, preemption, scheduler, tlb]
 related_docs:
   - "docs/10_plan/smp-8core-implementation.md"
@@ -428,14 +428,19 @@ B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`
 
 ### 3.4 B19 AP 调度与内核栈发布约束
 
-B19 只为 focused ktest 的 kernel-only 任务开放显式目标 CPU，不改变普通任务的 CPU0
-策略。其跨核发布顺序固定为：
+B19 最初只为 focused ktest 的 kernel-only 任务开放显式目标 CPU；当前普通任务也复用
+同一跨核发布入口。RV64 的顺序固定为：
 
 1. CPU0 在 `KERNEL_SPACE` 锁内建立动态 kernel stack 映射并释放锁；
-2. 不持有 MM/PTE/runqueue 锁发送 `KERNEL_TLB_SYNC`，等待目标本地 flush ack；
-3. ack 完成后只锁目标的一个 runqueue，提交 `New -> Queued(cpu)` 并释放锁；
+2. 不持有 MM/PTE/runqueue 锁，以 AcqRel 递增目标 `kernel_tlb_request`，不等待 ack；
+3. 只锁目标的一个 runqueue，提交 `New -> Queued(cpu)` 并释放锁；
 4. 最后发送 `RESCHEDULE` doorbell，IPI handler 只置位；AP idle 或运行中用户任务的
    trap-return 安全点随后消费，不在 hard IRQ 内 fetch。
+5. 目标 CPU 取得任务后仍在 idle 栈上，先 Acquire 快照 request、执行本地 full flush 并
+   Release ack，随后才由 `__switch` 改写 SP。目标就是当前 CPU 时仍立即本地 flush。
+
+LA64 暂时保留“发送 `KERNEL_TLB_SYNC` → 等待 ack → 入队”的 eager 顺序。两种协议都要求
+撤映射/slot 退休继续全 CPU 同步等待；任务发布快路不能用于 frame 回收。
 
 AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready
 屏障等待且不持锁。AP dispatch 前只锁自己的 runqueue；`dispatch_task()` 先后取得
