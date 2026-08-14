@@ -435,6 +435,7 @@ pub fn start_secondary_cpu(cpu_id: usize, start_addr: usize) -> Result<(), isize
 /// 向一个硬件 CPU 发送运行期 IPI；vector 1 与 slave ROM 的 vector 0 分离。
 #[cfg(feature = "boot_la_qemu")]
 pub fn send_ipi(hardware_id: usize) -> Result<(), isize> {
+    // LA64 QEMU FDT 与静态回退都保持连续 hardware ID，因此该界限仍等同逻辑拓扑。
     if hardware_id >= crate::smp::configured_cpu_count() {
         return Err(-3);
     }

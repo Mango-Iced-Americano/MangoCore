@@ -24,6 +24,9 @@ mod fdt;
 mod static_provider;
 
 pub use fdt::build_platform_info;
+pub(crate) use fdt::{page_align_range, push_range};
+#[cfg(target_arch = "riscv64")]
+pub(crate) use fdt::isa_has_supervisor;
 
 use crate::hal::boot;
 #[cfg(all(target_arch = "loongarch64", feature = "boot_la_uboot_dmw"))]
@@ -83,7 +86,9 @@ pub struct MemoryRegionBuf {
     pub region_count: usize,
     pub reserved_count: usize,
     pub mmio_count: usize,
-    /// FDT `/cpus` 探测到的逻辑 CPU 数量；0 表示 FDT 缺失 `/cpus` 或尚未初始化。
+    /// 已冻结的可启动硬件 hart，升序且不重复；`cpu_count` 个前缀有效。
+    pub cpu_harts: [usize; crate::smp::MAX_CPUS],
+    /// FDT `/cpus` 探测到的可启动 hart 数量；0 且列表为空表示无 FDT 拓扑。
     pub cpu_count: usize,
     #[cfg(target_arch = "riscv64")]
     pub timebase_frequency: usize,
@@ -98,6 +103,7 @@ impl MemoryRegionBuf {
             region_count: 0,
             reserved_count: 0,
             mmio_count: 0,
+            cpu_harts: [0; crate::smp::MAX_CPUS],
             cpu_count: 0,
             #[cfg(target_arch = "riscv64")]
             timebase_frequency: 0,
@@ -306,14 +312,23 @@ pub fn timebase_frequency() -> usize {
     frequency
 }
 
-/// 返回 FDT `/cpus` 探测到的逻辑 CPU 数量（Linux nr_cpu_ids 语义的探测源）。
+/// 返回 FDT `/cpus` 探测到的可启动 hart 数量（Linux nr_cpu_ids 语义的探测源）。
 ///
-/// 0 表示探测失败或尚未执行 `populate_memory_regions()`；调用方（`smp`）负责
-/// 回退到编译期配置并截断到 `MAX_CPUS`。
+/// 0 与空 `cpu_harts()` 共同表示无 FDT 拓扑；调用方（`smp`）才可回退到编译期配置。
 pub fn cpu_count() -> usize {
     // SAFETY: The pre-heap parser publishes this scalar once before `mm::init()`
     // and never mutates it afterwards; all later access is read-only.
     unsafe { (*core::ptr::addr_of!(MEMORY_BUF)).cpu_count }
+}
+
+/// 返回预堆阶段冻结的升序、去重可启动硬件 hart 列表。
+///
+/// `MEMORY_BUF` 只在 BSS 清零前由 BSP 写入；所有 AP 都在 `BOOT_PHASE` 的 Acquire
+/// 之后只读这份列表，因此这里不需要额外锁或原子字段。
+pub fn cpu_harts() -> &'static [usize] {
+    // SAFETY: 与 `cpu_count()` 相同，列表在 AP release 前完整冻结，此后只读。
+    let buffer = unsafe { &*core::ptr::addr_of!(MEMORY_BUF) };
+    &buffer.cpu_harts[..buffer.cpu_count]
 }
 
 /// Sum discovered usable RAM ranges for runtime accounting.
@@ -333,7 +348,8 @@ fn populate_from_static() {
     buffer.region_count = 0;
     buffer.reserved_count = 0;
     buffer.mmio_count = 0;
-    // 静态板级描述没有 FDT `/cpus`；保持 cpu_count=0，由 smp 回退到编译期配置。
+    // 静态板级描述没有 FDT `/cpus`；空列表与 cpu_count=0 共同触发 smp 的稠密回退。
+    buffer.cpu_harts = [0; crate::smp::MAX_CPUS];
     buffer.cpu_count = 0;
 
     for (index, &(start, end)) in MEMORY_REGIONS_FALLBACK.iter().enumerate() {

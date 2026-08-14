@@ -52,6 +52,8 @@ mod platform_fdt_snapshot;
 #[cfg(target_arch = "riscv64")]
 mod dw_mshc;
 mod platform_resources;
+mod fdt_resource_alignment;
+mod smp_topology;
 
 #[path = "block_device.rs"]
 mod kt_block_device;
@@ -100,6 +102,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         #[cfg(target_arch = "riscv64")]
         ("dw_mshc", dw_mshc::tests()),
         ("platform_resources", platform_resources::tests()),
+        ("fdt_resource_alignment", fdt_resource_alignment::tests()),
+        ("smp_topology", smp_topology::tests()),
     ]
 }
 

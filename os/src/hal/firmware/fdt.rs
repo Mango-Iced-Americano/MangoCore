@@ -141,6 +141,7 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
 
     buf.reserved_count = 0;
     buf.mmio_count = 0;
+    buf.cpu_harts = [0; crate::smp::MAX_CPUS];
     buf.cpu_count = 0;
     #[cfg(target_arch = "riscv64")]
     {
@@ -180,51 +181,146 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
     resources_ok
 }
 
-/// 尽力统计 `/cpus` 的直接子节点数量，写入 `buffer.cpu_count`。
+/// `riscv,isa` 的单字母扩展段是否声明 supervisor mode。
+///
+/// `_` 后是多字母扩展；例如 `zicsr` 含有字符 `s`，却不能证明 CPU 支持 S-mode。
+/// 单字母 `h` 的 H 扩展以 S-mode 为前提，故也可证明 supervisor；这保留 QEMU
+/// `rv64imafdch_*` 的有效 CPU，同时仍不把下划线后的 `zicsr` 当成 S-mode。
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn isa_has_supervisor(isa: &str) -> bool {
+    let base = isa.split_once('_').map_or(isa, |(base, _)| base);
+    let extensions = base
+        .strip_prefix("rv32")
+        .or_else(|| base.strip_prefix("rv64"));
+    extensions.is_some_and(|extensions| {
+        extensions
+            .as_bytes()
+            .iter()
+            .any(|&extension| matches!(extension, b's' | b'h'))
+    })
+}
+
+/// 尽力收集 `/cpus` 的可启动硬件 hart，写入 `buffer.cpu_harts` 与 `cpu_count`。
 ///
 /// 每个 `/cpus` 的直接子节点对应一个 CPU（QEMU virt 使用 `cpu@N` 命名）。为了
 /// 兼容 board 级命名并排除 `cpu-map` 等拓扑辅助节点，子节点判据为：节点名恰为
-/// `cpu`（不含 `@` 单元地址），或带有 `device_type = "cpu"` 属性。结果截断到
-/// 编译期 `MAX_CPUS`（Linux NR_CPUS 语义）。FDT 缺失 `/cpus` 或遍历中途失败时
-/// 保持当前值（调用方负责以 0 表示未探测）。
+/// `cpu`（不含 `@` 单元地址），或带有 `device_type = "cpu"` 属性。结果在固定
+/// 容量数组内排序去重；即使遍历失败也必定保留 BSP hart，FDT 路径绝不猜测编译期核数。
 fn count_cpus(fdt: &FallibleFdt<'_>, buffer: &mut crate::hal::firmware::MemoryRegionBuf) {
-    let Ok(nodes) = fdt.all_nodes() else {
-        return;
-    };
+    buffer.cpu_harts = [0; crate::smp::MAX_CPUS];
+    buffer.cpu_count = 0;
     let mut in_cpus = false;
     let mut count = 0usize;
-    for entry in nodes {
-        let Ok((depth, node)) = entry else {
-            // 遍历中断：只保留已经统计的值，不视为致命错误。
-            break;
-        };
-        if depth == 1 {
-            // DFS 顺序下，深度 2 的节点都属于最近出现的深度 1 父节点。
-            in_cpus = match node.name() {
-                Ok(node_name) => &*node_name.name == "cpus",
+    if let Ok(nodes) = fdt.all_nodes() {
+        for entry in nodes {
+            let Ok((depth, node)) = entry else {
+                // 遍历中断：只保留已经收集的 hart，不视为整个固件发现失败。
+                break;
+            };
+            if depth == 1 {
+                // DFS 顺序下，深度 2 的节点都属于最近出现的深度 1 父节点。
+                in_cpus = node.name().is_ok_and(|node_name| &*node_name.name == "cpus");
+                continue;
+            }
+            if !in_cpus || depth != 2 {
+                continue;
+            }
+            let name_is_cpu = node
+                .name()
+                .is_ok_and(|node_name| node_name.name == "cpu");
+            let device_type_is_cpu = node
+                .raw_property("device_type")
+                .ok()
+                .flatten()
+                .is_some_and(|property| {
+                    let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
+                    value == b"cpu"
+                });
+            if !name_is_cpu && !device_type_is_cpu {
+                continue;
+            }
+            let status_is_eligible = match node.raw_property("status") {
+                Ok(None) => true,
+                Ok(Some(property)) => {
+                    let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
+                    value == b"okay"
+                }
                 Err(_) => false,
             };
-            continue;
-        }
-        if !in_cpus || depth != 2 {
-            continue;
-        }
-        let name_is_cpu = node
-            .name()
-            .is_ok_and(|node_name| node_name.name == "cpu");
-        let device_type_is_cpu = node
-            .raw_property("device_type")
-            .ok()
-            .flatten()
-            .is_some_and(|property| {
-                let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
-                value == b"cpu"
+            if !status_is_eligible {
+                continue;
+            }
+            #[cfg(target_arch = "riscv64")]
+            let isa_is_eligible = node
+                .raw_property("riscv,isa")
+                .ok()
+                .flatten()
+                .and_then(|property| {
+                    let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
+                    core::str::from_utf8(value).ok()
+                })
+                .is_some_and(isa_has_supervisor);
+            #[cfg(not(target_arch = "riscv64"))]
+            let isa_is_eligible = true;
+            if !isa_is_eligible {
+                continue;
+            }
+            // `Node::reg()` 按其父 `/cpus` 的 `#address-cells` 解析；不能读取
+            // CPU 节点自身的 cell 配置。空或畸形 reg 一律不加入启动目标。
+            let hart_id = node.reg().ok().flatten().and_then(|reg| {
+                reg.iter::<usize, usize>()
+                    .next()?
+                    .ok()
+                    .map(|entry| entry.address)
             });
-        if name_is_cpu || device_type_is_cpu {
-            count = (count + 1).min(crate::smp::MAX_CPUS);
+            let Some(hart_id) = hart_id else {
+                continue;
+            };
+            if count < crate::smp::MAX_CPUS {
+                buffer.cpu_harts[count] = hart_id;
+                count += 1;
+            }
         }
     }
-    buffer.cpu_count = count;
+
+    let mut index = 1;
+    while index < count {
+        let hart_id = buffer.cpu_harts[index];
+        let mut insertion = index;
+        while insertion > 0 && hart_id < buffer.cpu_harts[insertion - 1] {
+            buffer.cpu_harts[insertion] = buffer.cpu_harts[insertion - 1];
+            insertion -= 1;
+        }
+        buffer.cpu_harts[insertion] = hart_id;
+        index += 1;
+    }
+    let mut unique = 0usize;
+    for index in 0..count {
+        let hart_id = buffer.cpu_harts[index];
+        if unique == 0 || buffer.cpu_harts[unique - 1] != hart_id {
+            buffer.cpu_harts[unique] = hart_id;
+            unique += 1;
+        }
+    }
+    count = unique;
+
+    let boot_hart = crate::hal::boot::boot_info().hart_id;
+    if !buffer.cpu_harts[..count].contains(&boot_hart) {
+        // 固定容量已满时丢弃最大 AP hart，为实际 BSP 腾出一格；宁可少启 AP，也不能
+        // 退回编译期密集猜测而让不具备 S-mode 的 hart 收到 HSM hart_start。
+        if count == crate::smp::MAX_CPUS {
+            count -= 1;
+        }
+        let mut insertion = count;
+        while insertion > 0 && boot_hart < buffer.cpu_harts[insertion - 1] {
+            buffer.cpu_harts[insertion] = buffer.cpu_harts[insertion - 1];
+            insertion -= 1;
+        }
+        buffer.cpu_harts[insertion] = boot_hart;
+        count += 1;
+    }
+    // FDT 路径必须 fail-closed 为至少 BSP-only；上面的 BSP 插入使这里恒为真。
+    buffer.cpu_count = count.max(1);
 }
 
 /// Collect every root-level `/memory` node, regardless of whether its name
@@ -307,7 +403,24 @@ fn sort_and_validate_memory_regions(buffer: &mut crate::hal::firmware::MemoryReg
     true
 }
 
-fn push_range<const N: usize>(
+/// 4 KiB 页掩码：早期恒等映射、MMIO 与 reserved 列表都以页为粒度覆盖。
+const PAGE_MASK: usize = 0xfff;
+
+/// 将半开区间 `[start, end)` 归一化为页边界 `[floor(start), ceil(end))`。
+///
+/// 内核页表按页建立映射，同一 4 KiB 页内的多个子区间（例如 vendor DTB 中
+/// 同页不同偏移的多个 `reg` 条目）若不先在字节粒度合并，后续 `push_range`
+/// 不会合并它们，映射第二段时会对同一 VPN 重复映射并返回 `AlreadyMapped`。
+/// 页对齐后再 `push_range`，这些条目必然合并为同一个页区间。
+///
+/// `end` 向上取整溢出时返回 `None`：位于最高地址、无法完整表示其最后一页的
+/// 区间不能安全映射，调用方必须视作资源解析失败。
+pub(crate) fn page_align_range(start: usize, end: usize) -> Option<(usize, usize)> {
+    let end = end.checked_add(PAGE_MASK)?;
+    Some((start & !PAGE_MASK, end & !PAGE_MASK))
+}
+
+pub(crate) fn push_range<const N: usize>(
     ranges: &mut [(usize, usize); N],
     count: &mut usize,
     mut range: (usize, usize),
@@ -375,7 +488,10 @@ fn parse_memreserve(blob: &[u8], buffer: &mut crate::hal::firmware::MemoryRegion
         let Some(end) = start.checked_add(size) else {
             return false;
         };
-        if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, (start, end)) {
+        let Some(page_range) = page_align_range(start, end) else {
+            return false;
+        };
+        if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, page_range) {
             return false;
         }
     }
@@ -450,19 +566,19 @@ fn parse_node_resources(
                 };
                 let range = (region.address, end);
                 if reserved_memory_depth.is_some() {
-                    if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, range) {
+                    let Some(page_range) = page_align_range(range.0, range.1) else {
+                        return false;
+                    };
+                    if !push_range(&mut buffer.reserved, &mut buffer.reserved_count, page_range)
+                    {
                         return false;
                     }
                 } else if is_early_mmio_device {
-                    let page_range = (
-                        range.0 & !0xfff,
-                        match range.1.checked_add(0xfff) {
-                            Some(end) => end & !0xfff,
-                            None => return false,
-                        },
-                    );
+                    let Some(page_range) = page_align_range(range.0, range.1) else {
+                        return false;
+                    };
                     if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
-                        && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, range)
+                        && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, page_range)
                     {
                         return false;
                     }
@@ -521,7 +637,14 @@ fn parse_pci_mmio_ranges(
         let Some(end) = base.checked_add(size) else {
             return false;
         };
-        if !push_range(&mut buffer.mmio, &mut buffer.mmio_count, (base, end)) {
+        let Some(page_range) = page_align_range(base, end) else {
+            return false;
+        };
+        // 与普通 MMIO 一致：与 RAM 重叠的 PCI 窗口不参与早期恒等映射。
+        if range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count]) {
+            continue;
+        }
+        if !push_range(&mut buffer.mmio, &mut buffer.mmio_count, page_range) {
             return false;
         }
     }

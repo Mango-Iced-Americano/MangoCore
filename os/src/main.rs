@@ -186,6 +186,24 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     // CPU0 完成 BSS、内存、机器状态与全局随机源初始化后才 Release AP。
     // AP 只发布 online 并 park，后续 initramfs、驱动和 PID1 仍由 CPU0 执行。
     smp::bring_up_secondary_cpus();
+    let boot_hart = crate::hal::boot::boot_info().hart_id;
+    let harts = crate::hal::firmware::cpu_harts();
+    print!(
+        "[smp] topology: configured={} boot_hw={} harts=",
+        smp::configured_cpu_count(),
+        boot_hart
+    );
+    if harts.is_empty() {
+        println!("dense-fallback");
+    } else {
+        for (index, hart) in harts.iter().enumerate() {
+            if index != 0 {
+                print!(",");
+            }
+            print!("{}", hart);
+        }
+        println!("");
+    }
 
     let boot_config = crate::bootargs::load();
 

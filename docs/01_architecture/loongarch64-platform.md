@@ -3,7 +3,7 @@ title: "LoongArch64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-14
 tags: [architecture, loongarch64, hal, smp, asid, tlb]
 ---
 
@@ -61,20 +61,16 @@ os/src/hal/arch/loongarch64/
 
 ## 3. `bootstrap_init()`
 
-la64 的 `bootstrap_init()` 首先检查 CPU 核：
+每个已发布的 LA64 CPU 都执行 `bootstrap_init()`；BSP 与 AP 各自在进入本地
+调度循环前完成机器配置。AP 在该初始化前的映射/发布路径只能使用标量指令，不能
+依赖 FPU、SIMD 或 advanced SIMD。
 
-```rust
-if CPUId::read().get_core_id() != 0 {
-    loop {}
-};
-```
-
-非 0 号核停在死循环。随后执行机器配置：
+随后执行机器配置：
 
 | 配置项 | 行为 |
 |--------|------|
 | 中断向量 | `ECfg` 设置 timer line-based interrupt vector |
-| FPU/SIMD | `EUEn` 打开 floating point、SIMD、advanced SIMD |
+| FPU/SIMD | `EUEn` 在每个 online CPU 上打开 floating point、SIMD、advanced SIMD |
 | timer | `TIClr` 清 timer，`TCfg` 关闭早期 timer |
 | CRMD | 关闭 watchpoint，打开 paging，关闭中断 |
 | 普通异常入口 | `set_kernel_trap_entry()` |

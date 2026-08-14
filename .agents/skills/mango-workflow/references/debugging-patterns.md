@@ -1556,3 +1556,41 @@
   USTC（mirrors.ustc.edu.cn/rust-static）容器内被限速至 ~160B/s（宿主机直连却 2MB/s）。
 - **相关文件**：`scripts/rustup-setup.sh`、`Makefile`（prepare-cargo-config）、
   `os/make/common/orchestration.mk`
+
+## FDT 设备节点同一 4 KiB 页内多个 reg 条目 → 早期恒等映射 AlreadyMapped（2026-08-14 实板）
+
+- **现象**：VF2 实板 `booti` 后内核在 `mapping memory-mapped registers` 处 panic
+  `AlreadyMapped: src/mm/page_table.rs:91`（`PageTable::map()` 的 `try_map().unwrap()`）。
+  QEMU 同一镜像完全正常；纯 QEMU 测试无法复现。
+- **根因**：vendor DTB（`dc8200@29400000` 显示控制器）声明两个 reg 条目
+  `[0x29400000,0x29400100)` 与 `[0x29400800,0x29402800)`，落在**同一 4 KiB 页**内。
+  固件资源收集（fdt.rs）以**字节粒度** `push_range` 合并——两个不重叠子区间不会合并；
+  而 `kernel_space` 按 4 KiB 页恒等映射，映射第二段的首页时发现已被第一段映射。
+- **修复**：资源收集层在 `push_range` **之前**做 4 KiB 页对齐（`page_align_range`），
+  同页子区间必然合并为一个页区间；MMIO、reserved-memory、memreserve、PCI 窗口全部走
+  同一归一化。PCI 路径同时补齐与普通 MMIO 一致的 RAM-overlap 检查。
+- **教训**：早期恒等映射的资源列表必须以**映射粒度（页）**合并，不能以字节粒度；
+  QEMU 生成 DTB 没有"同页多 reg"形状，此类 bug 只在实板暴露。核对 vendor DTB 时应检查
+  同一 4 KiB 页内的多个 reg 子区间。fdt crate 的 `node.reg()` 用**父节点**的
+  `#address-cells/#size-cells`（不是节点自身），离线复现内核收集逻辑时必须用父节点 cells。
+- **相关文件**：`os/src/hal/firmware/fdt.rs`、`os/src/mm/kernel_space.rs`
+
+## JH7110 S7（hart0）无 MMU/S-mode，不能通过 SBI HSM 启动（2026-08-14 实板）
+
+- **现象**：VF2 实板内核从 hart1 启动，bring-up 时 hart0 未上线，`secondary CPU online
+  timeout: expected=0x1f online=0x1d missing=0x2`，且 OpenSBI 报 `sbi_trap_error: hart0:
+  mcause=5 (load access fault)`（hart0 自己的 scratch 0x4003d068）。
+- **根因**：JH7110 的 hart0 是 **S7 核——没有 MMU、没有 S-mode**（不是 U74）。
+  OpenSBI HSM 的 warm-boot 路径使用 `atomic_cmpxchg`（LR/SC），而 S7 只支持 AMO 不支持
+  LR/SC → 访问异常直接杀死固件（上游 starfive-tech/VisionFive2#33、OpenSBI 开发者实证）。
+  U-Boot 提供的 FDT 把 `cpu@0` 误导性声明为 `status=okay` + `mmu-type=riscv,sv39`。
+- **修复**：内核拓扑改为"FDT 可启动 hart 列表"（压缩为连续逻辑 CPU）：RV64 只接受
+  status 合格且 `riscv,isa` **单字母段**（第一个 `_` 之前）含 `s`/`h` 的 CPU，
+  收集 `reg` 为升序去重 hart 列表，BSP 恒在列表内，FDT 路径失败关闭为 BSP-only；
+  仅空列表（无 FDT 拓扑，ktest/静态 LA64）才回退编译期稠密计数。逻辑位图（online/
+  affinity/IPI mailbox）保持连续，只在 HSM/硬件 IPI/RFENCE 边界转硬件 hart。
+- **教训**：异构/稀疏 hart 拓扑的板子（如 JH7110：S7 + 4×U74）不能按 `/cpus` 数量做
+  dense 旋转映射；必须按可启动条件过滤。判断 CPU 可启动性用 `riscv,isa` 单字母段
+  （`contains("s")` 会被 `zicsr` 假阳性），`mmu-type` 可能被 vendor DTB 伪造（S7 被
+  谎报 sv39），不可作唯一依据。`cpu_count` 与列表必须作为同一拓扑描述一起消费。
+- **相关文件**：`os/src/hal/firmware/{mod.rs,fdt.rs}`、`os/src/smp.rs`

@@ -498,19 +498,17 @@ static SCHEDULER_RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// 运行时可用的逻辑 CPU 数量（Linux `nr_cpu_ids` 语义）。
 ///
-/// 以 FDT `/cpus` 探测到的实际 CPU 数为准，并截断到编译期上限 `MAX_CPUS`
-/// （Linux `NR_CPUS` 语义：`PER_CPUS`、IdleStacks 等数组仍按 `MAX_CPUS` 定界）。
-/// FDT 缺失 `/cpus` 或固件发现尚未执行时回退到编译期 `CONFIGURED_CPU_COUNT`，
-/// 保证至少 1 个 CPU，绝不返回 0。
+/// 以 FDT `/cpus` 冻结的可启动 hart 数为准（`PER_CPUS`、IdleStacks 等数组仍按
+/// `MAX_CPUS` 定界）。仅空 hart 列表才表示无 FDT 拓扑，可回退到编译期
+/// `CONFIGURED_CPU_COUNT`，保证至少 1 个 CPU，绝不返回 0。
 ///
 /// 该值决定“启动几个 AP + 期望 online mask”，因此与 QEMU 的 `-smp N` 自动匹配：
 /// 同一镜像在不同核数的 QEMU 上都能启动，而不再依赖编译期 `MANGO_CORE_NUM`。
 pub fn runtime_cpu_count() -> usize {
-    let probed = crate::hal::firmware::cpu_count();
-    if probed == 0 {
+    if crate::hal::firmware::cpu_harts().is_empty() {
         CONFIGURED_CPU_COUNT
     } else {
-        probed.min(MAX_CPUS)
+        crate::hal::firmware::cpu_count()
     }
 }
 
@@ -669,7 +667,8 @@ pub fn send_ipi_mask(targets: usize, reason: IpiReason) -> Result<(), isize> {
     let mut first_error = None;
     for cpu_id in 0..runtime_cpu_count() {
         if targets & (1usize << cpu_id) != 0 {
-            let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
+            let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id)
+                .unwrap_or_else(|| panic!("configured logical CPU {} has no hardware hart", cpu_id));
             // 一个 doorbell 失败不能阻止其余已发布 mailbox 的目标被唤醒；
             // 完成整轮发送后再返回首个错误，失败目标的 reason 留待后续 IPI。
             if let Err(error) = crate::hal::send_ipi(hardware_id) {
@@ -1577,7 +1576,22 @@ pub fn register_cpu_entry(hardware_id: usize) -> usize {
         Ok(_) => hardware_id,
         Err(existing) => existing,
     };
-    let logical_id = hardware_to_logical_id(hardware_id, boot_hardware_id);
+    let logical_id = if hardware_id == boot_hardware_id {
+        // BSP 发生在 FDT 解析前，只能直接占用逻辑 CPU0，不能读取尚未冻结的列表。
+        BOOT_CPU_ID
+    } else {
+        // BSP 在所有 HSM start 返回后才 Release；AP 的 Acquire 同时取得已冻结的
+        // `cpu_harts`，未知硬件 hart 必须在接触普通 BSS/调度状态前 fail-stop。
+        while BOOT_PHASE.load(Ordering::Acquire) != AP_RELEASED {
+            spin_loop();
+        }
+        hardware_to_logical_id(hardware_id, boot_hardware_id).unwrap_or_else(|| {
+            panic!(
+                "secondary hardware hart {} is absent from the frozen topology",
+                hardware_id
+            )
+        })
+    };
     install_cpu_local(logical_id);
     logical_id
 }
@@ -1678,24 +1692,116 @@ pub(crate) fn try_local_task_state() -> Option<&'static crate::task::processor::
     try_local_per_cpu().map(|per_cpu| &per_cpu.task_state)
 }
 
-const fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> usize {
+/// 在已冻结的升序 hart 列表中查找硬件 hart 的连续逻辑 ID。
+///
+/// AP 在 `bootstrap_init()` 开启 LA64 SIMD 前调用此函数，因此保持显式标量循环，
+/// 禁止 LLVM 将迭代器计数自动向量化为 LSX 指令。
+#[inline(never)]
+pub(crate) fn hardware_to_logical_id_list(
+    harts: &[usize],
+    boot_hardware_id: usize,
+    hardware_id: usize,
+) -> Option<usize> {
+    let mut boot_present = false;
+    let mut hardware_present = false;
+    let mut logical_id = 1;
+    let mut index = 0;
+    while index < harts.len() {
+        let hart_id = harts[index];
+        if hart_id == boot_hardware_id {
+            boot_present = true;
+            hardware_present |= hart_id == hardware_id;
+        } else if hart_id == hardware_id {
+            hardware_present = true;
+        } else if hart_id < hardware_id {
+            logical_id += 1;
+        }
+        index += 1;
+    }
+    if !boot_present || !hardware_present {
+        return None;
+    }
     if hardware_id == boot_hardware_id {
+        return Some(BOOT_CPU_ID);
+    }
+    Some(logical_id)
+}
+
+/// 在已冻结的升序 hart 列表中反查连续逻辑 ID 对应的硬件 hart。
+pub(crate) fn logical_to_hardware_id_list(
+    harts: &[usize],
+    boot_hardware_id: usize,
+    logical_id: usize,
+) -> Option<usize> {
+    if !harts.contains(&boot_hardware_id) {
+        return None;
+    }
+    if logical_id == BOOT_CPU_ID {
+        return Some(boot_hardware_id);
+    }
+    harts
+        .iter()
+        .copied()
+        .filter(|&hart_id| hart_id != boot_hardware_id)
+        .nth(logical_id - 1)
+}
+
+fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> Option<usize> {
+    let harts = crate::hal::firmware::cpu_harts();
+    if !harts.is_empty() {
+        return hardware_to_logical_id_list(harts, boot_hardware_id, hardware_id);
+    }
+    if hardware_id >= CONFIGURED_CPU_COUNT {
+        return None;
+    }
+    Some(if hardware_id == boot_hardware_id {
         BOOT_CPU_ID
     } else if hardware_id < boot_hardware_id {
         hardware_id + 1
     } else {
         hardware_id
-    }
+    })
 }
 
-const fn logical_to_hardware_id(logical_id: usize, boot_hardware_id: usize) -> usize {
-    if logical_id == BOOT_CPU_ID {
+fn logical_to_hardware_id(logical_id: usize, boot_hardware_id: usize) -> Option<usize> {
+    let harts = crate::hal::firmware::cpu_harts();
+    if !harts.is_empty() {
+        return logical_to_hardware_id_list(harts, boot_hardware_id, logical_id);
+    }
+    if logical_id >= CONFIGURED_CPU_COUNT {
+        return None;
+    }
+    Some(if logical_id == BOOT_CPU_ID {
         boot_hardware_id
     } else if logical_id <= boot_hardware_id {
         logical_id - 1
     } else {
         logical_id
+    })
+}
+
+/// 把逻辑位图转换为指定显式 hart 列表的硬件位图；无效 ID 不可静默折叠到 bit0。
+pub(crate) fn logical_to_hardware_mask_list(
+    harts: &[usize],
+    boot_hardware_id: usize,
+    logical_mask: usize,
+) -> Option<usize> {
+    if harts.len() >= usize::BITS as usize {
+        return None;
     }
+    let valid_logical_mask = (1usize << harts.len()) - 1;
+    if logical_mask & !valid_logical_mask != 0 {
+        return None;
+    }
+    let mut hardware_mask = 0usize;
+    for logical_id in 0..harts.len() {
+        if logical_mask & (1usize << logical_id) == 0 {
+            continue;
+        }
+        let hardware_id = logical_to_hardware_id_list(harts, boot_hardware_id, logical_id)?;
+        hardware_mask |= 1usize.checked_shl(hardware_id as u32)?;
+    }
+    Some(hardware_mask)
 }
 
 /// 把 MangoCore 逻辑 CPU 位图转换为固件使用的物理 hart 位图。
@@ -1714,10 +1820,19 @@ pub(crate) fn logical_to_hardware_mask(logical_mask: usize) -> usize {
         "hardware mask requested before boot CPU registration"
     );
 
+    let harts = crate::hal::firmware::cpu_harts();
+    if !harts.is_empty() {
+        // 调度器始终持有逻辑位图；仅在 SBI/RFENCE 边界转换为 FDT 已验证的硬件位图。
+        return logical_to_hardware_mask_list(harts, boot_hardware_id, logical_mask)
+            .unwrap_or_else(|| panic!("configured logical mask has no hardware-hart mapping"));
+    }
+
     let mut hardware_mask = 0usize;
     for logical_id in 0..runtime_cpu_count() {
         if logical_mask & (1usize << logical_id) != 0 {
-            hardware_mask |= 1usize << logical_to_hardware_id(logical_id, boot_hardware_id);
+            let hardware_id = logical_to_hardware_id(logical_id, boot_hardware_id)
+                .unwrap_or_else(|| panic!("configured logical CPU {} has no hardware hart", logical_id));
+            hardware_mask |= 1usize << hardware_id;
         }
     }
     hardware_mask
@@ -1817,7 +1932,8 @@ pub fn bring_up_secondary_cpus() {
         .take(runtime_cpu_count())
         .skip(1)
     {
-        let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id);
+        let hardware_id = logical_to_hardware_id(cpu_id, boot_hardware_id)
+            .unwrap_or_else(|| panic!("configured logical CPU {} has no hardware hart", cpu_id));
         // RV64 uses OpenSBI HSM. LA64 uses QEMU's mailbox-plus-IPI slave ROM.
         if let Err(error) = crate::hal::start_secondary_cpu(hardware_id, secondary_entry) {
             panic!(
