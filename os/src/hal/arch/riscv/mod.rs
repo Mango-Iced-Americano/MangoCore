@@ -26,6 +26,15 @@ pub fn platform_supports_svvptc() -> bool {
     time::platform_supports_isa_ext(b"svvptc")
 }
 
+/// 整机是否支持 Zicboz：所有 enabled CPU 的 FDT ISA 都明确报告该扩展。
+///
+/// 与 Sstc/Svvptc 门控共用同一套 per-hart FDT ISA 解析。Zicboz 只用于
+/// 分配器拥有的、尚未发布给任何所有者的物理页清零；任一 CPU 缺失时
+/// fail-closed 回退到普通标量 store 清零。
+pub fn platform_supports_zicboz() -> bool {
+    time::platform_supports_isa_ext(b"zicboz")
+}
+
 pub fn machine_init() {
     trap::init();
     trap::enable_ipi_interrupt();
@@ -62,6 +71,14 @@ pub fn machine_init() {
             "all enabled CPUs"
         } else {
             "missing/partial (no Svvptc fast path)"
+        }
+    );
+    crate::println!(
+        "[mm] FDT per-hart zicboz: {}",
+        if crate::mm::zero_with_cboz() {
+            "all enabled CPUs (cbo.zero page clear)"
+        } else {
+            "missing/partial (scalar page clear)"
         }
     );
     // 当前 CPU 的第一个 deadline 会在开放 STIE 前由 timer_cpu_init() 写入。

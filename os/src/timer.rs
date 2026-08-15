@@ -41,37 +41,32 @@ pub fn raw_ticks() -> u64 {
 
 /// Convert ticks → nanoseconds.
 ///
-/// Uses (sec, remainder) decomposition with u128 intermediate
-/// multiplication so the product never overflows u64.
+/// The fixed-point scale is precomputed once.  RV64 has no hardware 128-bit
+/// divide, so the previous `(rem * 1e9) / freq` expression emitted a
+/// `__udivti3` libcall on every conversion.  `value * mul >> shift` lowers to
+/// a single `mulhu` plus a small shift path and removes that trap-hot cost.
 #[inline]
 pub fn ticks_to_ns(ticks: u64) -> u64 {
-    let freq = clock_freq();
-    let sec = ticks / freq;
-    let rem = ticks % freq;
-    sec.saturating_mul(NSEC_PER_SEC_U64)
-        .saturating_add(((rem as u128 * NSEC_PER_SEC_U64 as u128) / freq as u128) as u64)
+    let scales = time_scales();
+    scale_value(ticks, scales.to_ns)
 }
 
 /// Convert ticks → microseconds.
 ///
-/// Avoids the old `freq / USEC_PER_SEC` truncation bug (e.g. 12.5 MHz → 12).
+/// Fixed-point reciprocal for the same reason as [`ticks_to_ns`]; accuracy is
+/// better than one microsecond for all supported timebase frequencies and
+/// saturates instead of wrapping.
 #[inline]
 pub fn ticks_to_us(ticks: u64) -> u64 {
-    let freq = clock_freq();
-    let sec = ticks / freq;
-    let rem = ticks % freq;
-    sec.saturating_mul(USEC_PER_SEC_U64)
-        .saturating_add(((rem as u128 * USEC_PER_SEC_U64 as u128) / freq as u128) as u64)
+    let scales = time_scales();
+    scale_value(ticks, scales.to_us)
 }
 
 /// Convert ticks → milliseconds.
 #[inline]
 pub fn ticks_to_ms(ticks: u64) -> u64 {
-    let freq = clock_freq();
-    let sec = ticks / freq;
-    let rem = ticks % freq;
-    sec.saturating_mul(MSEC_PER_SEC_U64)
-        .saturating_add(((rem as u128 * MSEC_PER_SEC_U64 as u128) / freq as u128) as u64)
+    let scales = time_scales();
+    scale_value(ticks, scales.to_ms)
 }
 
 /// Convert nanoseconds → ticks (rounding **up** so deadline ≤ trigger).
@@ -79,13 +74,76 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
 /// Saturates instead of panicking on overflow.
 #[inline]
 pub fn ns_to_ticks_ceil(ns: u64) -> u64 {
-    let freq = clock_freq();
-    let sec = ns / NSEC_PER_SEC_U64;
-    let rem_ns = ns % NSEC_PER_SEC_U64;
-    // ceil(rem_ns * freq / NSEC_PER_SEC)
-    let rem_ticks = ((rem_ns as u128 * freq as u128).saturating_add(NSEC_PER_SEC_U64 as u128 - 1))
-        / NSEC_PER_SEC_U64 as u128;
-    sec.saturating_mul(freq).saturating_add(rem_ticks as u64)
+    let scales = time_scales();
+    // Fixed-point multiplication uses a rounded-up reciprocal and can still
+    // floor one sub-tick below the exact ceil for a fractional result.  A
+    // deadline may be one raw tick later, but never earlier.
+    scale_value(ns, scales.ns_to_ticks).saturating_add(u64::from(ns != 0))
+}
+
+#[derive(Clone, Copy)]
+struct U64Scale {
+    mul: u64,
+    shift: u32,
+}
+
+#[derive(Clone, Copy)]
+struct TimeScales {
+    to_ns: U64Scale,
+    to_us: U64Scale,
+    to_ms: U64Scale,
+    ns_to_ticks: U64Scale,
+}
+
+static TIME_SCALES: spin::Once<TimeScales> = spin::Once::new();
+
+/// Largest fixed-point multiplier with a u64 numerator and a u64 denominator.
+///
+/// Prefers the largest shift so the quotient keeps the most fractional bits;
+/// for real timebase frequencies this yields nanosecond/microsecond error far
+/// below one unit.  The initializer runs once, so its u128 division is not on
+/// any trap, timer or syscall path.
+fn choose_scale(numer: u64, denom: u64) -> U64Scale {
+    assert!(numer != 0 && denom != 0, "invalid time scale");
+    let numer = numer as u128;
+    let denom = denom as u128;
+    let max = u64::MAX as u128;
+    for shift in (0..=64).rev() {
+        let scaled = ((numer << shift) + denom - 1) / denom;
+        if scaled <= max {
+            return U64Scale {
+                mul: scaled as u64,
+                shift,
+            };
+        }
+    }
+    unreachable!("u64 scale always exists at shift 0 for numer <= denom*2^64")
+}
+
+#[inline]
+fn scale_value(value: u64, scale: U64Scale) -> u64 {
+    if scale.mul == 0 {
+        return 0;
+    }
+    let product = (value as u128) * (scale.mul as u128);
+    let scaled = product >> scale.shift;
+    if scaled > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        scaled as u64
+    }
+}
+
+fn time_scales() -> &'static TimeScales {
+    TIME_SCALES.call_once(|| {
+        let freq = clock_freq();
+        TimeScales {
+            to_ns: choose_scale(NSEC_PER_SEC_U64, freq),
+            to_us: choose_scale(USEC_PER_SEC_U64, freq),
+            to_ms: choose_scale(MSEC_PER_SEC_U64, freq),
+            ns_to_ticks: choose_scale(freq, NSEC_PER_SEC_U64),
+        }
+    })
 }
 
 /// Nanoseconds since boot (monotonic, never wraps).
