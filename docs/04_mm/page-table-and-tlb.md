@@ -149,14 +149,16 @@ fn check_user_flags(flags: MapPermission) -> MmResult<()> {
 | `MmuGather` | 一次 `AddressSpace::write()` 内唯一的失效范围和退休 frame 所有者 |
 | `TlbFlush` | `seal()` 后带出 VM 锁；执行本地/远端失效，收齐 ack 后释放 frame |
 
-> **fresh-map 例外（`perf_diag` 专属 A/B 开关）**：`mango.rv.fresh_map_flush=off`
-> 时，`UserMapper::map_page` 对严格 invalid→valid 的新映射不再 `record_change`，
-> 跳过本地/远端 TLB 失效。依据：RISC-V 规范 invalid→valid 无需 fence；
-> QEMU TCG 无负缓存（每次隐式访问重走 guest 页表）；真硬件由 Svvptc（或偶发
-> spurious-fault 重试）保证收敛。破坏性更新（unmap/PPN/权限/层级回收）与
-> kernel mapping retire 一律保持同步失效。默认（on）行为与 gate 前完全一致。
-> 实验结论见 `docs/Work_Log/2026-08-15.md`（完整 BuildStorm 1956s，-10.9%
-> 观测差）；production 化仍需能力门控与 spurious-fault 快路，未合入。
+> **fresh-map 例外（production 默认能力门控）**：`UserMapper::map_page` 对严格
+> invalid→valid 的新映射不再 `record_change`，跳过本地/远端 TLB 失效。启用条件
+> 为整机 per-hart FDT 都明确报告 Svvptc（`platform_supports_svvptc()`，与 Sstc
+> 同一套解析），否则 fail-closed 保持既有 flush；`perf_diag` 构建可用
+> `mango.rv.fresh_map_flush=on/off` 覆盖做同镜像 A/B。依据：RISC-V 规范
+> invalid→valid 无需 fence；QEMU TCG 无负缓存；真硬件由 Svvptc 与
+> `do_page_fault` 的 spurious-fault 快路（PTE 已 valid 且权限满足 → 本地单页
+> 失效后直接完成）保证收敛。破坏性更新（unmap/PPN/权限/层级回收）与 kernel
+> mapping retire 一律保持同步失效。实验结论见 `docs/Work_Log/2026-08-15.md`
+> （production 完整 BuildStorm 1858s，较 2196s 基线 -15.39%）。
 
 调用链固定为：
 
