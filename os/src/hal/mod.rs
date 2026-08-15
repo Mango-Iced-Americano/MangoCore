@@ -140,6 +140,12 @@ pub fn with_local_interrupts_enabled<R>(f: impl FnOnce() -> R) -> R {
 /// `online` 尚未发布时可能处于极早期 panic，不能读取尚未安装的 CPU-local
 /// 寄存器；此时直接走机器级兜底。当前运行期只有 CPU0 执行共享子系统，
 /// AP 上的致命异常同样直接关机，避免反向 STOP CPU0 所需的未实现安全点。
+///
+/// 实板（VF2）无法真正断电：OpenSBI 的 legacy shutdown 与 SRST 都依赖 PMIC，
+/// 而 U-Boot 关闭 I2C5 后 PMIC 不可读（`pmic_ops: cannot read pmic power
+/// register`）会永久挂起。因此实板统一改走 JH7110 watchdog 整机复位回
+/// U-Boot（`finish_test_run()` 的 ktest 路径早已如此），QEMU/未知平台保持
+/// SBI shutdown 以正常退出模拟器。
 pub fn shutdown() -> ! {
     let _ = arch::local_irq_save();
     let online = crate::smp::online_cpu_mask();
@@ -147,6 +153,9 @@ pub fn shutdown() -> ! {
         && crate::smp::cpu_id() == crate::smp::BOOT_CPU_ID
     {
         let _ = crate::smp::stop_secondary_cpus();
+    }
+    if crate::hal::platform::is_real_board() {
+        arch::reboot()
     }
     arch::machine_shutdown()
 }
