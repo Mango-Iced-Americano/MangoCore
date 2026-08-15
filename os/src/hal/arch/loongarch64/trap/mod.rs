@@ -209,6 +209,24 @@ pub fn trap_handler() -> ! {
     let stval = get_bad_addr();
     let badi = get_bad_instruction();
 
+    // trap 全程计时起点：只覆盖 handler 处理区间（到 trap_return 首行闭合），
+    // 汇编 entry/restore 与调度安全点不计入，供 RV8/LA12 配对比较边界成本。
+    crate::task::perf::record_trap_enter(match cause {
+        Trap::Exception(Exception::Syscall) => crate::task::perf::TRAP_CAUSE_ECALL,
+        Trap::Exception(Exception::PagePrivilegeIllegal)
+        | Trap::Exception(Exception::PageInvalidFetch)
+        | Trap::Exception(Exception::PageInvalidStore)
+        | Trap::Exception(Exception::PageInvalidLoad)
+        | Trap::Exception(Exception::PageModifyFault)
+        | Trap::Exception(Exception::PageNonReadableFault)
+        | Trap::Exception(Exception::PageNonExecutableFault) => {
+            crate::task::perf::TRAP_CAUSE_PAGE_FAULT
+        }
+        Trap::Interrupt(Interrupt::Timer) => crate::task::perf::TRAP_CAUSE_TIMER,
+        Trap::Interrupt(Interrupt::IPI) => crate::task::perf::TRAP_CAUSE_IPI,
+        _ => crate::task::perf::TRAP_CAUSE_OTHER,
+    });
+
     if let Trap::Exception(Exception::Syscall) = cause {
         let _trap_start = crate::task::perf::perf_time_now();
         let task = current_trap_task();
@@ -511,6 +529,9 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 闭合本次 trap 的 handler 区间计时；必须在调度安全点之前，避免把
+    // 切换出去的等待时间计入 trap 成本。
+    crate::task::perf::record_trap_exit_ticks();
     // 从这里到 __restore 安装用户 EENTRY 之前，任何 timer/IPI 都必须进入
     // 内核 trap。尤其是 ASID rollover 的等待路径会临时开放本地中断。
     set_kernel_trap_entry();

@@ -1081,6 +1081,16 @@ impl<T: PageTable> AddressSpaceInner<T> {
     /// Handles all types of page fault:(In regex:) "(Store|Load|Instruction)(Page)?Fault"
     /// Checks the permission to decide whether to copy.
     pub fn do_page_fault(&mut self, addr: VirtAddr, access: FaultAccess) -> FaultOutcome {
+        // Spurious-fault 快路：fresh-map 跳过 TLB 失效（或真硬件对 invalid PTE
+        // 的负缓存）可能让本地 hart 仍缓存"不存在"的翻译。此时 PTE 已 valid
+        // 且权限满足，绝不能再进 VMA/COW 分类（会被误判成权限错误或 COW 替换）；
+        // 本地单页失效后直接完成，用户返回原指令重试。物理地址校验由
+        // resolve_user_va_inner 完成，与普通 Completed 分支同强度。
+        if let Ok(pa) = self.resolve_user_va_inner(addr, access) {
+            let vpn = addr.floor();
+            crate::hal::local_user_fault_tlb_invalidate_page(vpn);
+            return FaultOutcome::Completed(pa);
+        }
         let vpn = addr.floor();
         let area_start = match self.vmas.find_user_vma_key(vpn) {
             Some(start) => Some(start),

@@ -62,6 +62,19 @@ pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
     tlb::tlb_invalidate_user_page(asid, vpn);
 }
 
+/// 本地 spurious-fault 快路专用的单页失效。
+///
+/// 只允许在 fault handler 内调用：该 hart 正运行触发 fault 的 MM，CSR.ASID
+/// 即该 MM 的硬件 ASID（区别于 shootdown 场景，后者可能由无关 hart 发起）。
+pub fn local_user_fault_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
+    let asid = tlb::current_asid();
+    assert_ne!(
+        asid, tlb::KERN_ASID,
+        "spurious-fault fast path requires an active user ASID"
+    );
+    tlb::tlb_invalidate_user_page(asid, vpn);
+}
+
 /// 按 LoongArch 硬件的相邻偶/奇页 entry 粒度失效有界区间。
 pub fn user_tlb_invalidate_range(asid: u16, range: crate::mm::VPNRange) {
     assert_ne!(asid, tlb::KERN_ASID, "precise user TLB flush used ASID 0");

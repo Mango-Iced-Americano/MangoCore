@@ -57,6 +57,10 @@ const SBI_ERR_ALREADY_AVAILABLE: isize = -6;
 /// CPU0 在 AP 上线前探测并发布；运行期只读，避免每次 shootdown 多做一次 ecall。
 static RFENCE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
+/// CPU0 在 AP 上线前探测并发布；运行期只读，避免每次 doorbell 多做一次
+/// BASE probe ecall（LA64 对应路径直接 IOCSR 写，不进固件）。
+static IPI_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone, Copy, Debug)]
 struct SbiRet {
     error: isize,
@@ -158,15 +162,27 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<()
     }
 }
 
+/// 在 CPU0 上一次性探测 IPI，返回值供启动日志说明实际后端。
+pub fn init_ipi() -> Result<bool, isize> {
+    let available = probe_extension(SBI_EXT_IPI)?;
+    crate::task::perf::record_ipi_probe();
+    IPI_AVAILABLE.store(available, Ordering::Release);
+    Ok(available)
+}
+
 /// 通过 SBI v0.2 IPI extension 向一个硬件 hart 触发 supervisor software IRQ。
 pub fn send_ipi(hart_id: usize) -> Result<(), isize> {
-    if !probe_extension(SBI_EXT_IPI)? {
+    if !IPI_AVAILABLE.load(Ordering::Acquire) {
         return Err(SBI_ERR_NOT_SUPPORTED);
     }
 
+    let send_start = crate::task::perf::perf_time_now();
     // 令 hart_mask_base 等于目标 hart ID，mask bit0 就精确表示该 hart，
     // 不依赖 MangoCore logical ID 与 OpenSBI hart ID 是否相同。
     let result = sbi_call_v02(SBI_EXT_IPI, SBI_IPI_SEND, 1, hart_id, 0, 0, 0);
+    crate::task::perf::record_ipi_send(
+        crate::task::perf::perf_time_now().wrapping_sub(send_start),
+    );
     if result.error == 0 {
         Ok(())
     } else {

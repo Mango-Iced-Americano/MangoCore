@@ -93,6 +93,8 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
 | `time::init_timer_backend()` | `time.rs` | 在 AP 发布和首个 deadline 前按全部 enabled CPU 的 FDT ISA 能力选择 Sstc；任何缺失、畸形或不一致都回退 SBI |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
+| `sbi::init_ipi()` | `sbi.rs` | 多核时一次性探测 IPI extension 并缓存；`send_ipi` 运行期只读缓存，不再每次 doorbell 做 BASE probe |
+| svvptc 标记 | `time.rs` | 复用 `platform_supports_isa_ext` 打印 `[mm] FDT per-hart svvptc: all enabled CPUs / missing(partial)`，与 Sstc 同一套 per-hart FDT ISA 解析 |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。每个 CPU 都先由
 `timer_cpu_init()` 写入首个绝对 deadline，再开放本地 timer interrupt，避免在 deadline

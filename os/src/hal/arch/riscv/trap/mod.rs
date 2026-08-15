@@ -124,6 +124,21 @@ pub fn trap_handler() -> ! {
     let scause = scause::read();
     let stval = stval::read();
 
+    // trap 全程计时起点：只覆盖 handler 处理区间（到 trap_return 首行闭合），
+    // 汇编 entry/restore 与调度安全点不计入，供 RV8/LA12 配对比较边界成本。
+    crate::task::perf::record_trap_enter(match scause.cause() {
+        Trap::Exception(Exception::UserEnvCall) => crate::task::perf::TRAP_CAUSE_ECALL,
+        Trap::Exception(Exception::StoreFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::InstructionFault)
+        | Trap::Exception(Exception::InstructionPageFault)
+        | Trap::Exception(Exception::LoadFault)
+        | Trap::Exception(Exception::LoadPageFault) => crate::task::perf::TRAP_CAUSE_PAGE_FAULT,
+        Trap::Interrupt(Interrupt::SupervisorTimer) => crate::task::perf::TRAP_CAUSE_TIMER,
+        Trap::Interrupt(Interrupt::SupervisorSoft) => crate::task::perf::TRAP_CAUSE_IPI,
+        _ => crate::task::perf::TRAP_CAUSE_OTHER,
+    });
+
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         let _trap_start = crate::task::perf::perf_time_now();
         let task = current_trap_task();
@@ -292,6 +307,9 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 闭合本次 trap 的 handler 区间计时；必须在调度安全点之前，避免把
+    // 切换出去的等待时间计入 trap 成本。
+    crate::task::perf::record_trap_exit_ticks();
     // trap frame 已完整、当前任务锁均已释放；timer callback 与 RESCHEDULE
     // 只能在这个统一边界让出 CPU，不能从 hard IRQ 直接切换任务。
     crate::task::run_task_safe_point();
