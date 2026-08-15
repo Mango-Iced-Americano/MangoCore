@@ -12,9 +12,10 @@
 //!   Listener  — 正在 listen
 
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 
+use crate::fs::vfs::event::EventWaitQueue;
 use crate::net::socket::unix::ring_buffer::RingBuffer;
 use crate::net::socket::unix::{UnixEndpoint, UnixEndpointBound};
 use crate::net::Endpoint;
@@ -67,6 +68,10 @@ pub struct Connected {
     pub peer_rx: Arc<Mutex<RingBuffer<u8>>>,
     /// 接收缓冲区（从此缓冲区读取 → 对端写入的数据）
     pub rx: Arc<Mutex<RingBuffer<u8>>>,
+    /// 对端 socket 的 recv_waiters（Weak 避免环）。发送成功写入 `peer_rx` 后，
+    /// 用它唤醒对端阻塞在 `recvfrom` 的等待者。connect/accept 建立时双向填充；
+    /// socketpair 由 `UnixStreamSocket::new_connected_with_peer_waiter` 单独处理。
+    pub peer_recv_waiter: Option<Weak<EventWaitQueue>>,
 }
 
 impl Connected {
@@ -85,6 +90,7 @@ impl Connected {
                 peer_creds: None,
                 peer_rx: buf_b.clone(),
                 rx: buf_a.clone(),
+                peer_recv_waiter: None,
             },
             Self {
                 addr: None,
@@ -92,6 +98,7 @@ impl Connected {
                 peer_creds: None,
                 peer_rx: buf_a,
                 rx: buf_b,
+                peer_recv_waiter: None,
             },
         )
     }

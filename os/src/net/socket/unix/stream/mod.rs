@@ -234,6 +234,14 @@ impl Socket for UnixStreamSocket {
                 client_conn.peer_creds = peer_creds;
                 server_conn.peer_creds = peer_creds;
 
+                // 3.5 双向 recv 唤醒链：connect/accept 建立的连接没有 socketpair
+                //     的 peer_waiter 机制，必须在握手时把双方的 recv_waiters 互相
+                //     暴露，否则对端 try_send 后阻塞的 recvfrom 永远等不到 wake。
+                server_conn.peer_recv_waiter = Some(Arc::downgrade(&self.recv_waiters));
+                if let Some(server_recv_waiter) = server_socket.recv_waiter() {
+                    *self.peer_recv_waiter.lock() = Some(server_recv_waiter);
+                }
+
                 // 4. 通过 trait 方法把 server_conn 推入 listener 队列
                 //    不再需要直接访问 server_socket.inner（dyn Socket 上访问不到）
                 server_socket.push_pending_connected(server_conn)?;
@@ -271,6 +279,10 @@ impl Socket for UnixStreamSocket {
                 client_conn.peer_addr = Some(UnixEndpointBound::Path(path.clone()));
                 client_conn.peer_creds = peer_creds;
                 server_conn.peer_creds = peer_creds;
+                server_conn.peer_recv_waiter = Some(Arc::downgrade(&self.recv_waiters));
+                if let Some(server_recv_waiter) = server_socket.recv_waiter() {
+                    *self.peer_recv_waiter.lock() = Some(server_recv_waiter);
+                }
                 server_socket.push_pending_connected(server_conn)?;
                 if let Some(wq) = server_socket.accept_event_queue() {
                     wq.notify_events_all(EPollEvent::EPOLLIN | EPollEvent::EPOLLRDNORM);
@@ -305,8 +317,19 @@ impl Socket for UnixStreamSocket {
                 // 在对端地址（在包装前取出，因为 conn 即将被 move）
                 let peer_addr = conn.peer_endpoint();
 
-                // 把 Connected 包成 UnixStreamSocket（← 现场造，不再提前造）
-                let server_socket = UnixStreamSocket::new_connected(conn, false);
+                // 把 Connected 包成 UnixStreamSocket（← 现场造，不再提前造）。
+                // conn.peer_recv_waiter 由 connect 侧填充（对端 client 的
+                // recv_waiters），使本端 sendto 能唤醒对端阻塞的 recvfrom。
+                let client_recv_waiter = conn
+                    .peer_recv_waiter
+                    .clone()
+                    .unwrap_or_else(Weak::new);
+                let server_socket = UnixStreamSocket::new_connected_with_peer_waiter(
+                    conn,
+                    false,
+                    Arc::new(EventWaitQueue::new()),
+                    client_recv_waiter,
+                );
                 let socket: Arc<dyn Socket> = Arc::new(server_socket);
                 let socket_file: Arc<dyn crate::fs::vfs::IndexNode> =
                     Arc::new(crate::net::SocketFile::new(socket));
@@ -489,6 +512,10 @@ impl Socket for UnixStreamSocket {
 
     fn recv_wait_queue(&self) -> Option<&Mutex<WaitQueue>> {
         Some(self.recv_waiters.wait_queue())
+    }
+
+    fn recv_waiter(&self) -> Option<Weak<EventWaitQueue>> {
+        Some(Arc::downgrade(&self.recv_waiters))
     }
 
     fn recv_event_queue(&self) -> Option<&EventWaitQueue> {

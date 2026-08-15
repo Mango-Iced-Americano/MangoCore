@@ -670,6 +670,15 @@ pub trait Socket: Send + Sync {
         None
     }
 
+    /// 返回本 socket 的 recv 等待队列 Weak（跨 socket 唤醒用）。
+    ///
+    /// 对端 `try_send` 成功写入共享缓冲后，需要唤醒本端阻塞在 `recvfrom` 的
+    /// 等待者。只有真正需要跨 socket 数据唤醒的实现（Unix stream 的
+    /// connect/accept 连接）覆盖此方法；其余返回 `None`。
+    fn recv_waiter(&self) -> Option<Weak<EventWaitQueue>> {
+        None
+    }
+
     /// 获取接收事件队列引用（epoll/select 用）。
     ///
     /// 事件由与 `recv_wait_queue()` 相同的路径触发：poll 循环或对端 `send` 路径
