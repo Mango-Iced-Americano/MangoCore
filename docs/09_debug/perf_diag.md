@@ -256,11 +256,12 @@ kernel-global 统计复用相同 raw tick 桶。`task_publish` 表示新任务�
 表示动态 kernel mapping 撤销后的全 CPU 失效；目标为当前 CPU 的本地同步不会进入远端
 `kernel_full` 计数。
 
-RV production 默认使用目标 CPU context-switch 前本地确认协议；`perf_diag` 可用
-`mango.rv.kernel_task_sync=eager` 回到旧的同步等待路径，或显式指定 `deferred` 做同镜像 A/B。
+RV64 与 LA64 production 都默认使用目标 CPU context-switch 前本地确认协议；`perf_diag`
+可用 `mango.rv.kernel_task_sync=eager` / `mango.la.kernel_task_sync=eager` 回到旧的同步
+等待路径，或显式指定 `deferred` 做同镜像 A/B。
 该模式不依赖 Svvptc 直接跳过 fence：远端发布方在 runqueue 可见前递增目标 request，目标 CPU
 取得任务后、`__switch` 改写内核栈指针前执行本地 full flush 并确认序号。目标就是当前 CPU 时
-仍立即本地刷新；LA64 暂时保持 eager；`mapping_retire` 在所有模式下始终保持全 CPU 同步等待。
+仍立即本地刷新；`mapping_retire` 在所有模式下始终保持全 CPU 同步等待。
 
 `clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
 

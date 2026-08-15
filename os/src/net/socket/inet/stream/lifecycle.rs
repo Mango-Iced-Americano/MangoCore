@@ -238,8 +238,12 @@ impl Inner {
             ));
         }
 
-        // backlog：至少 1，最多 8
-        let backlog = core::cmp::min(if backlog == 0 { 1 } else { backlog }, 8);
+        // backlog：至少 1，最多 MAX_LISTEN_BACKLOG。用户显式传入的 backlog
+        // 决定并发连接槽数，必须大于 8（官方 CAgent 10 客户端并发场景）。
+        let backlog = core::cmp::min(
+            if backlog == 0 { 1 } else { backlog },
+            super::inner::MAX_LISTEN_BACKLOG,
+        );
         let mut handles = vec![handle];
 
         // 补充额外 listen socket

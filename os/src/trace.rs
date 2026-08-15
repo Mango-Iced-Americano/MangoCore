@@ -7,6 +7,8 @@ pub(crate) const TRACE_SIZE: usize = 2048;
 
 /// Magic key: Ctrl+T (0x14). Pressing this key triggers a trace dump.
 pub const MAGIC_KEY: u8 = 0x14;
+/// 非致命 per-CPU 现场快照键（Ctrl-O）：打印诊断后继续运行，不关机。
+pub const MAGIC_KEY_SNAPSHOT: u8 = 0x0F;
 
 /// ── Character stash: non-magic chars consumed by scheduler get stored here ──
 /// TTY reads from stash first, then falls back to console_getchar().
@@ -384,6 +386,13 @@ pub fn dump() {
 pub fn check_magic_key(ch: u8, source: &str) -> bool {
     if ch == MAGIC_KEY {
         dump_from(source);
+        true
+    } else if ch == MAGIC_KEY_SNAPSHOT {
+        // 非致命现场快照：打印 panic 诊断的 per-CPU/task/IPI 视图但不关机，
+        // 用于活体调试调度卡死、IPI 丢失等静默停滞场景（serial 可注入该键）。
+        crate::println!("[trace] ── live snapshot [trigger: {}] ──", source);
+        crate::panic_diag::dump_panic_context();
+        crate::println!("[trace] ── live snapshot end ──");
         true
     } else {
         false

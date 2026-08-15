@@ -348,7 +348,7 @@ impl Socket for UnixDatagramSocket {
         }
     }
 
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, _backlog: u32) -> SyscallRet {
         // Datagram socket 不支持 listen
         Err(SyscallErr::EOPNOTSUPP)
     }

@@ -187,13 +187,19 @@ impl Socket for UnixStreamSocket {
         }
     }
 
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, backlog: u32) -> SyscallRet {
         let mut inner = self.inner.lock();
         let tmp = core::mem::replace(&mut *inner, Inner::Init(Init::new()));
         match tmp {
             Inner::Init(init) => {
                 let addr = init.addr.clone().ok_or(SyscallErr::EINVAL)?; // 必须先 bind
-                let backlog = 16; // 默认 backlog
+                // 尊重用户 backlog，0 按 1 处理；Listener 队列按需增长，
+                // 上限仅约束无界排队内存。
+                let backlog = if backlog == 0 {
+                    1
+                } else {
+                    core::cmp::min(backlog, 128) as usize
+                };
                 let listener = Listener::new(addr, backlog);
                 *inner = Inner::Listener(listener);
                 Ok(0)

@@ -699,11 +699,17 @@ impl KernelTlbSyncReason {
     }
 }
 
-/// RV 默认把远端任务映射确认推迟到目标 CPU 的切换安全点。
+/// 双架构默认把远端任务映射确认推迟到目标 CPU 的切换安全点。
 ///
-/// `perf_diag` 可显式指定 `eager` 回到旧的同步等待协议，供同镜像 A/B；
-/// LA64 暂时保持 eager，避免在没有配对验证时改变其调度协议。
-#[cfg(all(target_arch = "riscv64", feature = "perf_diag"))]
+/// 生产路径对 RV64 与 LA64 都是编译期常量 `true`：新内核栈映射的可见性由
+/// 目标 CPU 在 idle 栈上的 flush-before-switch 保证，发布方不再等待远端 IPI
+/// ack。LA64 原 eager 路径在官方 12 核评测中复现了 `kernel_tlb_request` 单
+/// 请求 5 秒未 ack 的 panic（`task/manager.rs` publish 路径），与 RV8 曾观测
+/// 到的 2.8 秒级 ack 长尾同源（MTTCG 远端 hart 唤醒尾部），因此 LA64 也切到
+/// deferred。`perf_diag` 可用 `mango.rv.kernel_task_sync` /
+/// `mango.la.kernel_task_sync` 显式指定 `eager` 回到旧同步等待协议做 A/B；
+/// 全 CPU 的 kernel mapping retire 不经过本开关，仍保持同步等待。
+#[cfg(feature = "perf_diag")]
 pub(crate) fn kernel_task_sync_deferred_enabled() -> bool {
     static ENABLED: spin::Once<bool> = spin::Once::new();
     *ENABLED.call_once(|| {
@@ -712,6 +718,8 @@ pub(crate) fn kernel_task_sync_deferred_enabled() -> bool {
             match arg {
                 "mango.rv.kernel_task_sync=eager" => enabled = false,
                 "mango.rv.kernel_task_sync=deferred" => enabled = true,
+                "mango.la.kernel_task_sync=eager" => enabled = false,
+                "mango.la.kernel_task_sync=deferred" => enabled = true,
                 _ => {}
             }
         }
@@ -719,14 +727,9 @@ pub(crate) fn kernel_task_sync_deferred_enabled() -> bool {
     })
 }
 
-#[cfg(all(target_arch = "riscv64", not(feature = "perf_diag")))]
+#[cfg(not(feature = "perf_diag"))]
 pub(crate) const fn kernel_task_sync_deferred_enabled() -> bool {
     true
-}
-
-#[cfg(not(target_arch = "riscv64"))]
-pub(crate) const fn kernel_task_sync_deferred_enabled() -> bool {
-    false
 }
 
 #[cfg(feature = "perf_stats")]

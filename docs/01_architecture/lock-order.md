@@ -429,7 +429,7 @@ B18 删除全局 runnable 容器。每个 `CpuTaskState` 独占一个 `RunQueue`
 ### 3.4 B19 AP 调度与内核栈发布约束
 
 B19 最初只为 focused ktest 的 kernel-only 任务开放显式目标 CPU；当前普通任务也复用
-同一跨核发布入口。RV64 的顺序固定为：
+同一跨核发布入口。RV64 与 LA64 的顺序固定为：
 
 1. CPU0 在 `KERNEL_SPACE` 锁内建立动态 kernel stack 映射并释放锁；
 2. 不持有 MM/PTE/runqueue 锁，以 AcqRel 递增目标 `kernel_tlb_request`，不等待 ack；
@@ -439,7 +439,8 @@ B19 最初只为 focused ktest 的 kernel-only 任务开放显式目标 CPU；�
 5. 目标 CPU 取得任务后仍在 idle 栈上，先 Acquire 快照 request、执行本地 full flush 并
    Release ack，随后才由 `__switch` 改写 SP。目标就是当前 CPU 时仍立即本地 flush。
 
-LA64 暂时保留“发送 `KERNEL_TLB_SYNC` → 等待 ack → 入队”的 eager 顺序。两种协议都要求
+LA64 与 RV64 共用上述 deferred 顺序；`perf_diag` 可用 `mango.la.kernel_task_sync=eager`
+回到旧的“发送 `KERNEL_TLB_SYNC` → 等待 ack → 入队”路径做 A/B。两种协议都要求
 撤映射/slot 退休继续全 CPU 同步等待；任务发布快路不能用于 frame 回收。
 
 AP 安装页表根时可以短暂取得 `KERNEL_SPACE` 锁；此时 CPU0 只在 scheduler-ready

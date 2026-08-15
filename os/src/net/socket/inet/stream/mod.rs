@@ -37,7 +37,7 @@ use crate::{
 };
 
 use self::inner::{
-    with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected, BACKLOG_SIZE,
+    with_tcp_mut, Connecting, Established, Init, Listening, SelfConnected,
 };
 use crate::fs::vfs::event::{EPollEvent, EventWaitQueue};
 use crate::net::socket::inet::common::port::{
@@ -526,20 +526,21 @@ impl Socket for TcpSocket {
     ///
     /// # Semantics
     ///
-    /// 获取 `self.inner` 锁，调用 `Inner::listen(BACKLOG_SIZE)` 将 `Init` 转为
-    /// `Listening` 状态。成功后注册到全局 `TCP_LISTENERS` 表，后续 poll 循环
+    /// 获取 `self.inner` 锁，调用 `Inner::listen(backlog)` 将 `Init` 转为
+    /// `Listening` 状态，backlog 决定可容纳的并发 pending/established 连接槽数。
+    /// 成功后注册到全局 `TCP_LISTENERS` 表，后续 poll 循环
     /// 会无条件扫描该表检查是否收到新连接（由 `wake_tcp_accept_waiters()` 驱动）。
     ///
     /// # Errors
     ///
     /// - 由 `Inner::listen()` 产生：若 socket 处于非 `Init` 状态则失败并恢复原状态
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, backlog: u32) -> SyscallRet {
         let mut inner = self.inner.lock();
         let new_inner = core::mem::replace(
             &mut *inner,
             Inner::Closed(Closed::new(smoltcp::wire::IpVersion::Ipv4)),
         );
-        match new_inner.listen(BACKLOG_SIZE as usize) {
+        match new_inner.listen(backlog as usize) {
             Ok(listening) => {
                 let listen_addr = listening.listen_addr();
                 let ifindex = crate::net::net_core::ifindex_for_local_addr(listen_addr.addr);

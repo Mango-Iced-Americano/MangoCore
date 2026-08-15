@@ -836,7 +836,10 @@ pub(crate) fn write_from_user(file: &vfs::File, token: usize, buf: usize, count:
                 token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
             );
             if accessible == 0 {
-                if total > 0 { return total as isize; }
+                // PTE 未 present 也可能只是惰性缺页（如从未被访问的 .rodata
+                // 尾页）；这里总是按单页有界 fault-in 重试。真正不可访问的
+                // 区域由后续 faultable copy 失败产生已完成前缀，不再把
+                // 惰性页误判为缓冲区终点（曾导致跨页写丢失尾部字节）。
                 accessible = want.min(crate::config::PAGE_SIZE);
             }
 
@@ -877,7 +880,10 @@ pub(crate) fn write_from_user(file: &vfs::File, token: usize, buf: usize, count:
             token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            if total > 0 { return total as isize; }
+            // PTE 未 present 也可能只是惰性缺页（如从未被访问的 .rodata
+            // 尾页）；这里总是按单页有界 fault-in 重试。真正不可访问的
+            // 区域由后续 faultable copy 失败产生已完成前缀，不再把
+            // 惰性页误判为缓冲区终点（曾导致跨页写丢失尾部字节）。
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
@@ -929,7 +935,10 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
                 token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
             );
             if accessible == 0 {
-                if total > 0 { return total as isize; }
+                // PTE 未 present 也可能只是惰性缺页（如从未被访问的 .rodata
+                // 尾页）；这里总是按单页有界 fault-in 重试。真正不可访问的
+                // 区域由后续 faultable copy 失败产生已完成前缀，不再把
+                // 惰性页误判为缓冲区终点（曾导致跨页写丢失尾部字节）。
                 accessible = want.min(crate::config::PAGE_SIZE);
             }
 
@@ -974,7 +983,10 @@ pub(crate) fn pwrite_from_user(file: &vfs::File, token: usize, buf: usize, count
             token, user_addr as *const u8, want, crate::mm::UserAccess::Read,
         );
         if accessible == 0 {
-            if total > 0 { return total as isize; }
+            // PTE 未 present 也可能只是惰性缺页（如从未被访问的 .rodata
+            // 尾页）；这里总是按单页有界 fault-in 重试。真正不可访问的
+            // 区域由后续 faultable copy 失败产生已完成前缀，不再把
+            // 惰性页误判为缓冲区终点（曾导致跨页写丢失尾部字节）。
             accessible = want.min(crate::config::PAGE_SIZE);
         }
 
