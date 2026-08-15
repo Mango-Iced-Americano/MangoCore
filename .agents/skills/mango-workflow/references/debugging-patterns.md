@@ -1594,3 +1594,41 @@
   （`contains("s")` 会被 `zicsr` 假阳性），`mmu-type` 可能被 vendor DTB 伪造（S7 被
   谎报 sv39），不可作唯一依据。`cpu_count` 与列表必须作为同一拓扑描述一起消费。
 - **相关文件**：`os/src/hal/firmware/{mod.rs,fdt.rs}`、`os/src/smp.rs`
+
+## 实板退出路径必须全路径接入 watchdog：SBI SRST/shutdown 依赖 PMIC（2026-08-14 实板）
+
+- **现象**：VF2 实板 normal 模式测试（cagent）全部 pass 后，内核尝试关机/重启，串口打印
+  `pmic_ops: cannot read pmic power register`（OpenSBI 固件输出），板子永久挂起，只能手动断电。
+  而 ktest 模式测试结束却一直能自动回 U-Boot。
+- **根因**：OpenSBI 的 legacy shutdown 与 SRST 扩展都依赖 PMIC 电源管理；U-Boot 关闭 I2C5 后
+  PMIC 不可读，SBI 路径必然失败。内核此前只在 ktest 的 `finish_test_run()` → `reboot()` 接入了
+  JH7110 watchdog 复位（`jh7110_watchdog_reboot`），而 normal 模式 test_runner 结束调的是
+  `shutdown()` syscall → `sys_shutdown()` → `hal::shutdown()` → SBI legacy shutdown——这条路径
+  漏接 watchdog。
+- **修复**：`hal::shutdown()` 在 `platform::is_real_board()` 时改调 `arch::reboot()`（watchdog 整机
+  复位回 U-Boot），QEMU/未知平台保持 `machine_shutdown()`（QEMU 必须 shutdown 退出才能被测试
+  框架判定，不能 reboot）。panic 兜底也走 `shutdown()`，因此实板致命异常后同样自动恢复。
+- **教训**：实板电源管理（reboot/shutdown）必须**全路径覆盖**：ktest、normal 用户测试、panic 兜底
+  三条退出路径都要验证。QEMU 侧"shutdown 正常退出"不代表实板"shutdown 可用"——SBI 电源管理
+  依赖的具体硬件（PMIC/GPIO）在模拟器里不存在。新增退出路径时先确认实板语义（watchdog vs SBI）。
+- **相关文件**：`os/src/hal/mod.rs`（`shutdown()`）、`os/src/hal/arch/riscv/reset.rs`
+  （`jh7110_watchdog_reboot`）、`os/src/hal/arch/riscv/sbi.rs`（`machine_shutdown`/`reboot`）
+
+## Unix stream connect/accept 连接缺对端 recv 唤醒链 → 单向 recvfrom 永久阻塞（2026-08-14）
+
+- **现象**：unix_test 的 abstract STREAM 用例卡死——server `sendto` reply 成功后，client 的
+  `recvfrom` 永不返回；而 client→server 方向却正常。socketpair 用例全部正常。
+- **根因**：阻塞 `recvfrom` 用 `WaitQueue::wait_until_interruptible`（**纯事件驱动，无轮询**），
+  对端 `try_send` 成功后必须显式唤醒本端 `recv_waiters`。唤醒链靠 `peer_recv_waiter`
+  （指向对端 socket `recv_waiters` 的 Weak），但该字段**只在 socketpair
+  （`new_connected_with_peer_waiter`）设置**；connect/accept 建立的连接为 `Weak::new()` 空引用。
+  client→server 方向"正常"是时序凑巧：server 的 recvfrom 调用时数据已入缓冲，首试即返回，
+  根本没走唤醒路径。
+- **修复**：`Connected` 增加 `peer_recv_waiter` 字段；connect 握手时双向填充（client 指向
+  server.recv_waiters、server_conn 携带 client.recv_waiters），accept 用 `conn.peer_recv_waiter`
+  创建 server socket；`Socket` trait 增加 `recv_waiter()` 默认方法供跨 socket 取 waiter。
+- **教训**：所有"对端生产者 → 本端消费者"的唤醒链必须在**连接建立时**显式接线，不能只在
+  socketpair 特殊路径接线。纯事件驱动等待（无轮询）下，缺失唤醒 = 永久阻塞，且**单方向测试
+  通过不能证明另一方向可用**（首试命中会掩盖缺失的唤醒路径）。测试设计应让"先等后发"时序
+  覆盖两个方向。
+- **相关文件**：`os/src/net/socket/unix/stream/{mod.rs,inner.rs}`、`os/src/net/socket/mod.rs`

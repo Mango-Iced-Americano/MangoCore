@@ -206,8 +206,8 @@ regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 120s)..."
-	@timeout --foreground 120 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
+	@echo "[regression] Launching QEMU (no disks, timeout 720s)..."
+	@timeout --foreground 720 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)

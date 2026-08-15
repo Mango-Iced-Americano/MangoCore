@@ -211,16 +211,19 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     {
         crate::fs::vfs::posix_lock::init_posix_lock_manager();
         fs::initramfs_init();
+        // regression 也是用户态测试（regression_init 就是 PID1，与 normal 的
+        // init 在同一位置启动），必须等设备初始化完成后再运行套件：网卡始终
+        // 探测（QEMU regression 带 virtio-net，inet_test 依赖 eth0 验证网络栈
+        // 与驱动）；仅跳过无盘环境下的块设备挂载。
+        drivers::init_net_device();
         if boot_config.mode != crate::bootargs::BootMode::Regression {
-            drivers::init_net_device();
             fs::mount_boot_block_devices(&boot_config);
         } else {
-            crate::println!("[kernel] Regression mode — skipping block init");
+            crate::println!("[kernel] Regression mode — skipping block mount (no disks)");
         }
-        // 网络始终初始化：零盘回归没有探测 NIC（NET_DEVICE 保持 None），
-        // net::config::init() 退化为仅 loopback + null eth，为回归套件中的
-        // loopback TCP/UDP 用例（net_tcp_accept/net_udp）提供 smoltcp 栈；
-        // Unix socket、eventfd、epoll、futex 也依赖 NET_INTERFACE 结构就绪。
+        // 网络始终初始化；回归套件中的 loopback TCP/UDP 与 eth0（探测到 NIC 时）
+        // 都依赖 NET_INTERFACE 结构就绪。Unix socket、eventfd、epoll、futex
+        // 同样依赖该结构。
         net::config::init();
     }
 

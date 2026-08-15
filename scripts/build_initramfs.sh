@@ -69,6 +69,26 @@ if [ "$PROFILE" = "regression" ]; then
         exit 1
     fi
 
+    # 4b. 安装独立测试套件（fs/inet/unix）供回归框架 fork+exec。
+    #     这些是大型独立 binary，保持进程隔离（崩溃不拖垮整个套件）。
+    case "$ARCH" in
+      rv64)
+        TEST_BIN_DIR="$USER_OUTPUT_ROOT/riscv64gc-unknown-none-elf/$MODE"
+        ;;
+      la64)
+        TEST_BIN_DIR="$USER_OUTPUT_ROOT/loongarch64-unknown-linux-gnu/$MODE"
+        ;;
+    esac
+    mkdir -p "$STAGE/tests"
+    for t in inet_test fs_test unix_test; do
+        if [ -f "$TEST_BIN_DIR/$t" ]; then
+            install -m 0755 "$TEST_BIN_DIR/$t" "$STAGE/tests/$t"
+            echo "[initramfs] installed /tests/$t"
+        else
+            echo "[initramfs] WARNING: $TEST_BIN_DIR/$t not found, /tests/$t will be missing"
+        fi
+    done
+
 else
     # normal 与 ktest 共享完整 initramfs 构建；loop 测试磁盘对所有 profile 生成（见 6a）
     echo "[initramfs] Building initramfs for $ARCH ($MODE)..."

@@ -377,6 +377,18 @@ fn external_http_ipv4(test_name: &str) -> Option<[u8; 4]> {
 // ============================================================
 // Helper: fork + exec bash -c（从 unix_test.rs 借鉴）
 // ============================================================
+/// 直接 open+read 一个内核 proc/sys 文件（不依赖 shell/cat），成功返回 true。
+fn read_sysfile_ok(path: &str) -> bool {
+    let fd = sys_open(path, 0);
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 128];
+    let n = sys_read(fd as usize, &mut buf);
+    sys_close(fd as usize);
+    n > 0
+}
+
 fn run_bash_cmd(cmd: &str) -> i32 {
     let pid = sys_fork();
     if pid == 0 {
@@ -2042,17 +2054,19 @@ fn test_rtm_dellink_cleanup() -> i32 {
 fn proc_sys_net_ipv6_conf() -> i32 {
     const GROUP: &str = "PROC_SYS";
     const NAME: &str = "ipv6_conf_disable";
-    let ret = run_bash_cmd(
-        "cat /proc/sys/net/ipv6/conf/all/disable_ipv6 && \
-         cat /proc/sys/net/ipv6/conf/default/disable_ipv6 && \
-         cat /proc/sys/net/ipv6/conf/lo/disable_ipv6 && \
-         cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6"
-    );
-    if ret != 0 {
-        tfail!(GROUP, NAME, "cannot read static disable_ipv6 files (exit={})", ret);
-        return 1;
+    const FILES: [&str; 4] = [
+        "/proc/sys/net/ipv6/conf/all/disable_ipv6\0",
+        "/proc/sys/net/ipv6/conf/default/disable_ipv6\0",
+        "/proc/sys/net/ipv6/conf/lo/disable_ipv6\0",
+        "/proc/sys/net/ipv6/conf/eth0/disable_ipv6\0",
+    ];
+    for path in FILES {
+        if !read_sysfile_ok(path) {
+            tfail!(GROUP, NAME, "cannot read {} (no shell dependency)", path);
+            return 1;
+        }
     }
-    let fd = sys_open("/proc/sys/net/ipv6/conf/all/disable_ipv6\0", 0);
+    let fd = sys_open(FILES[0], 0);
     if fd < 0 {
         tbrok!(GROUP, NAME, "open disable_ipv6 failed: {}", fd);
         return 1;
@@ -2115,18 +2129,19 @@ fn sys_net_veth_files() -> i32 {
 fn proc_net_extended() -> i32 {
     const GROUP: &str = "PROC_NET";
     const NAME: &str = "proc_net_extended";
-    let ret = run_bash_cmd(
-        "cat /proc/net/snmp && \
-         cat /proc/net/netstat && \
-         cat /proc/net/snmp6"
-    );
-    if ret == 0 {
-        tpass!(GROUP, NAME, "/proc/net/snmp netstat snmp6 readable");
-        0
-    } else {
-        tfail!(GROUP, NAME, "extended procfs files failed (exit={})", ret);
-        1
+    const FILES: [&str; 3] = [
+        "/proc/net/snmp\0",
+        "/proc/net/netstat\0",
+        "/proc/net/snmp6\0",
+    ];
+    for path in FILES {
+        if !read_sysfile_ok(path) {
+            tfail!(GROUP, NAME, "cannot read {} (no shell dependency)", path);
+            return 1;
+        }
     }
+    tpass!(GROUP, NAME, "/proc/net/snmp netstat snmp6 readable");
+    0
 }
 
 // ============================================================

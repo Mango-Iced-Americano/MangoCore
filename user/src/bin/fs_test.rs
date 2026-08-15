@@ -2619,9 +2619,18 @@ fn test_perf_fork_exec_shell_min() -> bool {
 fn test_perf_read_bb() -> bool {
     const CHUNK: usize = 4096;
     const N: usize = 50;
-    // Read /bin/busybox (possibly lwext4) vs /tmp/bb (ramfs)
+    // Read /bin/busybox (possibly lwext4) vs /tmp/bb (ramfs)。
+    // 精简回归 initramfs 没有 busybox：目标全部缺失时 SKIP（环境限制而非内核回归）。
     let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    let mut any_present = false;
     for (path, label) in &paths {
+        let probe = sys_open(path, 0);
+        if probe < 0 {
+            println!("  skip: {} not present", label);
+            continue;
+        }
+        sys_close(probe as usize);
+        any_present = true;
         let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
         sys_clock_gettime(1, &mut t0);
         for _ in 0..N {
@@ -2637,14 +2646,26 @@ fn test_perf_read_bb() -> bool {
         let avg_ns = total_ns / N as u64;
         println!("  read {}/{}B x{}: total={}ns avg={}ns", label, CHUNK, N, total_ns, avg_ns);
     }
+    if !any_present {
+        println!("  SKIP: no busybox target (/bin/busybox or /tmp/bb) present");
+    }
     true
 }
 
 fn test_perf_read_full() -> bool {
     const N: usize = 5;
-    // Read ENTIRE 800KB busybox in 4KB chunks (sequential — exercises readahead)
+    // Read ENTIRE 800KB busybox in 4KB chunks (sequential — exercises readahead)。
+    // 精简回归 initramfs 没有 busybox：目标全部缺失时 SKIP（环境限制而非内核回归）。
     let paths = [("/bin/busybox\0", "bin"), ("/tmp/bb\0", "tmp")];
+    let mut any_present = false;
     for (path, label) in &paths {
+        let probe = sys_open(path, 0);
+        if probe < 0 {
+            println!("  skip: {} not present", label);
+            continue;
+        }
+        sys_close(probe as usize);
+        any_present = true;
         let mut t0: TimeSpec = TimeSpec { tv_sec:0, tv_nsec:0 };
         sys_clock_gettime(1, &mut t0);
         for _ in 0..N {
@@ -2662,6 +2683,9 @@ fn test_perf_read_full() -> bool {
         let total_ns = ts_diff_ns(&t0, &t1);
         let avg_ns = total_ns / N as u64;
         println!("  read full {} (800KB) x{}: total={}ns avg={}ns", label, N, total_ns, avg_ns);
+    }
+    if !any_present {
+        println!("  SKIP: no busybox target (/bin/busybox or /tmp/bb) present");
     }
     true
 }
