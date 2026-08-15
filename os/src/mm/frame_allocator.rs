@@ -28,12 +28,12 @@ use lazy_static::*;
 use spin::RwLock;
 
 /// Idle CPUs may keep this many already-zeroed single pages ready for demand
-/// faults.  The pool is deliberately small relative to the 8 GiB BuildStorm
-/// guest and is disabled under memory pressure.
-pub const PREZERO_POOL_HIGH_WATER: usize = 256;
+/// faults.  The pool is bounded relative to the 8 GiB BuildStorm guest and is
+/// disabled under memory pressure.
+pub const PREZERO_POOL_HIGH_WATER: usize = 2048;
 const PREZERO_POOL_LOW_WATER: usize = PREZERO_POOL_HIGH_WATER / 2;
-const PREZERO_REFILL_PER_IDLE_TICK: usize = 2;
-const PREZERO_REFILL_PER_IDLE_WAKE: usize = 32;
+const PREZERO_REFILL_PER_IDLE_TICK: usize = 8;
+const PREZERO_REFILL_PER_IDLE_WAKE: usize = 128;
 const PREZERO_MIN_FREE_FRAMES: usize = 2048;
 const PREZERO_POLICY_UNINITIALIZED: u8 = 0;
 const PREZERO_POLICY_IDLE: u8 = 1;

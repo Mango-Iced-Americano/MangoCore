@@ -198,7 +198,7 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（timer timebase tick） |
 | `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（timer timebase tick） |
 | `user_trap_returns` | counter | 进入最终用户恢复跳转的次数；只做事件计数，不在返回热路径读时钟 |
-| `user_return_barriers` | counter | 上述返回中实际执行 `fence.i`（RV）或 `ibar 0`（LA）的次数 |
+| `user_return_barriers` | counter | 上述返回中实际执行 `fence.i`（RV，QEMU TCG 默认 0；真实硬件默认等于返回数）或 `ibar 0`（LA）的次数 |
 | `user_unaligned_traps` | counter | 用户态非对齐访存异常总数（LoongArch） |
 | `user_unaligned_ticks_total/max` | counter/max | 非对齐 Rust handler 的累计/最大耗时；不含汇编 trap entry/restore |
 | `user_unaligned_load_{2,4,8}` | counter | 按访问宽度分类的非对齐 load |
@@ -238,7 +238,7 @@ schema v7 在安全省略 timer context switch 时仍会对当前任务的运行
 | `virtio_dma_share_{header,status,indirect}_pool` | counter | block VirtIO 请求头、状态字节、间接描述符从小池复用的次数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
-| `ext4_pc_readpages_{calls,pages}` | counter | PageCache 后端批量读取的调用数与页数；another_ext4 demand miss 每次最多 16 页（64 KiB） |
+| `ext4_pc_readpages_{calls,pages}` | counter | PageCache 后端批量读取的调用数与页数；another_ext4 demand miss 每次最多 32 页（128 KiB） |
 | `ext4_pc_readpages_runs` | counter | legacy ext4 后端按物理连续块合并的读取 run 数（another_ext4 不使用该字段） |
 | `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |
 | `wb_tx_alloc_extent_{calls,pages,ticks}` | counter | data write 路径中 alloc/extent 准备的次数、页数与累计 ticks |
