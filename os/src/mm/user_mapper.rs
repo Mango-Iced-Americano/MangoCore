@@ -25,6 +25,28 @@ pub(crate) struct UserMapper<'a, T: PageTable> {
     gather: &'a mut MmuGather,
 }
 
+/// `perf_diag` 专用的同镜像 A/B 开关；关闭后成功 fresh map（invalid→valid）
+/// 不再向 `MmuGather` 记录失效，跳过本地/远端 TLB 同步。正常构建保持现状。
+///
+/// 只允许 RV64 使用：QEMU TCG 的 softmmu TLB 不缓存“PTE 不存在”的负结果，
+/// 每次隐式访问都重走 guest 页表，因此 skip flush 后本地与远端都立即看到
+/// 新 PTE；真硬件由 Svvptc（或偶发 spurious-fault 重试）保证最终收敛。
+/// 破坏性更新（unmap/PPN 替换/权限收紧/页表层级回收）仍走 `record_change`。
+#[cfg(all(feature = "perf_diag", target_arch = "riscv64"))]
+fn fresh_map_no_flush_enabled() -> bool {
+    static ENABLED: spin::Once<bool> = spin::Once::new();
+    *ENABLED.call_once(|| {
+        crate::bootargs::get_cmdline()
+            .split_ascii_whitespace()
+            .any(|arg| arg == "mango.rv.fresh_map_flush=off")
+    })
+}
+
+#[cfg(not(all(feature = "perf_diag", target_arch = "riscv64")))]
+fn fresh_map_no_flush_enabled() -> bool {
+    false
+}
+
 impl<'a, T: PageTable> UserMapper<'a, T> {
     /// 绑定当前地址空间的页表与 MMU 修改记录。
     pub(super) fn new(page_table: &'a mut T, gather: &'a mut MmuGather) -> Self {
@@ -168,7 +190,15 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
             crate::task::perf::perf_memory_io_time_now().wrapping_sub(started),
         );
         result?;
-        self.gather.record_change(vpn);
+        if fresh_map_no_flush_enabled() {
+            // fresh map 是严格 invalid→valid（已有 PTE 会被 try_map_no_flush
+            // 拒绝），按规范不需要 TLB 失效；见 fresh_map_no_flush_enabled 的
+            // 能力边界说明。本轮若已记录破坏性修改，range 仍非空，flush 照常。
+            crate::task::perf::record_fresh_map_outcome(true);
+        } else {
+            crate::task::perf::record_fresh_map_outcome(false);
+            self.gather.record_change(vpn);
+        }
         Ok(())
     }
 }
