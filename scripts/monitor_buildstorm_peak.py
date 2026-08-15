@@ -103,7 +103,8 @@ def owned_qemu_pid(args: argparse.Namespace, pid: int) -> int | None:
     """Resolve a launcher PID to its QEMU child without touching other runs."""
     pending = [pid]
     seen: set[int] = set()
-    expected = ("qemu-system-riscv64", args.expected_kernel, args.expected_overlay)
+    expected_executables = ("qemu-system-riscv64", "qemu-system-loongarch64")
+    expected = (expected_executables, args.expected_kernel, args.expected_overlay)
     while pending:
         candidate = pending.pop(0)
         if candidate in seen:
@@ -119,7 +120,11 @@ def owned_qemu_pid(args: argparse.Namespace, pid: int) -> int | None:
         # A launcher shell contains the complete QEMU command in its own
         # cmdline, so token matching alone can select and terminate the shell
         # while leaving QEMU orphaned. Require the resolved executable too.
-        if executable == expected[0] and all(token in cmdline for token in expected):
+        if (
+            executable in expected[0]
+            and expected[1] in cmdline
+            and expected[2] in cmdline
+        ):
             return candidate
         pending.extend(child_pids(candidate))
     return None
