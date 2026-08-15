@@ -18,6 +18,14 @@ pub mod trap;
 
 pub use kern_stack::reclaim_retired_kernel_stacks;
 
+/// 整机是否支持 Svvptc：所有 enabled CPU 的 FDT ISA 都明确报告该扩展。
+///
+/// 作为 fresh-map no-flush 快路的能力门控，与 Sstc timer backend 共用同一套
+/// per-hart FDT ISA 解析；任一 CPU 缺失、畸形或数量不匹配时 fail-closed。
+pub fn platform_supports_svvptc() -> bool {
+    time::platform_supports_isa_ext(b"svvptc")
+}
+
 pub fn machine_init() {
     trap::init();
     trap::enable_ipi_interrupt();
@@ -50,7 +58,7 @@ pub fn machine_init() {
     // 模拟器是否可安全启用 invalid→valid no-fence 快路（Svvptc）。
     crate::println!(
         "[mm] FDT per-hart svvptc: {}",
-        if time::platform_supports_isa_ext(b"svvptc") {
+        if platform_supports_svvptc() {
             "all enabled CPUs"
         } else {
             "missing/partial (no Svvptc fast path)"
@@ -96,6 +104,15 @@ pub fn user_tlb_invalidate() {
 /// 清除当前 hart 上指定 MM、指定用户虚拟页的 non-global 翻译。
 pub fn user_tlb_invalidate_page(asid: u16, vpn: crate::mm::VirtPageNum) {
     sv39::tlb_invalidate_addr_asid(usize::from(crate::mm::VirtAddr::from(vpn)), asid);
+}
+
+/// 本地 spurious-fault 快路专用的单页失效。
+///
+/// fault 发生在运行该 MM 的 hart 上，本地负缓存可能来自任一 ASID 时代，
+/// 因此 RV64 直接做无 ASID 操作数的单页 `sfence.vma`（rs2=x0 覆盖全部
+/// ASID；多刷无害），避免在 VM 锁内读取 MM-owned ASID 上下文。
+pub fn local_user_fault_tlb_invalidate_page(vpn: crate::mm::VirtPageNum) {
+    sv39::tlb_invalidate_addr(usize::from(crate::mm::VirtAddr::from(vpn)));
 }
 
 /// 清除当前 hart 上指定 MM 的有界用户页区间。

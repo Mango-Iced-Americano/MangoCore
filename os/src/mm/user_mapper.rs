@@ -25,24 +25,34 @@ pub(crate) struct UserMapper<'a, T: PageTable> {
     gather: &'a mut MmuGather,
 }
 
-/// `perf_diag` 专用的同镜像 A/B 开关；关闭后成功 fresh map（invalid→valid）
-/// 不再向 `MmuGather` 记录失效，跳过本地/远端 TLB 同步。正常构建保持现状。
+/// 是否跳过 fresh map（invalid→valid）的 TLB 失效。
 ///
-/// 只允许 RV64 使用：QEMU TCG 的 softmmu TLB 不缓存“PTE 不存在”的负结果，
-/// 每次隐式访问都重走 guest 页表，因此 skip flush 后本地与远端都立即看到
-/// 新 PTE；真硬件由 Svvptc（或偶发 spurious-fault 重试）保证最终收敛。
+/// 默认按整机能力门控：所有 enabled CPU 的 FDT 都明确报告 Svvptc 时启用，
+/// 否则 fail-closed 保持既有 flush 语义；`perf_diag` 构建可用
+/// `mango.rv.fresh_map_flush=on/off` 显式覆盖做同镜像 A/B。
+/// QEMU TCG 的 softmmu TLB 不缓存“PTE 不存在”的负结果，每次隐式访问都
+/// 重走 guest 页表，因此启用后本地与远端都立即看到新 PTE；真硬件由
+/// Svvptc（或 do_page_fault 的 spurious-fault 快路）保证最终收敛。
 /// 破坏性更新（unmap/PPN 替换/权限收紧/页表层级回收）仍走 `record_change`。
-#[cfg(all(feature = "perf_diag", target_arch = "riscv64"))]
+#[cfg(target_arch = "riscv64")]
 fn fresh_map_no_flush_enabled() -> bool {
     static ENABLED: spin::Once<bool> = spin::Once::new();
     *ENABLED.call_once(|| {
-        crate::bootargs::get_cmdline()
-            .split_ascii_whitespace()
-            .any(|arg| arg == "mango.rv.fresh_map_flush=off")
+        #[cfg(feature = "perf_diag")]
+        {
+            for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+                match arg {
+                    "mango.rv.fresh_map_flush=on" => return false,
+                    "mango.rv.fresh_map_flush=off" => return true,
+                    _ => {}
+                }
+            }
+        }
+        crate::hal::arch::riscv::platform_supports_svvptc()
     })
 }
 
-#[cfg(not(all(feature = "perf_diag", target_arch = "riscv64")))]
+#[cfg(not(target_arch = "riscv64"))]
 fn fresh_map_no_flush_enabled() -> bool {
     false
 }
