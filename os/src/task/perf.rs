@@ -431,6 +431,92 @@ mod enabled {
     pub static PAGEFAULT_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static FRAME_ALLOC_TIME_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+    // ── Trap 全程/IPI/fresh-map 诊断（perf_stats 专用）──
+    // trap 计时只覆盖 trap_handler 入口 → trap_return 入口（不含调度安全点、
+    // 信号递送与汇编 entry/restore）；cause 分类与出口配对依赖同一 CPU 的
+    // entry 时间，因此 TRAP_ENTRY_TICKS 必须按 CPU 分开存储。
+    pub const TRAP_CAUSE_ECALL: usize = 0;
+    pub const TRAP_CAUSE_PAGE_FAULT: usize = 1;
+    pub const TRAP_CAUSE_TIMER: usize = 2;
+    pub const TRAP_CAUSE_IPI: usize = 3;
+    pub const TRAP_CAUSE_OTHER: usize = 4;
+    pub const TRAP_CAUSE_COUNT: usize = 5;
+    static TRAP_ENTRY_TICKS: [AtomicUsize; crate::smp::MAX_CPUS] =
+        [const { AtomicUsize::new(0) }; crate::smp::MAX_CPUS];
+    pub static TRAP_TOTAL_TICKS: AtomicUsize = AtomicUsize::new(0);
+    pub static TRAP_COUNT: [AtomicUsize; TRAP_CAUSE_COUNT] =
+        [const { AtomicUsize::new(0) }; TRAP_CAUSE_COUNT];
+    pub static IPI_PROBE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static IPI_SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub static IPI_SEND_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRESH_MAP_TOTAL: AtomicUsize = AtomicUsize::new(0);
+    pub static FRESH_MAP_FLUSH_SKIPPED: AtomicUsize = AtomicUsize::new(0);
+
+    /// 用户 trap 入口（trap_handler 首行）记录进入时刻与 cause 分类。
+    #[inline(always)]
+    pub fn record_trap_enter(cause: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        if cause < TRAP_CAUSE_COUNT {
+            TRAP_COUNT[cause].fetch_add(1, Ordering::Relaxed);
+        }
+        TRAP_ENTRY_TICKS[crate::smp::cpu_id()].store(
+            super::perf_time_now_unconditional(),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// 用户 trap 出口（trap_return 首行）闭合总时长；无入口记录时静默跳过。
+    ///
+    /// fault Retry/文件 I/O 阻塞会让同一 trap 跨调度切换，per-CPU entry 槽
+    /// 可能被其他任务覆盖或读到残留值；超过 10s（10MHz 下 1e8 ticks）的差值
+    /// 视为跨 CPU rdcycle 漂移或陈旧 entry 污染，丢弃并清槽，防止累计值
+    /// 超过物理 CPU-s 上限。窗口对比只需低频配对数据，少量丢弃可接受。
+    #[inline(always)]
+    pub fn record_trap_exit_ticks() {
+        if !stats_enabled() {
+            return;
+        }
+        let cpu = crate::smp::cpu_id();
+        let entered = TRAP_ENTRY_TICKS[cpu].load(Ordering::Relaxed);
+        if entered != 0 {
+            let elapsed = super::perf_time_now_unconditional().wrapping_sub(entered);
+            if elapsed < 100_000_000 {
+                TRAP_TOTAL_TICKS.fetch_add(elapsed, Ordering::Relaxed);
+            }
+            TRAP_ENTRY_TICKS[cpu].store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_ipi_probe() {
+        // 探测发生在 BSP 启动早期、stats 开关生效之前，因此不能依赖
+        // stats_enabled() 门控；perf_stats 构建下恒计数，用于验证缓存生效
+        // （缓存后整轮运行 probe_calls 应恒等于 BSP 探测次数）。
+        IPI_PROBE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_ipi_send(ticks: usize) {
+        if !stats_enabled() {
+            return;
+        }
+        IPI_SEND_CALLS.fetch_add(1, Ordering::Relaxed);
+        IPI_SEND_TICKS_TOTAL.fetch_add(ticks, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_fresh_map_outcome(skipped: bool) {
+        if !stats_enabled() {
+            return;
+        }
+        FRESH_MAP_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if skipped {
+            FRESH_MAP_FLUSH_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     // One-shot boot milestones. Values are elapsed raw clock ticks from the
     // earliest Rust entry marker and intentionally survive stats reset.
     static BOOT_START_TICKS: AtomicUsize = AtomicUsize::new(0);
@@ -4360,6 +4446,60 @@ pub fn record_tlb_page_flush_cycles(_cycles: usize) {}
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]
 pub fn record_tlb_full_flush_cycles(_cycles: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_ECALL: usize = 0;
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_PAGE_FAULT: usize = 1;
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_TIMER: usize = 2;
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_IPI: usize = 3;
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_OTHER: usize = 4;
+#[cfg(not(feature = "perf_stats"))]
+pub const TRAP_CAUSE_COUNT: usize = 5;
+#[cfg(not(feature = "perf_stats"))]
+pub static TRAP_TOTAL_TICKS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static TRAP_COUNT: [core::sync::atomic::AtomicUsize; TRAP_CAUSE_COUNT] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; TRAP_CAUSE_COUNT];
+#[cfg(not(feature = "perf_stats"))]
+pub static IPI_PROBE_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static IPI_SEND_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static IPI_SEND_TICKS_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FRESH_MAP_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(feature = "perf_stats"))]
+pub static FRESH_MAP_FLUSH_SKIPPED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_trap_enter(_cause: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_trap_exit_ticks() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ipi_probe() {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_ipi_send(_ticks: usize) {}
+
+#[cfg(not(feature = "perf_stats"))]
+#[inline(always)]
+pub fn record_fresh_map_outcome(_skipped: bool) {}
 
 #[cfg(not(feature = "perf_stats"))]
 #[inline(always)]

@@ -67,16 +67,20 @@ fn isa_version_suffix_is_valid(suffix: &[u8]) -> bool {
 }
 
 /// 优先解析规范化的 ISA extension string-list；只有属性缺失才退回 legacy ISA。
-fn device_has_sstc(device: &DeviceInfo) -> Option<bool> {
+fn device_has_isa_ext(device: &DeviceInfo, expected: &[u8]) -> Option<bool> {
     match device.raw_property("riscv,isa-extensions") {
-        Ok(value) => Some(string_list_contains(value, b"sstc")),
+        Ok(value) => Some(string_list_contains(value, expected)),
         Err(RawPropertyError::Malformed) => Some(false),
         Err(RawPropertyError::Absent) => match device.raw_property("riscv,isa") {
-            Ok(value) => Some(legacy_isa_contains(value, b"sstc")),
+            Ok(value) => Some(legacy_isa_contains(value, expected)),
             Err(RawPropertyError::Malformed) => Some(false),
             Err(RawPropertyError::Absent) => None,
         },
     }
+}
+
+fn device_has_sstc(device: &DeviceInfo) -> Option<bool> {
+    device_has_isa_ext(device, b"sstc")
 }
 
 fn is_cpu_node(device: &DeviceInfo) -> bool {
@@ -95,7 +99,8 @@ fn is_cpu_node(device: &DeviceInfo) -> bool {
     name_is_cpu || device_type_is_cpu
 }
 
-fn platform_supports_sstc() -> bool {
+/// 所有 enabled CPU 的 FDT ISA 都明确包含 `expected` 扩展时才返回 true。
+pub(super) fn platform_supports_isa_ext(expected: &[u8]) -> bool {
     let platform = crate::hal::platform::platform_info();
     let mut cpu_count = 0usize;
     for cpu in platform
@@ -104,11 +109,15 @@ fn platform_supports_sstc() -> bool {
         .filter(|device| device.is_enabled() && is_cpu_node(device))
     {
         cpu_count += 1;
-        if !device_has_sstc(cpu).unwrap_or(false) {
+        if !device_has_isa_ext(cpu, expected).unwrap_or(false) {
             return false;
         }
     }
     cpu_count == crate::smp::runtime_cpu_count()
+}
+
+fn platform_supports_sstc() -> bool {
+    platform_supports_isa_ext(b"sstc")
 }
 
 /// 在 BSP 首次编程 timer、发布 AP 之前选择整机 timer backend。

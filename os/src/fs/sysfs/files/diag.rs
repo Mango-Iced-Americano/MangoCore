@@ -631,6 +631,22 @@ fn stats_syscall_content(
     unaligned_counter!("user_unaligned_store_8", USER_UNALIGNED_STORE_8);
     unaligned_counter!("user_unaligned_float_loads", USER_UNALIGNED_FLOAT_LOADS);
     unaligned_counter!("user_unaligned_float_stores", USER_UNALIGNED_FLOAT_STORES);
+    let _ = writeln!(
+        s,
+        "trap_total_ticks={}",
+        read_counter(&crate::task::perf::TRAP_TOTAL_TICKS)
+    );
+    for (index, name) in ["ecall", "page_fault", "timer", "ipi", "other"]
+        .iter()
+        .enumerate()
+    {
+        let _ = writeln!(
+            s,
+            "trap_count_{}={}",
+            name,
+            read_counter(&crate::task::perf::TRAP_COUNT[index])
+        );
+    }
     write_str(offset, len, buf, &s)
 }
 
@@ -854,6 +870,31 @@ fn stats_tlb_content(
         s,
         "tlb_shootdown_clock_freq_hz={}",
         crate::hal::get_clock_freq()
+    );
+    let _ = writeln!(
+        s,
+        "ipi_probe_calls={}",
+        read_counter(&crate::task::perf::IPI_PROBE_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ipi_send_calls={}",
+        read_counter(&crate::task::perf::IPI_SEND_CALLS)
+    );
+    let _ = writeln!(
+        s,
+        "ipi_send_ticks_total={}",
+        read_counter(&crate::task::perf::IPI_SEND_TICKS_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "fresh_map_total={}",
+        read_counter(&crate::task::perf::FRESH_MAP_TOTAL)
+    );
+    let _ = writeln!(
+        s,
+        "fresh_map_flush_skipped={}",
+        read_counter(&crate::task::perf::FRESH_MAP_FLUSH_SKIPPED)
     );
     write_str(offset, len, buf, &s)
 }

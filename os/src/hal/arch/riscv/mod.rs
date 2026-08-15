@@ -37,7 +37,25 @@ pub fn machine_init() {
                 error
             ),
         }
+        match sbi::init_ipi() {
+            Ok(true) => crate::println!("[smp] SBI IPI extension available (probe cached)"),
+            Ok(false) => crate::println!("[smp] SBI IPI extension unavailable; IPI sends fail"),
+            Err(error) => crate::println!(
+                "[smp] SBI IPI probe failed ({}); IPI sends fail",
+                error
+            ),
+        }
     }
+    // 整机 per-hart FDT ISA 交集标记：与 Sstc 门控同一套解析，判定当前固件/
+    // 模拟器是否可安全启用 invalid→valid no-fence 快路（Svvptc）。
+    crate::println!(
+        "[mm] FDT per-hart svvptc: {}",
+        if time::platform_supports_isa_ext(b"svvptc") {
+            "all enabled CPUs"
+        } else {
+            "missing/partial (no Svvptc fast path)"
+        }
+    );
     // 当前 CPU 的第一个 deadline 会在开放 STIE 前由 timer_cpu_init() 写入。
 }
 
