@@ -431,7 +431,7 @@ pub trait Socket: Send + Sync {
     ) -> Result<Option<Endpoint>, SyscallErr> {
         Ok(None)
     }
-    fn listen(&self) -> SyscallRet;
+    fn listen(&self, backlog: u32) -> SyscallRet;
     fn connect(&self, endpoint: &Endpoint) -> SyscallRet;
     /// 尝试建立连接一次（不阻塞），检查一次握手状态。
     /// 返回 Ok(0) 表示已建立，Err(EAGAIN) 表示尚在握手/需重试。

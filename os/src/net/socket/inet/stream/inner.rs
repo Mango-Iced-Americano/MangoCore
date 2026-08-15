@@ -36,7 +36,14 @@ pub const TCP_MSS: u32 = if TCP_MSS_DEFAULT > 65536 {
 } else {
     TCP_MSS_DEFAULT
 };
-pub const BACKLOG_SIZE: u32 = 16;
+/// 单个监听 socket 可容纳的并发 pending/established 连接槽上限。
+///
+/// 每个槽是一个独立 smoltcp TcpSocket（LISTEN_BUFFER_SIZE × 2 缓冲），
+/// 因此上限要同时约束内存与每轮 poll 的扫描成本。官方 CAgent 的
+/// `simple_llm_server` 以 backlog=10 同时服务 10 个 agent 客户端；旧上限 8
+/// 会让第 9/10 个并发 SYN 找不到空闲槽而被拒绝，agent 首次 connect 即失败，
+/// 直接丢掉整个 testcase（曾表现为 cagent 部分用例 fail/reject）。
+pub const MAX_LISTEN_BACKLOG: usize = 64;
 pub const LISTEN_BUFFER_SIZE: usize = 32 * 1024;
 
 // EPollEvent 已移至 fs/vfs/event.rs，全内核统一使用该定义。

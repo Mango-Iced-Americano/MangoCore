@@ -1620,3 +1620,36 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   次本地 flush（15.3 ms），远端同步等待从 17.47 CPU-s 降至 1.39 CPU-s，且 retire 仍同步。
 - **相关文件**：`os/src/smp.rs`、`os/src/task/processor.rs`、`os/src/task/manager.rs`、
   `os/src/fs/sysfs/files/diag.rs`
+
+## 固定 listen 槽数小于并发连接数导致 connect 被拒
+
+- **现象**: 官方 CAgent 的 `simple_llm_server` 以 `listen(fd, 10)` 同时服务 10 个并发
+  `agent_lite` 客户端；不同轮次随机有 1-2 个 testcase `fail/reject`，失败用时仅数百 ms。
+- **根因**: 内核把 `listen(2)` 的 backlog 硬编码上限为 8（每个槽是一个独立 smoltcp
+  TcpSocket）；第 9/10 个并发 SYN 找不到空闲槽被拒，agent 首次 connect 即失败且无重试，
+  整个 testcase 直接失败（输出 `Connection failed to 127.0.0.1:8080`）。失败的是"哪些
+  testcase"取决于连接竞态，与具体命令（awk/df/echo）无关。
+- **修复**: 尊重用户 backlog（`sys_listen` 透传，`0` 按 1，上限 `MAX_LISTEN_BACKLOG=64`）；
+  不再使用固定 `BACKLOG_SIZE`。官方 10 并发场景从 8-9/10 恢复为 10/10（RV64/LA64 复测）。
+- **教训**: 官方并发压测的 listen 槽数不能硬编码为小常数；"哪些用例失败"随机漂移时先怀疑
+  共享容量瓶颈（listen 槽、fd 表、端口 registry），不要按失败用例的 shell 命令（awk 等）归因。
+- **相关文件**: `os/src/net/syscall/listen.rs`、`os/src/net/socket/inet/stream/{lifecycle,inner,mod}.rs`
+
+## 跨页用户缓冲区写被惰性缺页截断
+
+- **现象**: LA64 官方评测中 `[test-runner] ntpd unavailable; using fallback clock\n`（53 字节）
+  被截成 52 字节（或旧二进制布局下截成 36 字节），尾部的 `\n` 静默丢失，与下一条
+  `[initproc]` 日志合并成一行；`LOG=info` 显示 `write(64) -> 34`（返回 52/53）。
+- **根因**: 用户字符串恰好跨页，第二页从未被访问过（惰性缺页，PTE 未 present）。
+  `write_from_user`/`pwrite_from_user` 的 chunk 循环在非首个 chunk 遇到
+  `user_accessible_len == 0` 时直接返回已完成前缀，把惰性页误判为缓冲区终点；用户侧
+  `println!` 忽略短写返回值，截断变成静默丢字节。`user_accessible_len` 只查 PTE 不 fault，
+  "未 present" ≠ "不可访问"。
+- **修复**: `accessible == 0` 时不再立即返回前缀，而是按单页有界 fault-in 重试
+  （`accessible = want.min(PAGE_SIZE)`，与首个 chunk 一致）；真实不可访问区域由
+  faultable copy 的 fault 失败产生前缀，EFAULT/短写语义不变。
+- **教训**: 排查"一行日志尾部消失/两行合并"时先看 `LOG=info` 的 `write` 返回值是否等于
+  请求字节数，再看字符串在 ELF 中的页内偏移；短写消费者忽略返回值会把内核截断放大为
+  静默数据丢失。惰性缺页页与真不可访问页必须在 uaccess 层区分。
+- **相关文件**: `os/src/syscall/fs/common.rs`（`write_from_user`/`pwrite_from_user` 四个
+  chunk 循环）、`os/src/mm/uaccess.rs`

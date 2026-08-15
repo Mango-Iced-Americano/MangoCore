@@ -1,12 +1,16 @@
 use crate::net::socket::inet::common::port::{AutoBindPurpose, PortManager};
+use crate::net::socket::inet::stream::inner::MAX_LISTEN_BACKLOG;
 use crate::task::current_task;
 
 /// 将 socket 标记为被动模式，准备接受连接。
 ///
 /// # Semantics
 ///
-/// 委托 `socket.listen()`，`_backlog` 参数被忽略（内核内部使用固定 `BACKLOG_SIZE`）。
-/// 当前不支持 backlog 调整，但接受任意值以保证 ABI 兼容性。
+/// 委托 `socket.listen(backlog)`。backlog 决定监听 socket 可容纳的并发
+/// pending/established 连接槽数；`0` 按 1 处理，上限
+/// [`MAX_LISTEN_BACKLOG`]。官方 CAgent 的 LLM server 以 backlog=10 同时服务
+/// 10 个并发 agent 客户端，旧实现忽略 backlog 并固定 8 槽，导致第 9/10 个
+/// 客户端 connect 被拒绝而整个 testcase 失败。
 ///
 /// # Errors
 ///
@@ -14,9 +18,9 @@ use crate::task::current_task;
 ///
 /// # Linux Compatibility
 ///
-/// 简化实现：始终使用固定的 backlog 值。`SO_RCVBUF` 的 backlog 关联语义
-/// （Linux 3.x+ `somaxconn`）未实现。
-pub fn sys_listen(sockfd: u32, _backlog: u32) -> isize {
+/// backlog 上限远小于 Linux `somaxconn`（4096），但语义方向一致；
+/// `SO_RCVBUF` 的 backlog 关联语义（Linux 3.x+ `somaxconn`）未实现。
+pub fn sys_listen(sockfd: u32, backlog: u32) -> isize {
     let socket = crate::get_socket!(sockfd);
     let task = current_task().unwrap();
     if let Err(error) = PortManager::ensure_auto_bound(
@@ -27,8 +31,8 @@ pub fn sys_listen(sockfd: u32, _backlog: u32) -> isize {
     ) {
         return -(error as isize);
     }
-    //socket.listen().unwrap() as isize
-    match socket.listen() {
+    let backlog = backlog.min(MAX_LISTEN_BACKLOG as u32);
+    match socket.listen(backlog) {
         Ok(s) => s as isize,
         Err(err) => -(err as isize),
     }

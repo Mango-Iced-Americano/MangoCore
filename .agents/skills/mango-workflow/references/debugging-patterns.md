@@ -1642,3 +1642,28 @@
   failure 必须分别报告。
 - **相关文件**：`os/src/fs/boot_block.rs`、`user/src/bin/init/mounts.rs`、
   `user/src/bin/test_runner/bootstrap/layout.rs`、`docs/Work_Log/2026-08-14.md`
+
+## 官方脚本会删除失败证据时，先保留输出文件再复现
+
+- **场景**: 官方 CAgent/BuildStorm `testcode.sh` 在每个用例结束后 `rm -f "$output_file"`，
+  评测日志里只剩 `testcase cagent xxx fail <ms>`，无法判断失败环节。
+- **做法**: 用 debugfs 把镜像内的官方脚本 dump 出来，删除 `rm -f` 一行后写回镜像副本，
+  再用与评测一致的 QEMU 命令复现；guest 把输出写到 chroot 的 `/tmp`（bind 到镜像 ext4），
+  跑完后 `debugfs dump` 取回每个 testcase 的完整 agent 输出。
+- **收益**: 一次复现即拿到 `Connection failed to 127.0.0.1:8080`（listen 槽竞争），直接
+  推翻"awk 子进程/syscall 缺口"假设；对照通过用例的输出可精确区分 connect 失败、tool
+  执行失败与最终答案校验失败。失败用例的 `<ms>` 时长（数百 ms vs 数秒）也是线索：快速
+  失败通常是连接/参数层，慢失败才是多轮 LLM 交互。
+- **相关文件**: `testsuits-for-oskernel/cagent-test/`（agent/server 源码与官方脚本参考）
+
+## 用 LOG=info 的 write 返回值定位串口丢尾
+
+- **现象**: 串口某一行尾部（换行符）消失并与下一行合并，肉眼看起来像多进程并发写交错。
+- **做法**: 用 `LOG=info` 构建内核重跑，`[syscall] write(64) -> XX` 的返回值是十六进制
+  字节数；若返回值小于请求长度（如 52/53），说明是 syscall 层截断而不是终端交错。
+  再用 `grep -abo` 找到字符串在 ELF 中的文件偏移，结合 `readelf -l` 的段表计算其虚拟页内
+  偏移，判断缓冲区是否跨页、哪一页是"从未被访问"的惰性页。
+- **边界**: 用户侧 `println!` 等包装忽略 `write` 返回值，内核短写会被放大成静默丢字节；
+  排查时两者都要验证。同一进程的两个 `println!` 顺序调用不可能真正交错——若它们看起来
+  交错，优先怀疑短写丢换行，而不是 console 锁。
+- **相关文件**: `os/src/syscall/fs/common.rs`、`user/src/console.rs`

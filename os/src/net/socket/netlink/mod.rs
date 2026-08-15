@@ -76,7 +76,7 @@ impl Socket for NetlinkSocket {
         }
         Ok(0)
     }
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, _backlog: u32) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
     fn connect(&self, _ep: &Endpoint) -> SyscallRet {
