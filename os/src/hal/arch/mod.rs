@@ -50,8 +50,9 @@ pub use riscv::{
     config::MMIO,
     sbi::{
         configure_runtime_console, console_flush, console_getchar, console_putchar,
-        console_write_bytes, irq_enabled, local_irq_restore, local_irq_save, machine_shutdown,
-        init_runtime_console_rx, panic_console_write, set_timer, shutdown,
+        console_write_bytes, drain_runtime_console_rx, irq_enabled, local_irq_restore,
+        local_irq_save, machine_shutdown, init_runtime_console_rx, panic_console_write, set_timer,
+        shutdown, take_runtime_console_rx_interrupt,
     },
     cpu_wait_for_interrupt, secondary_cpu_stop, send_ipi, start_secondary_cpu,
     sv39::tlb_invalidate,

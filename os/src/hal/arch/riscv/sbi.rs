@@ -34,6 +34,7 @@ const CONSOLE_RX_RING_CAPACITY: usize = 512;
 const CONSOLE_RX_REPORT_INTERVAL_MS: usize = 1_000;
 static CONSOLE_RX_RING: ByteRing<CONSOLE_RX_RING_CAPACITY> = ByteRing::new();
 static CONSOLE_RX_INTERRUPT_PENDING: AtomicBool = AtomicBool::new(false);
+static CONSOLE_RX_IRQ_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CONSOLE_RX_THROTTLED: AtomicBool = AtomicBool::new(false);
 static CONSOLE_RX_RING_OVERRUNS: AtomicUsize = AtomicUsize::new(0);
 static CONSOLE_RX_TTY_OVERRUNS: AtomicUsize = AtomicUsize::new(0);
@@ -315,12 +316,34 @@ pub fn init_runtime_console_rx() {
     if uart.enable_receive_interrupts() {
         let _ = drain_runtime_uart_fifo();
     }
+    crate::println!("[console] UART RX interrupt registered (irq={})", irq);
 }
 
 /// PLIC callback: consume bounded hardware FIFO work and publish it for the
 /// scheduler. It must not take locks or call the line discipline.
 fn console_rx_interrupt() {
+    CONSOLE_RX_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let _ = drain_runtime_uart_fifo();
+}
+
+/// 真实 UART RX 硬件中断触发次数（focused 测试与诊断用）。
+pub fn console_rx_irq_count() -> usize {
+    CONSOLE_RX_IRQ_COUNT.load(Ordering::Relaxed)
+}
+
+/// 打开/关闭 16550 内部环回：UART 写 THR 的字节直接回环到 RX，无需外部
+/// 线路即可驱动 RX 中断路径（ktest loopback 验证用）。
+pub fn console_uart_set_loopback(enabled: bool) -> bool {
+    runtime_console()
+        .map(|uart| uart.set_loopback(enabled))
+        .unwrap_or(false)
+}
+
+/// 向运行时 console UART 写一个字节（THR），配合 loopback 触发 RX 中断。
+pub fn console_uart_putchar(byte: u8) -> bool {
+    runtime_console()
+        .map(|uart| uart.try_write(byte))
+        .unwrap_or(false)
 }
 
 /// Bounded polling fallback for missing/masked IRQs and sub-trigger FIFO data.

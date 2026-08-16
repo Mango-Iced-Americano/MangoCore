@@ -47,6 +47,7 @@ pub static NET_INTERFACE: NetInterface = NetInterface::new();
 /// 一次重传/worker 调度。超时后 worker 明确 abort 并从 SocketSet 移除，不能让
 /// 已无用户 owner 的大缓冲无限驻留。
 const TCP_REMOVAL_GRACE_SECS: usize = 15;
+static SCHEDULER_TICK_NET_FALLBACK_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// 在短移除队列临界区内去重 UDP route。调用者必须在锁外决定是否唤醒 worker。
 pub(crate) fn enqueue_udp_socket_removal(route: RouteSocketHandle) -> bool {
@@ -677,6 +678,21 @@ impl<'a> NetInterface<'a> {
             if let Some(wait_queue) = self.poll.worker_wait.get() {
                 wait_queue.lock().wake_all();
             }
+        }
+    }
+
+    pub(crate) fn set_scheduler_tick_net_fallback_enabled_for_test(&self, enabled: bool) -> bool {
+        SCHEDULER_TICK_NET_FALLBACK_ENABLED.swap(enabled, Ordering::AcqRel)
+    }
+
+    pub(crate) fn scheduler_tick_net_fallback_enabled(&self) -> bool {
+        SCHEDULER_TICK_NET_FALLBACK_ENABLED.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn run_scheduler_tick_net_fallback(&self) {
+        if self.scheduler_tick_net_fallback_enabled() {
+            let _ = self.try_poll_irq();
+            self.run_deferred_net_wake();
         }
     }
 

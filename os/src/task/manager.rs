@@ -15,6 +15,8 @@
 use core::cmp::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 
+static CONSOLE_RX_IRQ_CONSUMED: AtomicBool = AtomicBool::new(false);
+
 #[cfg(feature = "oom_handler")]
 use crate::config::SYSTEM_TASK_LIMIT;
 use alloc::vec::Vec;
@@ -2227,10 +2229,7 @@ pub fn run_deferred_timer_work() -> bool {
         // scheduler tick 可能在任务安全点被消费；把周期维护请求单独交给随后
         // 恢复的 CPU0 idle 栈，避免 pending timer 清零后漏掉 housekeeping。
         crate::task::processor::request_boot_housekeeping();
-        crate::net::config::NET_INTERFACE.try_poll_irq();
-        // hard IRQ 只设置 deferred_wake；到这个 task/idle 安全点才允许获取
-        // WaitQueue 并唤醒 worker。
-        crate::net::config::NET_INTERFACE.run_deferred_net_wake();
+        crate::net::config::NET_INTERFACE.run_scheduler_tick_net_fallback();
     }
 
     rearm_local_timer();
@@ -2241,6 +2240,28 @@ pub fn run_deferred_timer_work() -> bool {
     crate::task::perf::record_deferred_timer_snapshot();
     local_irq_restore(irq_flags);
     need_resched || woke_task
+}
+
+/// Convert CPU0 hard external-IRQ publications into task-context work.
+pub fn run_deferred_external_work() {
+    if crate::smp::cpu_id() != crate::smp::BOOT_CPU_ID {
+        return;
+    }
+    crate::net::config::NET_INTERFACE.run_deferred_net_wake();
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::hal::arch::riscv::plic::report_unhandled_irq();
+        // console UART RX 中断把字节 drain 进 ring 并置 pending；任务上下文
+        // 才允许进入 tty 行规范并唤醒阻塞 read（中断回调只做 FIFO drain）。
+        if crate::hal::take_runtime_console_rx_interrupt() {
+            if !CONSOLE_RX_IRQ_CONSUMED.swap(true, AtomicOrdering::AcqRel) {
+                crate::println!("[console] UART RX interrupt consumed (first)");
+            }
+            crate::hal::drain_runtime_console_rx(|byte| {
+                crate::fs::dev::tty::Teletype::receive_console_char(byte)
+            });
+        }
+    }
 }
 
 /// 在任务现场完整、业务锁均已释放的安全点合并调度请求。
@@ -2281,6 +2302,7 @@ pub fn run_task_safe_point() {
     // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。
     drop(task);
     let timer_resched = run_deferred_timer_work();
+    run_deferred_external_work();
     let ipi_resched = crate::smp::take_reschedule_request();
     if timer_resched || ipi_resched {
         crate::task::suspend_current_and_run_next();

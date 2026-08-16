@@ -786,6 +786,7 @@ fn classify_device(compatible: &[String]) -> DeviceKind {
             "virtio,mmio" => return DeviceKind::Other,
             "riscv,plic0"
             | "riscv,plic"
+            | "sifive,plic-1.0.0"
             | "loongson,cpu-interrupt-controller"
             | "loongson,liointc"
             | "loongson,eiointc"

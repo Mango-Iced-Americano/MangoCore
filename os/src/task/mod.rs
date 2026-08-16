@@ -51,8 +51,8 @@ pub use elf::{load_elf_interp, AuxvEntry, AuxvType, ELFInfo};
 use lazy_static::*;
 pub use manager::{
     add_kernel_timer, all_pids, do_oom, do_wake_expired, has_ready_task, kernel_timer_queue_len,
-    procs_count, publish_task, remove_zombie_tasks_by_pid, run_deferred_timer_work,
-    run_task_safe_point, send_signal_to_interruptible, sleep_interruptible, task_manager_counts,
+    procs_count, publish_task, remove_zombie_tasks_by_pid, run_deferred_external_work,
+    run_deferred_timer_work, run_task_safe_point, send_signal_to_interruptible, sleep_interruptible, task_manager_counts,
     timer_cpu_init, timer_interrupt_handler, update_ready_nice, wait_with_timeout,
     wake_interruptible, zombie_count, TimerAction, WaitQueue, WaitResult,
 };

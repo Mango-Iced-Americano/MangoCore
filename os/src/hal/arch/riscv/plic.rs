@@ -1,12 +1,17 @@
-//! Minimal supervisor-mode PLIC dispatch for the single-hart kernel.
+//! Minimal supervisor-mode PLIC dispatch for the boot CPU.
 //!
 //! Device callbacks only acknowledge hardware and publish lightweight work for
 //! task context.  They must not acquire scheduler or network-stack locks.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    arch::asm,
+    cmp::max,
+    mem::size_of,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use spin::Mutex;
 
-use crate::hal::platform::{self, DeviceKind};
+use crate::hal::platform::{self, DeviceInfo, DeviceKind, MmioRange};
 
 /// Maximum PLIC source ID accepted by the static callback table.
 ///
@@ -15,10 +20,12 @@ const MAX_IRQS: usize = 256;
 const PRIORITY_BASE: usize = 0x0000;
 const ENABLE_BASE: usize = 0x2000;
 const ENABLE_CONTEXT_STRIDE: usize = 0x80;
+const ENABLE_WORDS_PER_CONTEXT: usize = ENABLE_CONTEXT_STRIDE / size_of::<u32>();
 const CONTEXT_BASE: usize = 0x20_0000;
 const CONTEXT_STRIDE: usize = 0x1000;
 const CONTEXT_THRESHOLD: usize = 0;
 const CONTEXT_CLAIM_COMPLETE: usize = 4;
+const CLAIM_BUDGET: usize = 32;
 
 /// Registered interrupt callback. Callbacks run with supervisor interrupts
 /// masked, so they must only perform bounded, lock-free acknowledgement work.
@@ -38,8 +45,12 @@ struct Plic {
 }
 
 impl Plic {
+    fn enable_word_address(self, word: usize) -> usize {
+        self.base + ENABLE_BASE + self.context * ENABLE_CONTEXT_STRIDE + word * size_of::<u32>()
+    }
+
     fn enable_address(self, irq: usize) -> usize {
-        self.base + ENABLE_BASE + self.context * ENABLE_CONTEXT_STRIDE + (irq / 32) * 4
+        self.enable_word_address(irq / 32)
     }
 
     fn context_address(self, offset: usize) -> usize {
@@ -56,6 +67,15 @@ impl Plic {
 
     fn complete(self, irq: usize) {
         write_register(self.context_address(CONTEXT_CLAIM_COMPLETE), irq as u32);
+    }
+
+    fn mask_source_for_local_context(self, irq: usize) {
+        if irq >= ENABLE_WORDS_PER_CONTEXT * 32 {
+            return;
+        }
+        let enable_address = self.enable_address(irq);
+        let enabled = read_register(enable_address);
+        write_register(enable_address, enabled & !(1u32 << (irq % 32)));
     }
 }
 
@@ -80,38 +100,85 @@ fn supervisor_context() -> Option<usize> {
     }
 }
 
-/// Discover and enable the supervisor PLIC context from the retained FDT.
-pub fn init() {
-    let Some(range) = platform::platform_info()
-        .devices
+fn is_plic_compatible(device: &DeviceInfo) -> bool {
+    device.compatible.iter().any(|compatible| {
+        matches!(
+            compatible.as_str(),
+            "riscv,plic0" | "riscv,plic" | "sifive,plic-1.0.0"
+        )
+    })
+}
+
+fn is_usable_interrupt_controller(device: &DeviceInfo) -> bool {
+    device.kind == DeviceKind::InterruptController
+        && device.is_enabled()
+        && device.mmio_range(0).is_some()
+}
+
+fn select_plic_range() -> Option<MmioRange> {
+    let devices = &platform::platform_info().devices;
+    devices
         .iter()
-        .find(|device| {
-            device.kind == DeviceKind::InterruptController
-                && device.is_enabled()
-                && device.mmio_range(0).is_some()
-        })
+        .find(|device| is_usable_interrupt_controller(device) && is_plic_compatible(device))
+        .or_else(|| devices.iter().find(|device| is_usable_interrupt_controller(device)))
         .and_then(|device| device.mmio_range(0))
-    else {
-        return;
+}
+
+fn required_register_size(context: usize) -> Option<usize> {
+    let priority_end = PRIORITY_BASE.checked_add(MAX_IRQS.checked_mul(size_of::<u32>())?)?;
+    let enable_end = ENABLE_BASE
+        .checked_add(context.checked_mul(ENABLE_CONTEXT_STRIDE)?)
+        .and_then(|offset| {
+            offset.checked_add(ENABLE_WORDS_PER_CONTEXT.checked_mul(size_of::<u32>())?)
+        })?;
+    let context_end = CONTEXT_BASE
+        .checked_add(context.checked_mul(CONTEXT_STRIDE)?)
+        .and_then(|offset| offset.checked_add(CONTEXT_CLAIM_COMPLETE + size_of::<u32>()))?;
+    Some(max(priority_end, max(enable_end, context_end)))
+}
+
+/// Discover, quiesce, and publish the boot CPU's supervisor PLIC context.
+///
+/// Publication happens only after every register used by this L1 dispatcher has
+/// been checked against the FDT range and the inherited enable state is gone.
+pub fn init_boot_cpu() -> bool {
+    let Some(range) = select_plic_range() else {
+        return false;
     };
     let Some(context) = supervisor_context() else {
-        return;
+        return false;
     };
-    let Some(required_size) = CONTEXT_BASE
-        .checked_add(context.saturating_mul(CONTEXT_STRIDE))
-        .and_then(|offset| offset.checked_add(CONTEXT_CLAIM_COMPLETE + 4))
-    else {
-        return;
+    let Some(required_size) = required_register_size(context) else {
+        return false;
     };
-    if range.size < required_size {
-        return;
+    if range.base % size_of::<u32>() != 0
+        || range.size < required_size
+        || range.base.checked_add(required_size).is_none()
+    {
+        return false;
     }
 
-    // SAFETY: FDT validation supplied an aligned, identity-mapped PLIC MMIO
-    // range, and the bounds check above covers this supervisor context.
-    write_register(range.base + CONTEXT_BASE + context * CONTEXT_STRIDE + CONTEXT_THRESHOLD, 0);
+    let plic = Plic {
+        base: range.base,
+        context,
+    };
+    // Keep all inherited sources blocked until the whole local enable bitmap
+    // has been cleared. Boot firmware may have left an unrelated level source
+    // asserted before its driver installs a callback.
+    write_register(plic.context_address(CONTEXT_THRESHOLD), u32::MAX);
+    for word in 0..ENABLE_WORDS_PER_CONTEXT {
+        write_register(plic.enable_word_address(word), 0);
+    }
+    write_register(plic.context_address(CONTEXT_THRESHOLD), 0);
+    fence_io();
     PLIC_CONTEXT.store(context, Ordering::Relaxed);
     PLIC_BASE.store(range.base, Ordering::Release);
+    true
+}
+
+/// Return the already-published boot CPU PLIC location for boot diagnostics.
+pub fn boot_cpu_context() -> Option<(usize, usize)> {
+    configured_plic().map(|plic| (plic.base, plic.context))
 }
 
 /// Register and enable one PLIC source.
@@ -137,7 +204,7 @@ pub fn register_handler(irq: usize, handler: IrqHandler) -> bool {
     true
 }
 
-/// Claim, dispatch, and complete one supervisor external interrupt.
+/// Claim, dispatch, and complete a bounded batch of supervisor external interrupts.
 ///
 /// This is deliberately limited to bounded MMIO and a pre-registered callback.
 /// In particular, it never polls smoltcp or logs through the serial console.
@@ -145,21 +212,29 @@ pub fn handle_external_interrupt() {
     let Some(plic) = configured_plic() else {
         return;
     };
-    let irq = plic.claim();
-    if irq == 0 {
-        return;
-    }
+    for _ in 0..CLAIM_BUDGET {
+        let irq = plic.claim();
+        if irq == 0 {
+            break;
+        }
 
-    let handler = if irq < MAX_IRQS {
-        IRQ_HANDLERS.lock()[irq]
-    } else {
-        None
-    };
-    match handler {
-        Some(handler) => handler(),
-        None => record_unhandled_irq(irq),
+        let handler = if irq < MAX_IRQS {
+            IRQ_HANDLERS.lock()[irq]
+        } else {
+            None
+        };
+        match handler {
+            Some(handler) => handler(),
+            None => {
+                // Disable unknown level sources before completion so they cannot
+                // continuously retrigger and starve the bounded hard-IRQ path.
+                plic.mask_source_for_local_context(irq);
+                record_unhandled_irq(irq);
+            }
+        }
+        fence_io();
+        plic.complete(irq);
     }
-    plic.complete(irq);
 }
 
 /// Emit one deferred warning for the first unregistered source.
@@ -186,6 +261,14 @@ fn record_unhandled_irq(irq: usize) {
         Ordering::Release,
         Ordering::Relaxed,
     );
+}
+
+#[inline(always)]
+fn fence_io() {
+    // SAFETY: [Category 13 — instruction contract] this emits only the
+    // architectural I/O ordering barrier; the checked PLIC MMIO sequence on
+    // either side owns all memory accesses.
+    unsafe { asm!("fence iorw, iorw", options(nostack)) }
 }
 
 #[inline(always)]

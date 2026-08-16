@@ -39,6 +39,8 @@ const VIRTIO_MMIO_INTERRUPT_STATUS: usize = 0x60;
 const VIRTIO_MMIO_INTERRUPT_ACK: usize = 0x64;
 #[cfg(feature = "block_virt")]
 static VIRTIO_NET_MMIO_BASE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "block_virt")]
+static VIRTIO_NET_IRQ_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "block_virt")]
 pub struct VirtIONetWrapper {
@@ -105,6 +107,10 @@ pub fn probe_net_from_device_manager(dm: &DeviceManager) -> Option<Arc<dyn NetDe
         let Some(net_device) = VirtIONetWrapper::try_new(base_addr, irq) else {
             continue;
         };
+        println!(
+            "[virtio-net] FDT node={} mmio={:#x} irq={:?}",
+            dev_info.node_path, base_addr, irq
+        );
         return Some(Arc::new(net_device));
     }
 
@@ -167,7 +173,18 @@ fn device_interrupt(device: &crate::hal::platform::DeviceInfo) -> Option<usize> 
 }
 
 #[cfg(feature = "block_virt")]
+pub fn virtio_net_irq_count() -> usize {
+    VIRTIO_NET_IRQ_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "block_virt")]
+pub fn virtio_net_irq_available() -> bool {
+    VIRTIO_NET_MMIO_BASE.load(Ordering::Acquire) != 0
+}
+
+#[cfg(feature = "block_virt")]
 fn virtio_net_irq() {
+    VIRTIO_NET_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let base = VIRTIO_NET_MMIO_BASE.load(Ordering::Acquire);
     if base != 0 {
         // SAFETY: `try_new` publishes only the FDT-validated, identity-mapped

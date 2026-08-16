@@ -111,6 +111,20 @@ impl Ns16550a {
         self.write_register(offsets::IER, 0)
     }
 
+    /// 16550 内部环回（MCR.LOOP）：发送数据直接回到接收器，用于在无外部
+    /// 线路注入时驱动 RX 中断路径的 focused 测试。
+    pub fn set_loopback(&self, enabled: bool) -> bool {
+        let Some(current) = self.read_register(offsets::MCR) else {
+            return false;
+        };
+        let next = if enabled {
+            current | masks::LOOPBACK_DIAGNOSTIC_MODE
+        } else {
+            current & !masks::LOOPBACK_DIAGNOSTIC_MODE
+        };
+        self.write_register(offsets::MCR, next)
+    }
+
     pub fn try_write(&self, word: u8) -> bool {
         self.read_line_status()
             .is_some_and(|status| status & masks::THRE != 0)
@@ -169,4 +183,5 @@ mod masks {
     pub const RDA_INTERRUPT: u8 = 1;
     pub const RLS_INTERRUPT: u8 = 1 << 2;
     pub const FIFO_ENABLE: u8 = 1;
+    pub const LOOPBACK_DIAGNOSTIC_MODE: u8 = 1 << 4;
 }

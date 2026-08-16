@@ -178,6 +178,9 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     crate::hal::configure_runtime_console();
 
     machine_init();
+    // PLIC ready 后注册 console UART RX 中断（machine_init 之内 init_boot_cpu 已发布）。
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::init_runtime_console_rx();
     crate::task::timer_cpu_init();
     match random::init() {
         Ok(()) => println!("[kernel] PRNG initialized."),

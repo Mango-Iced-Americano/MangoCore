@@ -69,6 +69,20 @@ pub fn enable_ipi_interrupt() {
     }
 }
 
+/// Enable supervisor external interrupts after the boot PLIC context is ready.
+pub fn enable_external_interrupt() {
+    unsafe {
+        sie::set_sext();
+    }
+}
+
+/// Disable supervisor external interrupts for focused IRQ negative controls.
+pub fn disable_external_interrupt() {
+    unsafe {
+        sie::clear_sext();
+    }
+}
+
 /// 用户态和内核态共用的 IPI hard-IRQ fast path。
 fn handle_ipi_interrupt() {
     // OpenSBI 把 IPI 表现为 SSIP。先清电平源，再消费 Release 发布的
@@ -250,6 +264,9 @@ pub fn trap_handler() -> ! {
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             handle_timer_interrupt();
         }
+        Trap::Interrupt(Interrupt::SupervisorExternal) => {
+            super::plic::handle_external_interrupt();
+        }
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
             handle_ipi_interrupt();
         }
@@ -345,6 +362,10 @@ pub extern "C" fn trap_from_kernel() {
             // 内核 timer 与用户 timer 使用相同无锁 fast path；这里绝不从
             // 被中断的任意内核位置切换任务。
             handle_timer_interrupt();
+            return;
+        }
+        Trap::Interrupt(Interrupt::SupervisorExternal) => {
+            super::plic::handle_external_interrupt();
             return;
         }
         _ => {}

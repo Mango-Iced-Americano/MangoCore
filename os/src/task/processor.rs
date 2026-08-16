@@ -465,8 +465,12 @@ fn run_boot_housekeeping(cpu: usize, schedule_tick: &mut usize, sched_profile: b
 
     // DeviceStack try_lock 失败只在下一个 scheduler tick 重新提交，避免 poll
     // worker 立即重试并饿死真正的锁持有者。
-    NET_INTERFACE.run_deferred_poll_retry();
-    if *schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0 {
+    if NET_INTERFACE.scheduler_tick_net_fallback_enabled() {
+        NET_INTERFACE.run_deferred_poll_retry();
+    }
+    if NET_INTERFACE.scheduler_tick_net_fallback_enabled()
+        && *schedule_tick % BACKGROUND_NET_POLL_INTERVAL == 0
+    {
         let stage_t0 = sched_profile_start(sched_profile);
         NET_INTERFACE.request_poll();
         sched_record_stage(
@@ -571,6 +575,7 @@ pub fn run_tasks() -> ! {
         // 后发 IPI 的 Release 顺序和下面的 runqueue 锁保证。
         let _ = crate::smp::take_reschedule_request();
         let _ = super::run_deferred_timer_work();
+        super::run_deferred_external_work();
         // TCB 的最后一个 Arc 可能在持有进程锁时消失；KernelStack::drop 只把
         // 缓存溢出的 slot 登记到退休队列。此处尚未获取任何调度/子系统锁，
         // 可以安全等待远端 TLB ack，再释放 frame 并归还 slot。
