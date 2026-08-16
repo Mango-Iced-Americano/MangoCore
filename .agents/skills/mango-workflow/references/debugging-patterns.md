@@ -125,6 +125,33 @@
 - 检查 `SIGSTOP`/`SIGCONT` 是否正确更新进程状态
 - 检查父进程 wait 是否正确消费 stopped/continued 事件
 
+### 线程组退出后父进程永久等不到 SIGCHLD（timeout(1) 卡死）
+
+- **现象**: LA64 评测 buildstorm 的隐藏 boot 段（内层 `qemu-system-loongarch64`
+  启动 ArceOS）启动后整机"静默停滞"：串口日志停在启动脚本的开头两条
+  `unsupported syscall` 后不再增长，内层 QEMU 主线程一直循环
+  `clock_gettime`/`futex`/`ppoll`，vCPU 无输出，最终被最外层墙钟杀掉。
+  对比 RV64 同一段脚本瞬间完成。CPU 快照显示所有核 idle/无 spin 段，
+  与锁自旋死锁（有 CPU 卡在 spinlock PC）不同——这是"等待永不发生的事件"。
+- **根因**: 线程组退出时，最后完成进程级收尾（`finish_exit`）的可能是非
+  leader sibling 线程，其 TCB `exit_signal` 为空；旧代码按"最后收尾线程"的
+  `exit_signal` 通知父进程，于是父进程（如 `timeout --foreground`，用
+  `rt_sigsuspend` 等 SIGCHLD）永远收不到信号，脚本的 `wait` 永不复返。
+- **修复**: PCB 增加进程级 `exit_signal_hint` 原子快照：非 `CLONE_THREAD`
+  clone 时写入 exit_signal，非 leader exec 接管（`become_group_leader`）时
+  恢复 `SIGCHLD`；`finish_exit()` 一律按该快照通知。Linux 语义就是线程组
+  退出通知信号取自 leader，与收尾线程无关。
+- **教训**:
+  - "静默停滞 + 等待者循环 ppoll/futex/clock_gettime + 无 spin 现场"优先
+    怀疑信号/等待事件丢失，而不是调度 liveness 或 IPI。
+  - 进程级语义必须存在进程级 owner（PCB）；依赖"最后执行的线程碰巧携带
+    正确状态"在任意线程完成收尾的协议下必然有窗口。
+  - 复现路径的最小化：官方脚本未公开时，可以在最小镜像里注入等价脚本
+    （后台启动内层 qemu + `timeout --foreground` + 轮询 `kill -0`），
+    比完整 buildstorm 快两个数量级。
+- **相关文件**: `os/src/task/process.rs` — `finish_exit()`/`exit_signal_hint`,
+  `os/src/task/task.rs` — `sys_clone()`/`become_group_leader()`
+
 ## Errno 返回值问题
 
 ### errno 常量双取反导致正"成功"返回值

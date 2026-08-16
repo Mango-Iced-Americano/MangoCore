@@ -107,6 +107,13 @@ new_tid as isize
 | wait4 | 可由 parent wait | 不作为独立进程 wait |
 | exit_signal | 可投递给 parent | 线程退出不作为进程 child exit |
 
+线程组退出通知父进程的信号恒为 **leader** 的 exit_signal：PCB 维护
+`exit_signal_hint` 快照（非 `CLONE_THREAD` clone 时写入，非 leader exec
+接管时恢复 `SIGCHLD`），`finish_exit()` 按该快照通知，因为最后完成进程级
+收尾的可能是非 leader sibling，其 TCB `exit_signal` 为空。否则像
+`timeout(1)` 这类等待 `SIGCHLD` 的父进程会在子进程退出后永久停在
+`rt_sigsuspend`。
+
 `CLONE_VM` 可以用于非线程 clone，例如 vfork；它决定 VM 是否共享，但不等同于 `CLONE_THREAD`。
 
 ## 5. exec 的跨层路径

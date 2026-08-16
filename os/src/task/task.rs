@@ -1771,6 +1771,7 @@ impl TaskControlBlock {
         let leader_tid = self.pid();
         // Linux exec 总是把新线程组 leader 的父进程退出通知恢复为 SIGCHLD。
         *self.exit_signal.lock() = Signals::SIGCHLD;
+        self.process.set_exit_signal_hint(Signals::SIGCHLD);
         if old_tid == leader_tid {
             return;
         }
@@ -2124,6 +2125,9 @@ impl TaskControlBlock {
                 None,
             )
         };
+        if !flags.contains(CloneFlags::CLONE_THREAD) {
+            process.set_exit_signal_hint(exit_signal);
+        }
         // 分配内核栈
         let kstack = kstack_alloc();
         let kstack_top = kstack.get_top();
