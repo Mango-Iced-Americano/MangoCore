@@ -225,8 +225,8 @@ pub const MAX_RA_PAGES: usize = 128;
 /// Backend staging has one MiB maximum, including explicit ELF prefetches.
 pub const MAX_BATCH_READ_PAGES: usize = 256;
 /// Demand faults use a bounded contiguous staging window.  Keeping this at
-/// 64 KiB limits transient memory while still amortizing backend request setup.
-pub const MAX_DEMAND_READ_PAGES: usize = 16;
+/// 128 KiB limits transient memory while still amortizing backend request setup.
+pub const MAX_DEMAND_READ_PAGES: usize = 32;
 
 impl RaState {
     pub fn new() -> Self {
@@ -1972,7 +1972,7 @@ impl PageCache {
                 ));
             }
 
-            // 2. Read at most 64 KiB at a time. The staging buffer is owned by
+            // 2. Read at most 128 KiB at a time. The staging buffer is owned by
             // this scope, so backend I/O remains outside PageEntry locks and
             // no raw page slices escape into a re-entrant backend callback.
             let mut offset = 0;

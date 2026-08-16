@@ -56,14 +56,27 @@ fn set_user_trap_entry() {
     }
 }
 
-/// `perf_diag` 专用的同镜像 A/B 开关；正常构建始终保留原有 `fence.i`。
-#[cfg(feature = "perf_diag")]
+/// trap-return 指令屏障策略。
+///
+/// QEMU TCG 在 guest 写入可执行页后按当前内存内容重新翻译，不维护会导致
+/// stale instruction 的负 I-cache，因此默认省略每个用户 trap 的 `fence.i`；
+/// 真实硬件/未知平台仍默认执行。运行期 `mango.rv.trap_return_fence_i=on/off`
+/// 可强制覆盖，保留同镜像 A/B 能力。
 fn user_return_fence_i_enabled() -> bool {
     static ENABLED: spin::Once<bool> = spin::Once::new();
     *ENABLED.call_once(|| {
-        !crate::bootargs::get_cmdline()
-            .split_ascii_whitespace()
-            .any(|arg| arg == "mango.rv.trap_return_fence_i=off")
+        for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+            match arg {
+                "mango.rv.trap_return_fence_i=off" => return false,
+                "mango.rv.trap_return_fence_i=on" => return true,
+                _ => {}
+            }
+        }
+        let qemu_model = crate::hal::platform::platform_info()
+            .model
+            .as_deref()
+            .is_some_and(|model| model.contains("qemu"));
+        !qemu_model
     })
 }
 
@@ -359,42 +372,27 @@ pub fn trap_return() -> ! {
     // 从这里到 __restore 不得再等待或临时开中断。若在 ASID rollover 前
     // 切换 stvec，等待路径收到 IPI 时会把旧 sscratch 当成 TrapContext。
     set_user_trap_entry();
-    #[cfg(feature = "perf_diag")]
-    {
-        let fence_i = user_return_fence_i_enabled();
-        crate::task::perf::record_user_trap_return(fence_i);
-        if fence_i {
-            unsafe {
-                asm!(
-                    "fence.i",
-                    "jr {restore_va}",
-                    restore_va = in(reg) restore_va,
-                    in("a0") trap_cx_ptr,
-                    options(noreturn)
-                );
-            }
-        } else {
-            unsafe {
-                asm!(
-                    "jr {restore_va}",
-                    restore_va = in(reg) restore_va,
-                    in("a0") trap_cx_ptr,
-                    options(noreturn)
-                );
-            }
+    let fence_i = user_return_fence_i_enabled();
+    crate::task::perf::record_user_trap_return(fence_i);
+    if fence_i {
+        unsafe {
+            asm!(
+                "fence.i",
+                "jr {restore_va}",
+                restore_va = in(reg) restore_va,
+                in("a0") trap_cx_ptr,
+                options(noreturn)
+            );
         }
-    }
-    #[cfg(not(feature = "perf_diag"))]
-    crate::task::perf::record_user_trap_return(true);
-    #[cfg(not(feature = "perf_diag"))]
-    unsafe {
-        asm!(
-            "fence.i",
-            "jr {restore_va}",
-            restore_va = in(reg) restore_va,
-            in("a0") trap_cx_ptr,
-            options(noreturn)
-        );
+    } else {
+        unsafe {
+            asm!(
+                "jr {restore_va}",
+                restore_va = in(reg) restore_va,
+                in("a0") trap_cx_ptr,
+                options(noreturn)
+            );
+        }
     }
 }
 

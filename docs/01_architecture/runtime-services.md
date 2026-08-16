@@ -136,7 +136,7 @@ let should_poll_console = true;
 ## 4. 调度循环维护动作
 
 `task/processor.rs::run_tasks()` 把 CPU0 的全局维护与空闲循环次数解耦。CPU0
-本地 10ms scheduler tick 发布一个可合并的 `boot_housekeeping_pending`，idle 栈消费
+本地 20ms scheduler tick 发布一个可合并的 `boot_housekeeping_pending`，idle 栈消费
 该事件时执行：
 
 ```

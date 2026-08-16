@@ -474,7 +474,7 @@ fn drain_local_zombies(cpu: usize, limit: usize) -> usize {
     drained
 }
 
-/// 执行一轮由 CPU0 本地 10ms scheduler tick 驱动的全局维护。
+/// 执行一轮由 CPU0 本地 scheduler tick 驱动的全局维护。
 ///
 /// 该函数只在 idle 栈、IRQ-off 且未持有调度锁时调用。调度 tick 使用可合并
 /// 发布位，因此长临界区之后最多补做一轮，不按遗漏 tick 数追赶形成维护风暴。
