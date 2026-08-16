@@ -27,7 +27,7 @@ QEMU_DEVELOPMENT_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
 QEMU_REGRESSION_BEFORE_DRIVES = $(QEMU_MTTCG_ARGS) -kernel $(KERNEL_IMAGE) -bios default
 QEMU_REGRESSION_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) $(NET_DEV)
 QEMU_KTEST_BEFORE_DRIVES = $(QEMU_REGRESSION_BEFORE_DRIVES)
-QEMU_KTEST_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS)
+QEMU_KTEST_AFTER_DRIVES = -m $(QEMU_MEMORY) $(QEMU_SMP_ARGS) $(if $(filter net_irq,$(KTEST)),$(NET_DEV))
 QEMU_KTEST_X0 = $(KTEST_EXT4_IMAGE)
 
 lwext4-rv64: $(LWEXT4_RV_LIB)
@@ -206,8 +206,30 @@ regression-run: toolchain-preflight
 	@echo "[regression] Building kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 720s)..."
-	@timeout --foreground 720 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
+	@echo "[regression] Launching QEMU (no disks, timeout 900s)..."
+	@timeout --foreground 900 $(call qemu_profile_command,regression) 2>&1 | tee /tmp/regression-rv.log
 	@grep -q "L4 REGRESSION RESULT: PASS" /tmp/regression-rv.log \
 		&& echo "=== REGRESSION PASS ===" \
 		|| (echo "=== REGRESSION FAIL ===" && exit 1)
+
+NET_IRQ_HOST_PORT ?= 19099
+NET_IRQ_QEMU_DEVICE = -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.7 -netdev user,id=net,hostfwd=udp::$(NET_IRQ_HOST_PORT)-:9099
+
+net-irq-run:
+	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) ktest-build-only ktest-clean-ext4 KTEST=net_irq NET_DEV='$(NET_IRQ_QEMU_DEVICE)'
+	@set -eu; \
+		( sleep 1; for _ in $$(seq 1 240); do python3 -c 'import socket; sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.sendto(b"mango-irq", ("127.0.0.1", $(NET_IRQ_HOST_PORT)))'; sleep 0.05; done ) & \
+		sender=$$!; \
+		trap 'kill $$sender 2>/dev/null || true; wait $$sender 2>/dev/null || true' EXIT INT TERM; \
+		$(MAKE) -f $(firstword $(MAKEFILE_LIST)) net-irq-qemu KTEST=net_irq NET_DEV='$(NET_IRQ_QEMU_DEVICE)';
+
+net-irq-qemu:
+	@echo "[net_irq] Launching QEMU (timeout: ${KTEST_QEMU_TIMEOUT}s)..."
+	@timeout --foreground ${KTEST_QEMU_TIMEOUT} $(call qemu_profile_command,ktest) >/tmp/net-irq-rv.log 2>&1; \
+		qemu_status=$$?; \
+		cat /tmp/net-irq-rv.log; \
+		test $$qemu_status -eq 0 && grep -Fq "[KTEST RESULT: PASS]" /tmp/net-irq-rv.log \
+			&& echo "=== NET IRQ KTEST PASS ===" \
+			|| (echo "=== NET IRQ KTEST FAIL ===" >&2; exit 1)
+
+.PHONY: net-irq-run net-irq-qemu

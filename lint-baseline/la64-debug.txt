@@ -5,21 +5,25 @@
 first-party:bare_trait_objects:src/net/syscall/sendmsg.rs
 first-party:const_item_mutation:src/fs/ext4/mod.rs
 first-party:dead_code:src/drivers/block/mod.rs
-first-party:function_casts_as_integer:src/main.rs
+first-party:function_casts_as_integer:src/fs/mod.rs
 first-party:mismatched_lifetime_syntaxes:src/fs/fat32/fat_inode.rs
 first-party:non_snake_case:src/net/socket/unix/stream/mod.rs
 first-party:non_upper_case_globals:src/net/socket/unix/ns/mod.rs
-first-party:private_interfaces:src/fs/page_cache.rs
 first-party:stable_features:src/main.rs
 first-party:unknown:src/drivers/block/block_dev.rs
+first-party:unknown:src/drivers/block/loop.rs
 first-party:unknown:src/drivers/block/mod.rs
 first-party:unknown:src/drivers/block/partition.rs
 first-party:unknown:src/drivers/block/sata_blk.rs
 first-party:unknown:src/drivers/block/virtio_blk_pci.rs
 first-party:unknown:src/drivers/block/virtio_dma_pool.rs
+first-party:unknown:src/drivers/mod.rs
+first-party:unknown:src/drivers/net/mod.rs
 first-party:unknown:src/drivers/net/veth.rs
 first-party:unknown:src/drivers/net/virtio_net.rs
 first-party:unknown:src/drivers/rng/mod.rs
+first-party:unknown:src/drivers/serial/ns16550a.rs
+first-party:unknown:src/fs/boot_block.rs
 first-party:unknown:src/fs/dev/block.rs
 first-party:unknown:src/fs/dev/pipe.rs
 first-party:unknown:src/fs/dev/pty.rs
@@ -40,8 +44,9 @@ first-party:unknown:src/fs/ext4/mod.rs
 first-party:unknown:src/fs/ext4/smoke.rs
 first-party:unknown:src/fs/ext4/superblock.rs
 first-party:unknown:src/fs/ext4/test.rs
+first-party:unknown:src/fs/ext4_another/fs.rs
 first-party:unknown:src/fs/ext4_another/inode.rs
-first-party:unknown:src/fs/fat32/bitmap.rs
+first-party:unknown:src/fs/ext4_another/mod.rs
 first-party:unknown:src/fs/fat32/fat_inode.rs
 first-party:unknown:src/fs/filesystem.rs
 first-party:unknown:src/fs/initramfs.rs
@@ -54,7 +59,6 @@ first-party:unknown:src/fs/procfs/files/version.rs
 first-party:unknown:src/fs/procfs/mod.rs
 first-party:unknown:src/fs/procfs/pid/fd.rs
 first-party:unknown:src/fs/procfs/pid/ns.rs
-first-party:unknown:src/fs/procfs/pid/smaps.rs
 first-party:unknown:src/fs/ramfs/mod.rs
 first-party:unknown:src/fs/reclaim.rs
 first-party:unknown:src/fs/sysfs/files/diag.rs
@@ -69,21 +73,27 @@ first-party:unknown:src/fs/vfs/index_node.rs
 first-party:unknown:src/fs/vfs/mod.rs
 first-party:unknown:src/fs/vfs/mount.rs
 first-party:unknown:src/fs/vfs/propagation.rs
+first-party:unknown:src/hal/arch/loongarch64/../../platform/loongarch64/qemu.rs
 first-party:unknown:src/hal/arch/loongarch64/acpi.rs
+first-party:unknown:src/hal/arch/loongarch64/laflex.rs
 first-party:unknown:src/hal/arch/loongarch64/mod.rs
+first-party:unknown:src/hal/arch/loongarch64/register/mod.rs
 first-party:unknown:src/hal/arch/loongarch64/sbi.rs
 first-party:unknown:src/hal/arch/loongarch64/tlb.rs
 first-party:unknown:src/hal/arch/loongarch64/trap/mod.rs
 first-party:unknown:src/hal/arch/mod.rs
 first-party:unknown:src/hal/boot/mod.rs
-first-party:unknown:src/hal/device/manager.rs
+first-party:unknown:src/hal/firmware/mod.rs
 first-party:unknown:src/hal/mod.rs
-first-party:unknown:src/hal/platform/mod.rs
+first-party:unknown:src/hal/platform/jh7110_cache.rs
+first-party:unknown:src/kernel_tests/block_publication.rs
 first-party:unknown:src/kernel_tests/ext4.rs
 first-party:unknown:src/kernel_tests/ext4/block_device.rs
 first-party:unknown:src/kernel_tests/ext4_another/recording_device.rs
 first-party:unknown:src/kernel_tests/ext4_another/symlink.rs
+first-party:unknown:src/kernel_tests/fs_fat_smp.rs
 first-party:unknown:src/kernel_tests/mod.rs
+first-party:unknown:src/kernel_tests/net_smp.rs
 first-party:unknown:src/kernel_tests/runner.rs
 first-party:unknown:src/lang_items.rs
 first-party:unknown:src/main.rs
@@ -112,7 +122,6 @@ first-party:unknown:src/net/router_device.rs
 first-party:unknown:src/net/routing.rs
 first-party:unknown:src/net/socket/inet/common/address.rs
 first-party:unknown:src/net/socket/inet/common/bound.rs
-first-party:unknown:src/net/socket/inet/common/port.rs
 first-party:unknown:src/net/socket/inet/datagram/udp.rs
 first-party:unknown:src/net/socket/inet/stream/inner.rs
 first-party:unknown:src/net/socket/inet/stream/io.rs
@@ -139,6 +148,7 @@ first-party:unknown:src/net/syscall/getsockopt.rs
 first-party:unknown:src/net/syscall/shutdown.rs
 first-party:unknown:src/net/syscall/socket.rs
 first-party:unknown:src/random.rs
+first-party:unknown:src/smp.rs
 first-party:unknown:src/syscall/fs/common.rs
 first-party:unknown:src/syscall/fs/mod.rs
 first-party:unknown:src/syscall/fs/sys_chmod.rs
@@ -150,6 +160,7 @@ first-party:unknown:src/syscall/fs/sys_vmsplice.rs
 first-party:unknown:src/syscall/process/clone.rs
 first-party:unknown:src/syscall/process/ipc.rs
 first-party:unknown:src/syscall/process/mm.rs
+first-party:unknown:src/syscall/process/time.rs
 first-party:unknown:src/syscall/utils.rs
 first-party:unknown:src/task/completion.rs
 first-party:unknown:src/task/context.rs
@@ -164,11 +175,11 @@ first-party:unknown:src/task/process.rs
 first-party:unknown:src/task/processor.rs
 first-party:unknown:src/task/quota.rs
 first-party:unknown:src/task/registry.rs
+first-party:unknown:src/task/signal/action.rs
 first-party:unknown:src/task/signal/mod.rs
 first-party:unknown:src/task/signal/pending.rs
 first-party:unknown:src/task/sleep.rs
 first-party:unknown:src/task/task.rs
-first-party:unknown:src/task/threads.rs
 first-party:unknown:src/trace.rs
 first-party:unknown:src/utils/error.rs
 first-party:unknown:src/utils/stats.rs
@@ -177,8 +188,8 @@ first-party:unreachable_patterns:src/hal/arch/loongarch64/trap/mod.rs
 first-party:unused_assignments:src/fs/dev/pipe.rs
 first-party:unused_doc_comments:src/fs/mod.rs
 first-party:unused_features:src/main.rs
-first-party:unused_imports:src/drivers/block/virtio_blk_pci.rs
-first-party:unused_must_use:src/drivers/block/sata_blk.rs
+first-party:unused_imports:src/bootargs.rs
+first-party:unused_must_use:src/fs/ext4/block_group.rs
 first-party:unused_mut:src/fs/ext4/counters.rs
 first-party:unused_variables:src/fs/dev/pipe.rs
 vendor:dead_code:/app/dependency/smoltcp/src/iface/interface/mod.rs
@@ -188,6 +199,7 @@ vendor:mismatched_lifetime_syntaxes:/app/dependency/dep_pci/pci/src/lib.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/rustsbi/src/util.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/smoltcp/src/socket/dhcpv4.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/virtio-drivers/src/transport/pci/bus.rs
+vendor:non_fmt_panics:build.rs
 vendor:stable_features:/app/dependency/dep_iso/src/lib.rs
 vendor:stable_features:/app/dependency/riscv/src/lib.rs
 vendor:stable_features:/app/dependency/virtio-drivers/src/lib.rs
@@ -214,6 +226,6 @@ vendor:unused_mut:/app/dependency/dep_iso/src/net/ethernet/intel/ixgbe.rs
 vendor:unused_variables:/app/dependency/smoltcp/src/iface/interface/mod.rs
 
 # Summary
-first-party: 180
+first-party: 190
 maintained: 0
-vendor: 31
+vendor: 32

@@ -12,6 +12,8 @@ use crate::{
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
+#[cfg(target_arch = "riscv64")]
+const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -35,11 +37,10 @@ const SYSCALL_EPOLL_PWAIT: usize = 22;
 const CLOCK_MONOTONIC: usize = 1;
 const EADDRINUSE: isize = -98;
 const UDP_BIND_TEST_PORT_LE: usize = 0xb1ee;
+#[cfg(target_arch = "riscv64")]
+const UDP_IRQ_TEST_PORT_LE: usize = 0x8b23;
 const UDP_BIND_HOLD_SECS: usize = 1;
 const O_CREAT_EXCL_WRONLY: usize = 0o301;
-const O_RDONLY: usize = 0;
-const AT_FDCWD: isize = -100;
-const EPOLL_CTL_ADD: usize = 1;
 /// EPOLLIN | EPOLLET。探针只注册 edge 通知，第二次非阻塞 pwait 必须返回 0。
 const EPOLLIN_ET: usize = 0x1 | 0x8000_0000;
 
@@ -1046,9 +1047,73 @@ __ktest_udp_bind_probe_end:
     port_le = const UDP_BIND_TEST_PORT_LE,
 );
 
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(
+    r#"
+    .pushsection .rodata.ktest_udp_recvfrom_probe, "a"
+    .balign 4
+    .global __ktest_udp_recvfrom_probe_start
+    .global __ktest_udp_recvfrom_probe_end
+__ktest_udp_recvfrom_probe_start:
+    addi sp, sp, -64
+    addi a0, zero, 2
+    addi a1, zero, 2
+    addi a2, zero, 0
+    addi a7, zero, {socket_syscall}
+    ecall
+    blt a0, zero, 1f
+    addi s0, a0, 0
+    addi t0, zero, 2
+    sh t0, 0(sp)
+    li t0, {port_le}
+    sh t0, 2(sp)
+    sw zero, 4(sp)
+    sd zero, 8(sp)
+    addi a0, s0, 0
+    addi a1, sp, 0
+    addi a2, zero, 16
+    addi a7, zero, {bind_syscall}
+    ecall
+    bnez a0, 2f
+    addi a0, s0, 0
+    addi a1, sp, 16
+    addi a2, zero, 32
+    addi a3, zero, 0
+    addi a4, zero, 0
+    addi a5, zero, 0
+    addi a7, zero, {recvfrom_syscall}
+    ecall
+    blez a0, 3f
+    addi a0, zero, 0
+    j 4f
+1:  addi a0, zero, 1
+    j 4f
+2:  addi a0, zero, 2
+    j 4f
+3:  addi a0, zero, 3
+4:  addi sp, sp, 64
+    addi a7, zero, {exit_syscall}
+    ecall
+5:  j 5b
+__ktest_udp_recvfrom_probe_end:
+    .popsection
+"#,
+    socket_syscall = const SYSCALL_SOCKET,
+    bind_syscall = const SYSCALL_BIND,
+    recvfrom_syscall = const SYSCALL_RECVFROM,
+    exit_syscall = const SYSCALL_EXIT,
+    port_le = const UDP_IRQ_TEST_PORT_LE,
+);
+
 extern "C" {
     static __ktest_udp_bind_probe_start: u8;
     static __ktest_udp_bind_probe_end: u8;
+}
+
+#[cfg(target_arch = "riscv64")]
+extern "C" {
+    static __ktest_udp_recvfrom_probe_start: u8;
+    static __ktest_udp_recvfrom_probe_end: u8;
 }
 
 /// 用户 syscall 返回值的 ktest 成功条件。
@@ -1056,6 +1121,8 @@ pub(crate) enum ProbeResult {
     WritePage,
     Zero,
     UdpBind,
+    #[cfg(target_arch = "riscv64")]
+    UdpRecvFrom,
     TmpfsCreate,
     TmpfsRename,
     TmpfsLookup,
@@ -1082,6 +1149,11 @@ fn user_probe_program(result: ProbeResult) -> &'static [u8] {
         ProbeResult::UdpBind => (
             core::ptr::addr_of!(__ktest_udp_bind_probe_start),
             core::ptr::addr_of!(__ktest_udp_bind_probe_end),
+        ),
+        #[cfg(target_arch = "riscv64")]
+        ProbeResult::UdpRecvFrom => (
+            core::ptr::addr_of!(__ktest_udp_recvfrom_probe_start),
+            core::ptr::addr_of!(__ktest_udp_recvfrom_probe_end),
         ),
         ProbeResult::TmpfsCreate => (
             core::ptr::addr_of!(__ktest_tmpfs_create_probe_start),
@@ -1234,6 +1306,20 @@ pub(crate) fn build_udp_bind_probe() -> Result<Arc<TaskControlBlock>, &'static s
     let mut inner = task.acquire_inner_lock();
     inner.trap_context_mut().gp.pc = entry;
     drop(inner);
+    Ok(task)
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn build_udp_recvfrom_probe() -> Result<Arc<TaskControlBlock>, &'static str> {
+    let inode = crate::fs::vfs_lookup_absolute("/init")
+        .or_else(|_| crate::fs::vfs_lookup_absolute("/initproc"))
+        .map_err(|_| "ktest initramfs has no user ELF scaffold")?;
+    let elf =
+        File::new(inode, FileFlags::O_RDONLY).map_err(|_| "failed to open user ELF scaffold")?;
+    let task = TaskControlBlock::new(elf);
+    task.process.close_files_on_exit();
+    let entry = map_user_page(&task, user_probe_program(ProbeResult::UdpRecvFrom), true)?;
+    task.acquire_inner_lock().trap_context_mut().gp.pc = entry;
     Ok(task)
 }
 

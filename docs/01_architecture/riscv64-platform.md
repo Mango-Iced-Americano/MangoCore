@@ -3,7 +3,7 @@ title: "RISC-V 64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-07-31
+last_update: 2026-08-15
 tags: [architecture, riscv64, hal]
 ---
 
@@ -34,6 +34,7 @@ os/src/hal/arch/riscv/
 ├── entry.asm
 ├── kern_stack.rs
 ├── linker.ld / linker-rvqemu.ld
+├── plic.rs
 ├── sbi.rs
 ├── sv39.rs
 ├── switch.rs
@@ -50,6 +51,7 @@ os/src/hal/arch/riscv/
 | `entry.asm` | 架构入口汇编，由 `main.rs` 在 `riscv` feature 下引入 |
 | `config.rs` | 地址空间、页大小、内核堆、内核栈、物理内存和平台常量 |
 | `kern_stack.rs` | 内核栈分配、trap context/user stack 地址计算 |
+| `plic.rs` | QEMU/实板 PLIC supervisor context 初始化、claim/complete 与外部 IRQ 分发 |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表、PTE flag、TLB 刷新 |
 | `switch.S` | 任务上下文切换汇编 |
@@ -64,7 +66,11 @@ RISC-V 后端在 `mod.rs` 中定义：
 ```rust
 pub fn machine_init() {
     trap::init();
+    let plic_ready = plic::init_boot_cpu();
     trap::enable_ipi_interrupt();
+    if plic_ready {
+        trap::enable_external_interrupt();
+    }
     // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
     // 每个 CPU 的首个 timer deadline 由 timer_cpu_init() 设置。
 }
@@ -86,17 +92,32 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | 调用 | 文件 | 行为 |
 |------|------|------|
 | `trap::init()` | `trap/mod.rs` | 调用 `set_kernel_trap_entry()`，设置 `stvec` 为 kernel trap |
-| `trap::enable_timer_interrupt()` | `trap/mod.rs` | `sie::set_stimer()` 打开 supervisor timer interrupt |
+| `plic::init_boot_cpu()` | `plic.rs` | 从 FDT 选择 `sifive,plic-1.0.0`，清理 BSP supervisor context 的 enable/threshold，完成 MMIO fence 后发布 ready 状态 |
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
+| `trap::enable_external_interrupt()` | `trap/mod.rs` | 仅在 PLIC 已就绪时打开 supervisor external interrupt（SEIE） |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。每个 CPU 都先由
 `timer_cpu_init()` 写入首个绝对 deadline，再开放本地 timer interrupt，避免在 deadline
 尚未发布时收到无法归属的中断。
 
+PLIC 初始化、SSIE 和 SEIE 必须按此顺序执行。若 FDT 没有可用的 PLIC，系统保留既有
+software/timer interrupt 路径，但不开放 SEIE。
+
 ## 4. Trap 后端
 
-### 4.1 trap entry
+### 4.1 supervisor external interrupt
+
+`SupervisorExternal` trap 进入 PLIC claim/dispatch 循环；每次只处理固定上限的 source，
+以避免单次 trap 被持续网卡流量占满。每个已声明 source 在 MMIO fence 后 complete；未知
+source 会被 mask，不能反复触发。硬 IRQ 路径只发布驱动的 deferred work，不直接 poll
+smoltcp、唤醒任务或切换调度器。
+
+CPU0 的既有 task/idle 安全点通过 `run_deferred_external_work()` 消费发布：virtio-net IRQ
+驱动网络 poll 与阻塞 I/O wakeup。该桥接保留 normal poll worker 的所有权，AP 不因外部
+IRQ 获得独立网络数据面。
+
+### 4.2 trap entry
 
 `trap/mod.rs` 引入 `trap.S`：
 
@@ -112,7 +133,7 @@ extern "C" {
 
 `__alltraps` 保存用户上下文并进入 Rust `trap_handler()`，`__restore` 从 trap context 恢复用户态。
 
-### 4.2 trap entry 切换
+### 4.3 trap entry 切换
 
 | 函数 | 行为 |
 |------|------|

@@ -34,13 +34,22 @@ mod regression_child_wait;
 mod regression_clone_vm_second_slot;
 mod regression_wait_restart;
 
-use user_lib::{exec, exit, fork, println, waitpid};
+use user_lib::{
+    exec, exit, fork, get_time, kill, println, waitpid, waitpid_wnohang, SIGKILL,
+};
+use user_lib::syscall::{sys_nanosleep, TimeSpec};
 
 /// fork+exec 一个独立测试 binary 并等待其退出；返回退出码是否为 0。
 ///
 /// fs/inet/unix 是大型独立测试程序，保持进程隔离：单个测试崩溃或越界
 /// 不会破坏整个回归套件，也不需要把它们模块化进本 binary。
-fn run_child(prog: &str, extra_args: &[&str]) -> bool {
+/// fork+exec 一个独立测试 binary，等待其退出，最多等待 `timeout_ms` 毫秒。
+///
+/// 返回 (是否通过, 是否超时)。超时视为该组失败：SIGKILL 子进程并回收，
+/// 然后继续下一组——单个套件卡死不得阻塞整个 regression。
+/// fs/inet/unix 是大型独立测试程序，保持进程隔离：单个测试崩溃或越界
+/// 不会破坏整个回归套件，也不需要把它们模块化进本 binary。
+fn run_child_timeout(prog: &str, extra_args: &[&str], timeout_ms: u64) -> (bool, bool) {
     let pid = fork();
     if pid == 0 {
         let mut args: [*const u8; 4] = [core::ptr::null(); 4];
@@ -52,11 +61,49 @@ fn run_child(prog: &str, extra_args: &[&str]) -> bool {
         exec(prog, &args, &envp);
         exit(127);
     }
-    let mut status = 0;
-    if pid > 0 && waitpid(pid as usize, &mut status) == pid {
-        status & 0x7F == 0 && (status >> 8) & 0xFF == 0
+    if pid <= 0 {
+        return (false, false);
+    }
+    let deadline = get_time() + timeout_ms as isize;
+    let mut status = 0i32;
+    loop {
+        // WNOHANG：子进程已退出则立即回收，否则检查 deadline。
+        if waitpid_wnohang(pid, &mut status) == pid {
+            return (status & 0x7F == 0 && (status >> 8) & 0xFF == 0, false);
+        }
+        if get_time() >= deadline {
+            // watchdog：超时杀掉卡死的子套件并阻塞回收（SIGKILL 立即生效）。
+            kill(pid as usize, SIGKILL);
+            let mut st = 0i32;
+            waitpid(pid as usize, &mut st);
+            return (false, true);
+        }
+        let req = TimeSpec { tv_sec: 0, tv_nsec: 20_000_000 };
+        let mut rem = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        let _ = sys_nanosleep(&req, &mut rem);
+    }
+}
+
+/// 打印单个 TAP 测试行；超时组单独标记。
+#[allow(clippy::too_many_arguments)]
+fn report(
+    index: u32,
+    name: &str,
+    passed: &mut u32,
+    failed: &mut u32,
+    skipped: &mut u32,
+    pass: bool,
+    timed_out: bool,
+) {
+    if timed_out {
+        *failed += 1;
+        println!("[31mnot ok[0m {} {} # TIMEOUT (killed by regression watchdog)", index, name);
+    } else if pass {
+        *passed += 1;
+        println!("[32mok[0m {} {}", index, name);
     } else {
-        false
+        *failed += 1;
+        println!("[31mnot ok[0m {} {}", index, name);
     }
 }
 
@@ -202,21 +249,18 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
 
     // Test 26: INET connectivity suite, core profile (local, no external net).
     // 网络栈核心稳定性：interface/loopback/route/port/procfs/ioctl/rtnetlink/UDP loopback。
-    let r = if run_child("/tests/inet_test\0", &["core\0"]) { 0 } else { 1 };
-    if r == 0 { passed += 1; println!("[32mok[0m 26 inet_test"); }
-    else { failed += 1; println!("[31mnot ok[0m 26 inet_test"); }
+    let (pass, timed_out) = run_child_timeout("/tests/inet_test\0", &["core\0"], 120_000);
+    report(26, "inet_test", &mut passed, &mut failed, &mut skipped, pass, timed_out);
 
     // Test 27: Unix socket suite（快，先于慢的 FS 套件完成）。
-    let r = if run_child("/tests/unix_test\0", &[]) { 0 } else { 1 };
-    if r == 0 { passed += 1; println!("[32mok[0m 27 unix_test"); }
-    else { failed += 1; println!("[31mnot ok[0m 27 unix_test"); }
+    let (pass, timed_out) = run_child_timeout("/tests/unix_test\0", &[], 90_000);
+    report(27, "unix_test", &mut passed, &mut failed, &mut skipped, pass, timed_out);
 
     // Test 28: FS suite（/tmp tmpfs 下运行；依赖 /bin 的 perf_fork_exec 系列与
     // busybox 的 perf_read_bb 在 regression 精简 initramfs 中失败，属环境限制
     // 而非内核回归；放最后是因为 MTTCG 下 76 个用例较慢）。
-    let r = if run_child("/tests/fs_test\0", &[]) { 0 } else { 1 };
-    if r == 0 { passed += 1; println!("[32mok[0m 28 fs_test"); }
-    else { failed += 1; println!("[31mnot ok[0m 28 fs_test"); }
+    let (pass, timed_out) = run_child_timeout("/tests/fs_test\0", &[], 480_000);
+    report(28, "fs_test", &mut passed, &mut failed, &mut skipped, pass, timed_out);
 
     println!(
         "# results: \x1b[32m{} passed\x1b[0m, \x1b[31m{} failed\x1b[0m, \x1b[33m{} skipped\x1b[0m, {} total",

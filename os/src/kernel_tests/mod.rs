@@ -40,6 +40,12 @@ mod kt_ext4;
 mod kt_fs_smp;
 #[path = "net_smp.rs"]
 mod kt_net_smp;
+#[cfg(all(target_arch = "riscv64", feature = "block_virt"))]
+#[path = "net_irq.rs"]
+mod kt_net_irq;
+#[cfg(target_arch = "riscv64")]
+#[path = "console_irq.rs"]
+mod kt_console_irq;
 #[path = "fs_fat_smp.rs"]
 mod kt_fs_fat_smp;
 #[path = "page_cache_sync.rs"]
@@ -92,6 +98,10 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("ext4_another", kt_ext4_another::tests()),
         ("fs_smp", kt_fs_smp::tests()),
         ("net_smp", kt_net_smp::tests()),
+        #[cfg(all(target_arch = "riscv64", feature = "block_virt"))]
+        ("net_irq", kt_net_irq::tests()),
+        #[cfg(target_arch = "riscv64")]
+        ("console_irq", kt_console_irq::tests()),
         ("fs_fat_smp", kt_fs_fat_smp::tests()),
         #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
         ("gmac", kt_gmac::tests()),

@@ -4,7 +4,7 @@ module: os/src/net/adapter.rs
 category: net
 status: draft
 owner: MangoCore Team
-last_updated: "2026-08-09"
+last_updated: "2026-08-15"
 code_paths:
   - "os/src/net/adapter.rs"
   - "os/src/drivers/net/mod.rs"
@@ -88,6 +88,15 @@ RV64 上的块设备和网络设备优先从 `platform_info().devices` 构造的
 排列，驱动逐项探测并由 VirtIO 设备头决定块设备或网络设备类型；该目录缺失或
 无可响应设备时则继续使用原有的固定 MMIO 地址探测。LA64 的 virtio PCI 枚举和
 2K1000 GMAC 初始化路径不变。
+
+### RV64 virtio-net IRQ 链路
+
+RV64 的 virtio-net 驱动将设备 callback 注册到 PLIC source。external IRQ handler
+只完成 PLIC claim/dispatch/complete，并让驱动发布网络 deferred work；不会在 hard IRQ
+中调用 smoltcp 或 scheduler。CPU0 随后的 task/idle 安全点运行
+`run_deferred_external_work()`，再由既有 poll/wakeup 路径推进接收队列并唤醒阻塞
+`recvfrom`。调度 tick 的网络 fallback 仅保留为测试可控的后备路径，不能替代真实
+virtio-net IRQ。无 virtio-net 的默认 ktest 配置会跳过该 focused 场景。
 
 ## 核心数据结构
 

@@ -240,8 +240,8 @@ regression-run: toolchain-preflight
 	@echo "[regression] Building la64 kernel with regression initramfs..."
 	@$(MAKE) -f $(firstword $(MAKEFILE_LIST)) build INITRAMFS_PROFILE=regression KERNEL_CMDLINE="$(REGRESSION_CMDLINE)" \
 		BLK_MODE=$(BLK_MODE) MODE=$(MODE) LOG=${LOG}
-	@echo "[regression] Launching QEMU (no disks, timeout 720s)..."
-	@timeout --foreground 720 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
+	@echo "[regression] Launching QEMU (no disks, timeout 900s)..."
+	@timeout --foreground 900 $(call qemu_profile_command,regression) >/tmp/regression-la.log 2>&1; \
 	qemu_status=$$?; \
 	cat /tmp/regression-la.log; \
 	state=$$(../scripts/check-la64-regression-log.sh /tmp/regression-la.log $$qemu_status); \
