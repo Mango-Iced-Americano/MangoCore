@@ -50,7 +50,10 @@ pub use frame_allocator::{
     idle_prezero_refill, is_allocatable_ram_phys_addr, is_ram_phys_addr, prezero_policy_name,
     prezero_pool_stats, try_unallocated_frames, unallocated_frames, FrameTracker,
 };
-pub(crate) use frame_allocator::{idle_prezero_refill_batch, take_idle_prezero_refill_request};
+pub(crate) use frame_allocator::{
+    idle_prezero_refill_batch, init_zero_accelerator, take_idle_prezero_refill_request,
+    zero_with_cboz,
+};
 
 /// Whether bounded anonymous fault-around is enabled for this boot.
 pub fn anon_fault_around_enabled() -> bool {

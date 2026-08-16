@@ -2095,7 +2095,7 @@ static TIMEOUT_WAITQUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 static KERNEL_TIMER_QUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 
 // 每 CPU 使用同一周期，但各自维护绝对 deadline，避免多核共同推进一个 tick。
-const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
+const SCHED_TICK_NS: u64 = 20_000_000; // 50 Hz = 20 ms
 
 /// 按当前 CPU 的职责重编程本地 one-shot timer。
 ///

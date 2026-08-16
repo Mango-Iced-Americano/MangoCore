@@ -12,7 +12,9 @@ mod wake;
 
 use crate::kernel_tests::runner::KernelTest;
 use crate::{
+    fs::dev::pipe::make_pipe,
     fs::vfs::event::{EPollEvent, EventWaitQueue},
+    fs::vfs::{FilePrivateData, IndexNode},
     task::WaitQueue,
 };
 use alloc::vec;
@@ -75,6 +77,11 @@ pub fn tests() -> Vec<KernelTest> {
             wake::test_thousand_cycle_stress,
             5000,
         ),
+        KernelTest::with_timeout(
+            "waitqueue::pipe_poll_live_peer_no_ring_reentry",
+            test_pipe_poll_live_peer_no_ring_reentry,
+            1000,
+        ),
         KernelTest::new(
             "waitqueue::signal_interrupt",
             interrupt::test_signal_interrupt,
@@ -88,6 +95,33 @@ pub fn tests() -> Vec<KernelTest> {
             interrupt::test_masked_signal_does_not_interrupt,
         ),
     ]
+}
+
+/// 回归：Pipe::poll 在 ring Mutex 内判断“对端是否已全部关闭”时，
+/// 不能通过 `Weak::upgrade()` 构造临时 `Arc<Pipe>` 再立即 drop。对端仍存活时，
+/// 该临时 Arc 的 `Pipe::drop` 会反向获取同一把 ring Mutex，造成自死锁。
+/// 本用例保持写端存活并直接 poll 空管道；旧实现会卡死在这里。
+fn test_pipe_poll_live_peer_no_ring_reentry() -> Result<(), &'static str> {
+    let (read_end, write_end) = make_pipe();
+
+    // 写端存活且管道为空：poll 应立即返回 0，而不是在 ring 锁内
+    // 析构对端 Arc 并自死锁。
+    let live_events = read_end
+        .poll(&FilePrivateData::Unused)
+        .map_err(|_| "pipe poll failed while the write end is alive")?;
+    if live_events & (EPollEvent::EPOLLIN.bits() | EPollEvent::EPOLLHUP.bits()) != 0 {
+        return Err("empty pipe with a live writer reported data or hangup");
+    }
+
+    // 写端关闭后，读端 poll 必须报告 EOF（EPOLLIN）。
+    drop(write_end);
+    let closed_events = read_end
+        .poll(&FilePrivateData::Unused)
+        .map_err(|_| "pipe poll failed after the write end was closed")?;
+    if closed_events & EPollEvent::EPOLLIN.bits() == 0 {
+        return Err("pipe poll did not report EOF after the write end closed");
+    }
+    Ok(())
 }
 
 /// 条件检查可能同步推进生产者，例如 socket 检查会调用网络 poll。

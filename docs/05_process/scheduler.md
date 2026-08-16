@@ -411,7 +411,7 @@ best-effort 输出，不能替代 processor/runqueue 锁或调度状态机的 ow
 ## 6. run_tasks 主循环阶段
 
 CPU0 的 `run_tasks()` 使用事件驱动 idle。每轮先短暂开放 IRQ 交付 pending
-timer/IPI，立即回到 IRQ-off idle 栈；只有 10ms scheduler tick 发布的可合并事件才执行
+timer/IPI，立即回到 IRQ-off idle 栈；只有 20ms scheduler tick 发布的可合并事件才执行
 全局 housekeeping：
 
 ```text
@@ -493,7 +493,7 @@ rv64 上 `console_getchar()` 是 SBI ecall，因此每 64 tick 才轮询一次�
 
 | 操作 | 频率 |
 |------|------|
-| `NET_INTERFACE.run_deferred_poll_retry()` | 每个真实 10ms scheduler tick，消费忙栈 retry 位 |
+| `NET_INTERFACE.run_deferred_poll_retry()` | 每个真实 20ms scheduler tick，消费忙栈 retry 位 |
 | `NET_INTERFACE.request_poll()` | 每 64 个真实 scheduler tick |
 | `fs::reclaim::maybe_reclaim_fs_caches()` | 每个真实 scheduler tick |
 

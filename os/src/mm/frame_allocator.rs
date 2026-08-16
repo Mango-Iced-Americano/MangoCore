@@ -20,18 +20,20 @@ use crate::hal::{local_irq_restore, local_irq_save};
 use crate::task::current_task;
 
 use alloc::{sync::Arc, vec::Vec};
+#[cfg(target_arch = "riscv64")]
+use core::arch::asm;
 use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use lazy_static::*;
 use spin::RwLock;
 
 /// Idle CPUs may keep this many already-zeroed single pages ready for demand
-/// faults.  The pool is deliberately small relative to the 8 GiB BuildStorm
-/// guest and is disabled under memory pressure.
-pub const PREZERO_POOL_HIGH_WATER: usize = 256;
+/// faults.  The pool is bounded relative to the 8 GiB BuildStorm guest and is
+/// disabled under memory pressure.
+pub const PREZERO_POOL_HIGH_WATER: usize = 2048;
 const PREZERO_POOL_LOW_WATER: usize = PREZERO_POOL_HIGH_WATER / 2;
-const PREZERO_REFILL_PER_IDLE_TICK: usize = 2;
-const PREZERO_REFILL_PER_IDLE_WAKE: usize = 32;
+const PREZERO_REFILL_PER_IDLE_TICK: usize = 8;
+const PREZERO_REFILL_PER_IDLE_WAKE: usize = 128;
 const PREZERO_MIN_FREE_FRAMES: usize = 2048;
 const PREZERO_POLICY_UNINITIALIZED: u8 = 0;
 const PREZERO_POLICY_IDLE: u8 = 1;
@@ -41,6 +43,13 @@ const PREZERO_POLICY_OFF: u8 = 3;
 static PREZERO_POLICY: AtomicU8 = AtomicU8::new(PREZERO_POLICY_UNINITIALIZED);
 /// A low-water notification is coalesced until one idle AP claims it.
 static PREZERO_REFILL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 页清零后端。`bsp_main()` 在 PlatformInfo 发布后立即安装；早于该点的
+/// 内核页表/堆构造仍走标量清零，避免在 PlatformInfo 可用前查询 FDT。
+/// RV64 按全部 enabled CPU 的 FDT `zicboz` 能力选择 `cbo.zero`，其他架构
+/// 或能力缺失平台保持标量 store 清零。
+#[cfg(target_arch = "riscv64")]
+static ZERO_WITH_CBOZ: AtomicBool = AtomicBool::new(false);
 
 fn parse_prezero_policy() -> u8 {
     crate::bootargs::get_cmdline()
@@ -138,9 +147,65 @@ fn request_idle_prezero_refill(remaining: usize) {
     PREZERO_REFILL_REQUESTED.store(false, Ordering::Release);
 }
 
+/// 在 PlatformInfo 发布后、用户/任务页分配开始前安装页清零后端。
+pub(crate) fn init_zero_accelerator() {
+    #[cfg(target_arch = "riscv64")]
+    ZERO_WITH_CBOZ.store(
+        crate::hal::arch::riscv::platform_supports_zicboz(),
+        Ordering::Release,
+    );
+}
+
+/// 当前页清零是否使用 RISC-V Zicboz `cbo.zero`。
+pub(crate) fn zero_with_cboz() -> bool {
+    #[cfg(target_arch = "riscv64")]
+    {
+        ZERO_WITH_CBOZ.load(Ordering::Acquire)
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        false
+    }
+}
+
+/// 用 Zicboz cache-block zero 清除一个 4 KiB 页。
+///
+/// 该页必须由帧分配器独占且尚未发布；此时没有其他 hart 或设备能观察到
+/// 清除过程中的中间值，因此不需要额外 fence。`cbo.zero` 的目标地址必须
+/// 64 字节对齐，页首天然满足。
+#[cfg(target_arch = "riscv64")]
+#[inline]
+unsafe fn zero_page_with_cboz(ptr: *mut u64) {
+    let mut addr = ptr.cast::<u8>();
+    for _ in 0..(crate::config::PAGE_SIZE / 64) {
+        unsafe {
+            asm!(
+                ".option push",
+                ".option arch, +zicboz",
+                "mv a0, {addr}",
+                "cbo.zero (a0)",
+                ".option pop",
+                addr = in(reg) addr,
+                out("a0") _,
+                options(nostack, preserves_flags)
+            );
+        }
+        addr = addr.add(64);
+    }
+}
+
 /// Clear one allocator-owned page before it is published to another owner.
 fn zero_frame_bytes(ppn: PhysPageNum) {
     let ptr = ppn.start_addr().direct_map_ptr().cast::<u64>();
+    if zero_with_cboz() {
+        // Safety: `ptr` points at an allocator-owned page that has not been
+        // published; `zero_page_with_cboz` stays within its 4096-byte span.
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            zero_page_with_cboz(ptr);
+        }
+        return;
+    }
     const WORDS_PER_PAGE: usize = PAGE_SIZE / core::mem::size_of::<u64>();
     const UNROLL: usize = 8;
     let mut i = 0;

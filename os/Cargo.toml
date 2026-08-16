@@ -120,6 +120,8 @@ codegen-units = 16
 rpath = false
 [profile.release]
 lto = true
+codegen-units = 1
+panic = "abort"
 debug = true
 
 [target.riscv64gc-unknown-none-gnu]

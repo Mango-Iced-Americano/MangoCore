@@ -157,6 +157,7 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     // PlatformInfo 内含 String/Vec，只能在堆可用后构造；bring_up AP 之前
     // 完成 Once 发布，保证 AP 后续只能看到完整的不可变对象。
     hal::platform::init_platform();
+    crate::mm::init_zero_accelerator();
     let platform_info = hal::platform::platform_info();
     println!(
         "[kernel] Firmware resources: ram_regions={}, reserved={}, early_mmio={}, usable={} MiB",
