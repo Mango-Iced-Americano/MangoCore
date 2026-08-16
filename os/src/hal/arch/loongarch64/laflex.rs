@@ -680,8 +680,4 @@ impl PageTable for LAFlexPageTable {
     fn unmap_identical(&mut self, vpn: VirtPageNum) {
         self.unmap(vpn)
     }
-
-    fn take_frames(&mut self) -> Vec<Arc<FrameTracker>> {
-        core::mem::take(&mut self.frames)
-    }
 }

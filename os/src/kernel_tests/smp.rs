@@ -580,10 +580,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::secondary_cpus_enter_idle_context",
             secondary_cpus_enter_idle_context,
         ),
-        KernelTest::new(
-            "smp::bsp_to_ap_memory_barrier",
-            bsp_to_ap_memory_barrier,
-        ),
+        KernelTest::new("smp::bsp_to_ap_memory_barrier", bsp_to_ap_memory_barrier),
         KernelTest::new(
             "smp::bsp_broadcasts_memory_barrier_to_all_aps",
             bsp_broadcasts_memory_barrier_to_all_aps,
@@ -604,10 +601,7 @@ pub fn tests() -> Vec<KernelTest> {
             "smp::user_timer_preempts_on_secondary_cpu",
             user_timer_preempts_on_secondary_cpu,
         ),
-        KernelTest::new(
-            "smp::ap_to_bsp_memory_barrier",
-            ap_to_bsp_memory_barrier,
-        ),
+        KernelTest::new("smp::ap_to_bsp_memory_barrier", ap_to_bsp_memory_barrier),
         KernelTest::new(
             "smp::syscall_irq_window_survives_schedule",
             syscall_irq_window_survives_schedule,
@@ -755,11 +749,8 @@ fn build_ktest_sibling(
 ) -> Arc<crate::task::TaskControlBlock> {
     let tid = crate::task::tid_alloc();
     let kstack = crate::hal::kstack_alloc();
-    let task_cx =
-        crate::task::TaskContext::goto_address(entry as usize, kstack.get_top());
-    let task = crate::task::TaskControlBlock::new_kernel_only(
-        tid, process, kstack, task_cx, entry,
-    );
+    let task_cx = crate::task::TaskContext::goto_address(entry as usize, kstack.get_top());
+    let task = crate::task::TaskControlBlock::new_kernel_only(tid, process, kstack, task_cx, entry);
     task.set_initial_cpus_allowed(1usize << cpu);
     task
 }
@@ -813,10 +804,7 @@ fn group_exit_stops_remote_sibling() -> Result<(), &'static str> {
     GROUP_EXIT_REMOTE_CPU.store(usize::MAX, Ordering::Relaxed);
     GROUP_EXIT_LATE_RUNS.store(0, Ordering::Relaxed);
 
-    let leader = crate::task::spawn_ktest_task_on(
-        crate::smp::BOOT_CPU_ID,
-        group_exit_leader,
-    );
+    let leader = crate::task::spawn_ktest_task_on(crate::smp::BOOT_CPU_ID, group_exit_leader);
     let process = leader.process.clone();
     let blocked = build_ktest_sibling(process.clone(), 1, group_exit_blocked);
     crate::task::try_publish_task_on(blocked.clone(), 1)
@@ -1243,8 +1231,7 @@ fn exec_owner_becomes_group_leader() -> Result<(), &'static str> {
             let pid_still_points_to_owner = crate::task::find_task_by_tid(process.pid)
                 .map(|registered| Arc::ptr_eq(&registered, &owner))
                 .unwrap_or(false);
-            if !pid_still_points_to_owner
-                || crate::task::find_task_by_tid(old_owner_tid).is_some()
+            if !pid_still_points_to_owner || crate::task::find_task_by_tid(old_owner_tid).is_some()
             {
                 EXEC_IDENTITY_ERRORS.fetch_add(1, Ordering::Release);
             }
@@ -1382,7 +1369,11 @@ fn hold_timer_probe_cpu() {
 fn stop_timer_probe() {
     let cpu = crate::smp::cpu_id();
     TIMER_HELPER_CPU.store(cpu, Ordering::Release);
-    let Some(task) = TIMER_PROBE_TARGET.lock().take().and_then(|task| task.upgrade()) else {
+    let Some(task) = TIMER_PROBE_TARGET
+        .lock()
+        .take()
+        .and_then(|task| task.upgrade())
+    else {
         TIMER_PROBE_ERRORS.fetch_or(4, Ordering::Release);
         return;
     };
@@ -1504,10 +1495,7 @@ fn user_timer_preempts_on_secondary_cpu() -> Result<(), &'static str> {
         && TIMER_PROBE_ERRORS.load(Ordering::Acquire) == 0
         && crate::smp::timer_irq_count(1) > timer_irq_before
         && crate::smp::timer_deferred_count(1) > timer_deferred_before;
-    if !timed_out
-        && (!evidence_ok
-            || task.last_cpu() != 1
-            || crate::task::run_queue_count(1) != 0)
+    if !timed_out && (!evidence_ok || task.last_cpu() != 1 || crate::task::run_queue_count(1) != 0)
     {
         // 先完成统一 reap/drop，再向 runner 报告证据缺失，避免失败污染后续用例。
         TIMER_PROBE_ERRORS.fetch_or(16, Ordering::Release);
@@ -1784,9 +1772,9 @@ fn asid_rollover_flushes_before_reuse() -> Result<(), &'static str> {
     } else {
         0
     };
-    let first_vm = crate::mm::AddressSpace::new(
-        crate::mm::AddressSpaceInner::<crate::hal::PageTableImpl>::new_bare(),
-    );
+    let first_vm = crate::mm::AddressSpace::new(crate::mm::AddressSpaceInner::<
+        crate::hal::PageTableImpl,
+    >::new_bare());
     if first_vm.activate_on(crate::smp::BOOT_CPU_ID).asid == 0 {
         return Err("first rollover test MM received ASID 0");
     }
@@ -1850,9 +1838,7 @@ fn bsp_to_ap_memory_barrier() -> Result<(), &'static str> {
         crate::smp::synchronize_memory(1usize << cpu_id)
             .map_err(|_| "failed to synchronize BSP-to-AP membarrier")?;
         let request = crate::smp::memory_barrier_request(cpu_id);
-        if request != before.wrapping_add(1)
-            || crate::smp::memory_barrier_ack(cpu_id) < request
-        {
+        if request != before.wrapping_add(1) || crate::smp::memory_barrier_ack(cpu_id) < request {
             return Err("AP did not acknowledge the production membarrier request");
         }
     }
@@ -1965,8 +1951,7 @@ fn membarrier_reaches_mm_cpus() -> Result<(), &'static str> {
         }
         if remote.is_some() && !timed_out {
             let request = crate::smp::memory_barrier_request(1);
-            if request != private_request_before + 1
-                || crate::smp::memory_barrier_ack(1) < request
+            if request != private_request_before + 1 || crate::smp::memory_barrier_ack(1) < request
             {
                 private_failed = true;
             }
@@ -2037,21 +2022,17 @@ fn cpu0_idle_wakes_on_local_timer() -> Result<(), &'static str> {
     }
 
     let stats_was_on = crate::task::perf::STATS_ON.swap(true, Ordering::AcqRel);
-    let profile_before = crate::task::perf::STATS_PROFILE.swap(
-        crate::task::perf::STATS_PROFILE_CORE,
-        Ordering::AcqRel,
-    );
+    let profile_before = crate::task::perf::STATS_PROFILE
+        .swap(crate::task::perf::STATS_PROFILE_CORE, Ordering::AcqRel);
     #[cfg(feature = "perf_stats")]
-    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
-        [crate::smp::BOOT_CPU_ID]
+    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[crate::smp::BOOT_CPU_ID]
         .load(Ordering::Relaxed);
     let timer_before = crate::smp::timer_irq_count(crate::smp::BOOT_CPU_ID);
     let wait_queue = Mutex::new(crate::task::WaitQueue::new());
     let deadline = crate::timer::TimeSpec::now() + crate::timer::TimeSpec::from_ms(30);
     let wait_result = crate::task::WaitQueue::wait_event_timeout(&wait_queue, || None, deadline);
     #[cfg(feature = "perf_stats")]
-    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
-        [crate::smp::BOOT_CPU_ID]
+    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[crate::smp::BOOT_CPU_ID]
         .load(Ordering::Relaxed);
     crate::task::perf::STATS_PROFILE.store(profile_before, Ordering::Release);
     crate::task::perf::STATS_ON.store(stats_was_on, Ordering::Release);
@@ -2119,9 +2100,7 @@ fn cpu0_idle_wakes_on_remote_reschedule() -> Result<(), &'static str> {
     if crate::smp::configured_cpu_count() == 1 {
         return Ok(());
     }
-    if CPU0_IDLE_WAKE_COMPLETION.lock().is_some()
-        || CPU0_IDLE_WAKE_TARGET.lock().is_some()
-    {
+    if CPU0_IDLE_WAKE_COMPLETION.lock().is_some() || CPU0_IDLE_WAKE_TARGET.lock().is_some() {
         return Err("stale CPU0 idle wake state remained before test");
     }
 
@@ -2132,13 +2111,10 @@ fn cpu0_idle_wakes_on_remote_reschedule() -> Result<(), &'static str> {
     *CPU0_IDLE_WAKE_COMPLETION.lock() = Some(completion.clone());
 
     let stats_was_on = crate::task::perf::STATS_ON.swap(true, Ordering::AcqRel);
-    let profile_before = crate::task::perf::STATS_PROFILE.swap(
-        crate::task::perf::STATS_PROFILE_CORE,
-        Ordering::AcqRel,
-    );
+    let profile_before = crate::task::perf::STATS_PROFILE
+        .swap(crate::task::perf::STATS_PROFILE_CORE, Ordering::AcqRel);
     #[cfg(feature = "perf_stats")]
-    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
-        [crate::smp::BOOT_CPU_ID]
+    let waits_before = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[crate::smp::BOOT_CPU_ID]
         .load(Ordering::Relaxed);
     #[cfg(feature = "perf_stats")]
     CPU0_IDLE_WAKE_WAIT_BASELINE.store(waits_before, Ordering::Release);
@@ -2146,8 +2122,7 @@ fn cpu0_idle_wakes_on_remote_reschedule() -> Result<(), &'static str> {
     let helper = crate::task::spawn_ktest_task_on(1, wake_cpu0_idle_from_ap);
     let wait_result = completion.wait_killable();
     #[cfg(feature = "perf_stats")]
-    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU
-        [crate::smp::BOOT_CPU_ID]
+    let waits_after = crate::task::perf::SCHED_IDLE_WAIT_LOOPS_BY_CPU[crate::smp::BOOT_CPU_ID]
         .load(Ordering::Relaxed);
     crate::task::perf::STATS_PROFILE.store(profile_before, Ordering::Release);
     crate::task::perf::STATS_ON.store(stats_was_on, Ordering::Release);
@@ -2212,14 +2187,16 @@ fn deferred_timer_round(expected_tid: usize) -> Result<(), &'static str> {
         return Err("timer hard IRQ switched the current task");
     }
 
-    // 生产安全点可能因为 quantum 到期主动调度；恢复运行后必须仍是同一测试
-    // 任务，且 pending 已被完整消费。
+    // 生产安全点可能因为 quantum 到期或同时到期的 callback 主动调度；恢复运行后
+    // 必须仍是同一测试任务，且本轮 pending 至少完成一批。切换期间若下一个
+    // one-shot 已到期，idle 栈合法地再完成一批，不能把它误判成 hard-IRQ 越权。
     crate::task::run_task_safe_point();
     if crate::smp::local_timer_pending() {
         return Err("timer safe point left pending work behind");
     }
-    if crate::smp::timer_deferred_count(cpu_id) != deferred_before.wrapping_add(1) {
-        return Err("timer safe point did not complete exactly one batch");
+    let deferred_after = crate::smp::timer_deferred_count(cpu_id);
+    if deferred_after == deferred_before {
+        return Err("timer safe point did not complete its pending batch");
     }
     if crate::task::current_tid() != expected_tid {
         return Err("timer safe point resumed a different task");
@@ -2250,8 +2227,8 @@ fn run_ap_to_bsp_memory_barriers(cpu_id: usize, rounds: usize) -> Result<(), &'s
     AP_BARRIER_ROUNDS.store(rounds, Ordering::Release);
     AP_BARRIER_RESULT[cpu_id].store(AP_BARRIER_WAITING, Ordering::Release);
     let task = crate::task::spawn_ktest_task_on(cpu_id, ap_to_bsp_memory_barrier_helper);
-    let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
+    let deadline =
+        crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(3));
 
     while AP_BARRIER_RESULT[cpu_id].load(Ordering::Acquire) == AP_BARRIER_WAITING {
         if crate::hal::get_time() >= deadline {
@@ -2842,8 +2819,7 @@ fn queued_affinity_moves_between_runqueues() -> Result<(), &'static str> {
 
         let cpu0_mask = 1usize << crate::smp::BOOT_CPU_ID;
         if !crate::task::set_remote_affinity(&task, cpu0_mask)
-            || task.task_status()
-                != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
+            || task.task_status() != crate::task::TaskStatus::Queued(crate::smp::BOOT_CPU_ID)
             || task.cpus_allowed() != cpu0_mask
             || crate::task::run_queue_count(SOURCE_CPU) != source_before
             || crate::task::run_queue_count(crate::smp::BOOT_CPU_ID) != target_before + 1
@@ -3147,7 +3123,7 @@ fn pinned_victim_skips_ktlb_sync() -> Result<(), &'static str> {
     #[cfg(feature = "perf_stats")]
     let ktlb_before = crate::task::perf::STEAL_KTLB_SYNC_CALLS.load(Ordering::Acquire);
     #[cfg(not(feature = "perf_stats"))]
-    let timer_before = crate::smp::timer_irq_count(1);
+    let reschedule_before = crate::smp::reschedule_count(1);
 
     let result = (|| {
         crate::smp::request_reschedule(1)
@@ -3159,7 +3135,7 @@ fn pinned_victim_skips_ktlb_sync() -> Result<(), &'static str> {
             let attempted = crate::task::perf::STEAL_NO_ELIGIBLE_CANDIDATE.load(Ordering::Acquire)
                 > no_eligible_before;
             #[cfg(not(feature = "perf_stats"))]
-            let attempted = crate::smp::timer_irq_count(1) > timer_before;
+            let attempted = crate::smp::reschedule_count(1) > reschedule_before;
             if attempted {
                 break;
             }
@@ -3712,7 +3688,7 @@ const STALE_TLB_REMAP_VALUE: u64 = 0xa55a_33cc_f00d_9696;
 
 /// 返回物理页首字的内核直映地址，不构造会和用户访存重叠的 Rust 引用。
 fn stale_tlb_word_ptr(ppn: crate::mm::PhysPageNum) -> *mut u64 {
-    (ppn.start_addr().0 | crate::config::MEMORY_HIGH_BASE) as *mut u64
+    ppn.start_addr().direct_map_ptr().cast::<u64>()
 }
 
 fn read_stale_tlb_word(address: usize) -> u64 {
@@ -3793,8 +3769,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     STALE_TLB_PROGRESS_PTR.store(0, Ordering::Release);
 
     let old_frame = crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB old frame")?;
-    let remap_frame =
-        crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB remap frame")?;
+    let remap_frame = crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB remap frame")?;
     let progress_frame =
         crate::mm::frame_alloc().ok_or("failed to allocate stale-TLB progress frame")?;
     let old_word = stale_tlb_word_ptr(old_frame.ppn) as usize;
@@ -3812,9 +3787,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
         let target = space.shm_mmap(
             0,
             crate::config::PAGE_SIZE,
-            crate::mm::MapPermission::R
-                | crate::mm::MapPermission::W
-                | crate::mm::MapPermission::U,
+            crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
             crate::mm::MapFlags::MAP_PRIVATE | crate::mm::MapFlags::MAP_ANONYMOUS,
             &[old_frame.clone()],
             true,
@@ -3825,9 +3798,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
         let progress = space.shm_mmap(
             0,
             crate::config::PAGE_SIZE,
-            crate::mm::MapPermission::R
-                | crate::mm::MapPermission::W
-                | crate::mm::MapPermission::U,
+            crate::mm::MapPermission::R | crate::mm::MapPermission::W | crate::mm::MapPermission::U,
             crate::mm::MapFlags::MAP_SHARED | crate::mm::MapFlags::MAP_ANONYMOUS,
             &[progress_frame.clone()],
             true,
@@ -3875,8 +3846,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     {
         if crate::hal::get_time() >= holder_deadline {
             write_stale_tlb_word(progress_word, 4);
-            let restore =
-                crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
+            let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
             STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
             let cleanup_deadline = crate::hal::get_time()
                 .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
@@ -3904,8 +3874,8 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
         write_stale_tlb_word(progress_word, 4);
         let restore = crate::task::spawn_ktest_task_on(1, restore_stale_tlb_probe_timer);
         STALE_TLB_HOLDER_RELEASE.store(1, Ordering::Release);
-        let cleanup_deadline = crate::hal::get_time()
-            .saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
+        let cleanup_deadline =
+            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq().saturating_mul(2));
         while (holder.task_status() != crate::task::TaskStatus::Zombie
             || restore.task_status() != crate::task::TaskStatus::Zombie)
             && crate::hal::get_time() < cleanup_deadline
@@ -3972,10 +3942,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
                     new_ppn = Some(after);
                     // PTE 与远端失效已经在 AddressSpace::write() 返回前完成；此时
                     // 才改新页 canary，旧翻译若未失效就会永久停留在 OLD_VALUE。
-                    write_stale_tlb_word(
-                        stale_tlb_word_ptr(after) as usize,
-                        STALE_TLB_NEW_VALUE,
-                    );
+                    write_stale_tlb_word(stale_tlb_word_ptr(after) as usize, STALE_TLB_NEW_VALUE);
                 }
                 _ => validation_error = Some("production COW did not replace the target PPN"),
             }
@@ -4087,8 +4054,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     }
 
     if validation_error.is_none() && !process.is_zombie() {
-        let exit_deadline =
-            crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
+        let exit_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
         while !process.is_zombie() && crate::hal::get_time() < exit_deadline {
             core::hint::spin_loop();
         }
@@ -4148,9 +4114,7 @@ fn remote_user_pte_updates_take_effect() -> Result<(), &'static str> {
     if read_stale_tlb_word(old_word) != STALE_TLB_OLD_VALUE {
         validation_error.get_or_insert("COW modified the retained source frame");
     }
-    if read_stale_tlb_word(stale_tlb_word_ptr(remap_frame.ppn) as usize)
-        != STALE_TLB_REMAP_VALUE
-    {
+    if read_stale_tlb_word(stale_tlb_word_ptr(remap_frame.ppn) as usize) != STALE_TLB_REMAP_VALUE {
         validation_error.get_or_insert("mprotect violation modified the read-only frame");
     }
 
@@ -4189,8 +4153,7 @@ fn user_tlb_range_sync_uses_arch_backend() -> Result<(), &'static str> {
 
     let start = crate::mm::VirtAddr::from(0x51_0000).floor();
     let range = crate::mm::VPNRange::new(start, crate::mm::VirtPageNum(start.0 + 3));
-    crate::smp::synchronize_user_tlb(targets, asid, Some(range), None)
-    .map_err(|error| {
+    crate::smp::synchronize_user_tlb(targets, asid, Some(range), None).map_err(|error| {
         crate::println!("# user TLB range sync failed: {:?}", error);
         "user TLB range sync failed"
     })?;
@@ -4206,14 +4169,63 @@ const CONCURRENT_PTE_BASE: usize = crate::config::ELF_PIE_BASE + 0x40_0000;
 const CONCURRENT_PTE_STRIDE: usize = 4 * crate::config::PAGE_SIZE;
 const CONCURRENT_PTE_ROUNDS: usize = 8;
 
-fn run_concurrent_pte_updates() {
+/// Keep a test MM's software active mask and the RISC-V hardware SATP root in
+/// the same lifetime.  In particular, ASID-rollover tests must not advertise a
+/// CPU as active while leaving its installed epoch behind.
+struct InstalledKtestVm {
+    vm: Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>,
+    cpu_id: usize,
+}
+
+impl InstalledKtestVm {
+    fn new(vm: Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>) -> Self {
+        let cpu_id = crate::smp::cpu_id();
+        #[cfg(target_arch = "riscv64")]
+        {
+            let irq_was_enabled = crate::hal::local_irq_save();
+            let context = vm.activate_on(cpu_id);
+            crate::hal::arch::riscv::sv39::install_page_table(
+                context.token,
+                context.asid,
+                context.asid_epoch,
+            );
+            crate::hal::local_irq_restore(irq_was_enabled);
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            let _ = vm.activate_on(cpu_id);
+        }
+        Self { vm, cpu_id }
+    }
+}
+
+impl Drop for InstalledKtestVm {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.cpu_id,
+            crate::smp::cpu_id(),
+            "ktest VM guard migrated between CPUs"
+        );
+        #[cfg(target_arch = "riscv64")]
+        {
+            let irq_was_enabled = crate::hal::local_irq_save();
+            crate::hal::arch::riscv::sv39::install_page_table(
+                crate::mm::kernel_token(),
+                crate::hal::arch::riscv::sv39::KERN_ASID,
+                crate::hal::arch::riscv::sv39::current_asid_epoch(),
+            );
+            self.vm.deactivate_on(self.cpu_id);
+            crate::hal::local_irq_restore(irq_was_enabled);
+        }
+        #[cfg(target_arch = "loongarch64")]
+        self.vm.deactivate_on(self.cpu_id);
+    }
+}
+
+fn execute_concurrent_pte_updates(
+    vm: &Arc<crate::mm::AddressSpace<crate::hal::PageTableImpl>>,
+) {
     let cpu_id = crate::smp::cpu_id();
-    let vm = SHARED_TLB_VM
-        .lock()
-        .as_ref()
-        .expect("concurrent PTE-update VM missing")
-        .clone();
-    vm.activate_on(cpu_id);
     PTE_UPDATE_READY.fetch_add(1, Ordering::Release);
     while PTE_UPDATE_START.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
@@ -4242,7 +4254,16 @@ fn run_concurrent_pte_updates() {
             core::hint::spin_loop();
         }
     });
-    vm.deactivate_on(cpu_id);
+}
+
+fn run_concurrent_pte_updates() {
+    let vm = SHARED_TLB_VM
+        .lock()
+        .as_ref()
+        .expect("concurrent PTE-update VM missing")
+        .clone();
+    let _installed = InstalledKtestVm::new(vm.clone());
+    execute_concurrent_pte_updates(&vm);
 }
 
 /// 所有 CPU 经真实 `AddressSpace::write()` 修改不同 PTE。VM 锁内写入虽串行，
@@ -4279,7 +4300,7 @@ fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str>
         }
         frames.push(frame);
     }
-    vm.activate_on(crate::smp::BOOT_CPU_ID);
+    let local_vm = InstalledKtestVm::new(vm.clone());
     *SHARED_TLB_VM.lock() = Some(vm.clone());
 
     let mut full_requests = [0usize; crate::smp::MAX_CPUS];
@@ -4303,7 +4324,7 @@ fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str>
     }
 
     PTE_UPDATE_START.store(1, Ordering::Release);
-    run_concurrent_pte_updates();
+    execute_concurrent_pte_updates(&vm);
 
     let completion_deadline = crate::hal::get_time().saturating_add(crate::hal::get_clock_freq());
     while tasks
@@ -4316,6 +4337,7 @@ fn concurrent_pte_updates_keep_shootdowns_separate() -> Result<(), &'static str>
         core::hint::spin_loop();
     }
     *SHARED_TLB_VM.lock() = None;
+    drop(local_vm);
 
     if PTE_UPDATE_ERRORS.load(Ordering::Acquire) != 0 {
         return Err("a concurrent production mprotect failed");

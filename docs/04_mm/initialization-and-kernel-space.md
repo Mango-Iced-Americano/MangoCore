@@ -3,7 +3,7 @@ title: "MM 初始化与内核地址空间"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-09
+last_update: 2026-08-14
 tags: [mm, init, kernel-space, mapping, smp]
 code_paths:
   - "os/src/mm/mod.rs"
@@ -173,23 +173,23 @@ lazy_static! {
 |------|------|------|
 | trampoline | `R | X | G` | `strampoline`，仅在 `should_map_trampoline!()` 为真时映射 |
 | `.text` | `R | X | G` | `stext..etext` |
-| `.rodata` | `R` | `srodata..erodata` |
+| `.rodata` | `R | G` | `srodata..erodata` |
 | `.data` | `R | W | G` | `sdata..edata` |
 | `.bss` | `R | W | G` | `sbss_with_stack..ebss` |
-| usable DRAM regions | `R | W`，仅不与用户 VA 相交的 RV64 区间可加 `G` | 运行期 FDT/实板 fallback region 扣除内核和固件 carveout 后的各区间 |
-| MMIO | `R | W`，仅不与用户 VA 相交的 RV64 区间可加 `G` | FDT 早期 MMIO 资源（含 PCI host ECAM 与 memory window） |
+| usable DRAM regions | RV64 高半 physmap 为 `R | W | G`；LA64 保持既有恒等/DMW 语义 | 运行期 FDT/实板 fallback region |
+| MMIO | RV64 高半 physmap 为 `R | W | G`；LA64 保持既有恒等映射 | FDT 早期 MMIO 资源（含 PCI host ECAM 与 memory window） |
 
-映射通过 `kernel_identical_map!` 宏建立。这里的“identical”指虚拟页号和物理页号一致。FDT
-MMIO 资源的对齐中段优先使用 2 MiB 映射，避免把 QEMU PCI host 的大 64-bit memory window
-逐个拆成 4 KiB PTE；首尾未对齐部分仍用 4 KiB 映射。
-RV64 为每个动态 RAM 页建立真实叶子 PTE；LA64 的低地址恒等访问由 DMW 提供，并按固件
+RV64 把 PA `[0, 64 GiB)` 映射到固定 supervisor-only 高半窗口，FDT RAM/MMIO/PCI range
+在 pre-heap 阶段先做页对齐、合并和 64 GiB 上限校验。对齐中段优先使用 2 MiB 映射，
+首尾未对齐部分使用 4 KiB PTE。LA64 继续通过 `kernel_identical_map!` 建立恒等映射，
+其低地址访问由 DMW 提供，并按固件
 最高 DRAM 地址建立软件 dirty bitmap。2K1000LA 和 LA64 QEMU 的多个 bank 分别处理，
 中间 MMIO 空洞不会作为普通内存映射、清零或分配。
 
-RV64 的 `G` 位会忽略 `SATP.ASID`。因此低地址 DRAM、MMIO 或固件保留区只要与
-`[USER_VA_BASE, USER_VA_END)` 相交，就必须使用内核 ASID 0 的 non-global 映射；否则用户
-页表在同一 VA 映射另一 PPN 时仍可能命中内核恒等映射的 global TLB 项。高半区内核段、
-trampoline 以及完全位于用户范围之外的恒等映射继续保留 `G`。
+RV64 的 `G` 位会忽略 `SATP.ASID`，因此不再保留会与用户 VA 重叠的低地址 DRAM/MMIO
+最终映射。用户根复制 kernel root 256..510 的共享 supervisor 分支；root 511 保持私有，
+容纳 trap context/signal trampoline。内核 program 与 guarded stack arena 的顶层分支会在
+首个用户根发布前预创建，后续动态 PTE 修改对所有用户根可见。
 
 ## 8. 动态内核映射
 
@@ -197,7 +197,6 @@ trampoline 以及完全位于用户范围之外的恒等映射继续保留 `G`�
 
 | 接口 | 用途 |
 |------|------|
-| `insert_framed_area()` | 分配一段内核虚拟区并映射新物理页 |
 | `insert_kernel_stack_area()` | 为内核栈创建映射 |
 | `insert_program_area()` | 为加载到内核空间的程序/解释器数据建立映射 |
 | `remove_area_with_start_vpn()` | 按起始 VPN 删除映射并释放 `FrameTracker` |

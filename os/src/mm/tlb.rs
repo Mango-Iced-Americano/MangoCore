@@ -52,26 +52,33 @@ impl TlbContext {
         self.mm_id
     }
 
-    /// 返回当前 MM 的硬件 ASID；`None` 表示必须先在无普通锁状态完成 rollover。
+    /// 返回当前 MM 的硬件 ASID 与软件 epoch；`None` 表示必须先在无普通锁状态
+    /// 完成 rollover。LA64 不需要把 epoch 交给切页表路径，固定返回 0。
     #[cfg(target_arch = "loongarch64")]
-    pub(crate) fn assign_asid(&self) -> Option<u16> {
+    pub(crate) fn assign_asid(&self) -> Option<(u16, u64)> {
         let current = self.asid_context.load(Ordering::Acquire);
         let assigned = crate::hal::arch::loongarch64::tlb::try_assign_asid(current)?;
         if assigned != current {
             self.asid_context.store(assigned, Ordering::Release);
         }
-        Some(crate::hal::arch::loongarch64::tlb::hardware_asid(assigned))
+        Some((
+            crate::hal::arch::loongarch64::tlb::hardware_asid(assigned),
+            0,
+        ))
     }
 
     /// RISC-V 从 SATP.ASID 分配 MM-owned context；ASIDLEN=0 时安全退化为 0。
     #[cfg(target_arch = "riscv64")]
-    pub(crate) fn assign_asid(&self) -> Option<u16> {
+    pub(crate) fn assign_asid(&self) -> Option<(u16, u64)> {
         let current = self.asid_context.load(Ordering::Acquire);
         let assigned = crate::hal::arch::riscv::sv39::try_assign_asid(current)?;
         if assigned != current {
             self.asid_context.store(assigned, Ordering::Release);
         }
-        Some(crate::hal::arch::riscv::sv39::hardware_asid(assigned))
+        Some((
+            crate::hal::arch::riscv::sv39::hardware_asid(assigned),
+            assigned >> 16,
+        ))
     }
 
     /// 返回当前仍可能直接返回该 MM 用户态的 CPU。
@@ -85,8 +92,7 @@ impl TlbContext {
     /// 激活协议，也不能作为提前释放 frame 的依据。
     pub(crate) fn cpu_is_current(&self, cpu_id: usize) -> bool {
         assert!(cpu_id < crate::smp::configured_cpu_count());
-        self.observed[cpu_id].load(Ordering::Acquire)
-            >= self.generation.load(Ordering::Acquire)
+        self.observed[cpu_id].load(Ordering::Acquire) >= self.generation.load(Ordering::Acquire)
     }
 
     /// 取得本轮页级失效必须使用的硬件 ASID。
@@ -105,19 +111,21 @@ impl TlbContext {
         asid
     }
 
-    /// 返回与本轮 RV64 PTE 修改一起冻结的硬件 ASID。
+    /// 返回与本轮 RV64 PTE 修改一起从同一个原子 context 冻结的硬件 ASID
+    /// 和软件 epoch。PTE writer 必须比较这个 MM epoch，而不是另读全局 epoch。
     #[cfg(target_arch = "riscv64")]
-    pub(crate) fn flush_asid(&self, targets: usize) -> u16 {
+    pub(crate) fn flush_asid_context(&self, targets: usize) -> (u16, u64) {
+        let context = self.asid_context.load(Ordering::Acquire);
+        let asid = crate::hal::arch::riscv::sv39::hardware_asid(context);
+        let epoch = context >> 16;
         if targets == 0 {
-            return 0;
+            return (0, epoch);
         }
-        let asid =
-            crate::hal::arch::riscv::sv39::hardware_asid(self.asid_context.load(Ordering::Acquire));
         assert!(
             asid != 0 || crate::hal::arch::riscv::sv39::asid_capacity() == 0,
             "active RISC-V MM has no hardware ASID"
         );
-        asid
+        (asid, epoch)
     }
 
     /// 登记当前 CPU，并在使用页表根前完成首次 membarrier fence 与 TLB 代际追赶。
@@ -248,12 +256,7 @@ impl<'a> TlbFlush<'a> {
                     }
                     FlushRange::Full => (None, None),
                 };
-                crate::smp::synchronize_user_tlb(
-                    self.targets,
-                    self.asid,
-                    range,
-                    mm_generation,
-                )
+                crate::smp::synchronize_user_tlb(self.targets, self.asid, range, mm_generation)
             };
 
             if let Err(error) = result {

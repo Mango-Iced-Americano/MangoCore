@@ -3,7 +3,7 @@ title: "HAL 与平台后端 (HAL and Platform Backends)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-03
+last_update: 2026-08-14
 tags: [architecture, hal, riscv64, loongarch64]
 ---
 
@@ -266,10 +266,10 @@ RV64 PCI 不依赖固定的 QEMU 地址布局。预堆阶段的 `parse_node_reso
 | `config.rs` | 地址布局、页大小、内核堆、内核栈、平台常量 |
 | `kern_stack.rs` | 内核栈分配和 trap context 地址计算 |
 | `reset.rs` | 实板 watchdog 重启路由与非实板 SBI reboot fallback |
-| `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
+| `sbi.rs` | OpenSBI 调用、console、timer fallback、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表实现和 `sfence.vma` TLB 刷新 |
 | `switch.rs`/`switch.S` | 任务上下文切换 |
-| `time.rs` | `get_time()`、`get_clock_freq()`、`program_timer_delta()` |
+| `time.rs` | `get_time()`、频率、Sstc/SBI backend 选择、`program_timer_delta()` |
 | `trap/` | trap context、汇编入口、syscall/缺页/timer 分发 |
 
 ### 6.2 重启路由
@@ -282,8 +282,9 @@ OpenSBI SRST，因此不受 U-Boot 已关闭 I2C5 的影响。其他平台仍调
 LA64 继续使用自己的后端重启实现。
 
 watchdog 和 SYSCRG 的直接 MMIO 访问依赖完整 VF2 FDT 的非 RAM `reg` 范围。预堆
-`parse_node_resources()` 记录这些范围，`KernelSpace` 在设备驱动使用前恒等映射它们。
-QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
+`parse_node_resources()` 记录这些范围；`KernelSpace` 在设备驱动使用前把 RV64 资源映射到
+supervisor-only 高半 physmap，LA64 保持既有恒等/DMW 访问语义。QEMU 的
+`is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走 `shutdown()`。
 
 ### 6.3 初始化
 
@@ -293,6 +294,7 @@ QEMU 的 `is_real_board()` 为 false，因而不会访问 JH7110 地址并仍走
 pub fn machine_init() {
     trap::init();
     trap::enable_ipi_interrupt();
+    time::init_timer_backend();
     // CORE_NUM > 1 时探测 SBI RFENCE。
 }
 
@@ -300,9 +302,12 @@ pub fn bootstrap_init(cpu_id: usize) { /* AP: IPI-only */ }
 pub fn enable_local_timer_interrupt() { /* deadline 写入后开放 STIE */ }
 ```
 
-rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 IPI，并在多核配置下探测 SBI
-RFENCE；缺失或探测失败时明确打印软件 IPI fallback。CPU0 和 AP 都由
-`task::timer_cpu_init()` 先写未来 deadline，再通过 HAL 开放本地 timer source。
+rv64 的 `machine_init()` 安装 trap、打开 CPU0 的 IPI，并在 AP 发布和首个 deadline
+之前选择 timer backend：只有全部 enabled CPU 的 FDT ISA 属性都明确包含 Sstc，且
+CPU 数与运行时拓扑一致，才直写 `stimecmp`；属性缺失、畸形或不一致均 fail-closed
+回退 SBI。之后在多核配置下探测 SBI RFENCE；缺失或探测失败时明确打印软件 IPI
+fallback。CPU0 和 AP 都由 `task::timer_cpu_init()` 先写未来 deadline，再通过 HAL
+开放本地 timer source。
 
 ### 6.4 Trap 路径
 

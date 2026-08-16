@@ -3,7 +3,7 @@ title: "时间、调度 ABI、rlimit 与 prctl"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-06
+last_update: 2026-08-14
 tags: [process, time, sched, rlimit, prctl]
 ---
 
@@ -301,9 +301,10 @@ B34 的 `sched_setaffinity()` 已支持 current 线程改 mask 与必要自迁�
 Blocked 线程改 mask。后者只有在目标仍以同一 TCB 指针登记于 interruptible registry 时才
 成功，mask 更新和 wake 由同一 `TASK_MANAGER` 锁串行化。B36 支持稳定 Queued 线程：owner
 仍合法时只更新 mask，排除 owner 时以 `Migrating` 在两把不重叠持有的 runqueue 锁之间交接。
-远程 Running/Blocking 仍没有运行期停止协议，普通生产任务因此继续固定 CPU0。现有 hermetic
-用户探针覆盖 current 路径；B35/B36 focused 分别覆盖生产 Blocked→wake 重定向与 Queued 搬队，
-但尚未从用户态端到端覆盖远程 TID。
+后续 B38 已补齐远程 Running/Blocking owner 交接。底层 TCB 仍以 CPU0-only 作为未发布
+安全默认值；正式 normal PID1 在 AP 全部 online 后把 affinity 扩为全部在线 CPU，后续
+fork/exec 继承该 mask。现有 hermetic 用户探针覆盖 current 路径；B35/B36 focused 分别
+覆盖生产 Blocked→wake 重定向与 Queued 搬队。
 
 fork 时，如果父设置 reset 或策略为 FIFO/RR，子任务降回 normal，priority/nice/runtime/deadline/period 清零。
 

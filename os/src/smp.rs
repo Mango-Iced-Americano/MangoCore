@@ -21,6 +21,32 @@ pub const MAX_CPUS: usize = 16;
 /// handler 提供确定的工作量上界。
 pub(crate) const MAX_USER_TLB_RANGE_PAGES: usize = 64;
 
+pub(crate) const TLB_SHOOTDOWN_KIND_COUNT: usize = 5;
+pub(crate) const TLB_SHOOTDOWN_KIND_NAMES: [&str; TLB_SHOOTDOWN_KIND_COUNT] = [
+    "kernel_full",
+    "user_full",
+    "user_range_firmware",
+    "user_range_ipi",
+    "user_range_fallback",
+];
+pub(crate) const TLB_RFENCE_BUCKET_COUNT: usize = 6;
+pub(crate) const TLB_RFENCE_BUCKET_NAMES: [&str; TLB_RFENCE_BUCKET_COUNT] = [
+    "le_1000",
+    "le_10000",
+    "le_100000",
+    "le_1000000",
+    "le_10000000",
+    "gt_10000000",
+];
+#[allow(dead_code)]
+pub(crate) const KERNEL_TLB_REASON_COUNT: usize = 3;
+#[allow(dead_code)]
+pub(crate) const KERNEL_TLB_REASON_NAMES: [&str; KERNEL_TLB_REASON_COUNT] =
+    ["task_publish", "task_migration", "mapping_retire"];
+#[cfg(feature = "perf_stats")]
+const TLB_RFENCE_BUCKET_UPPER_TICKS: [usize; TLB_RFENCE_BUCKET_COUNT - 1] =
+    [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
 /// Phase 1 的 CPU-local 锚点；后续批次只扩展表项，不移动现有地址。
 #[repr(C, align(64))]
 struct PerCpu {
@@ -66,6 +92,38 @@ struct PerCpu {
     tlb_sync_ticks_max: AtomicUsize,
     /// 本 CPU 收到错误返回的 TLB 同步轮数；doorbell 单点失败由 IPI 诊断统计。
     tlb_sync_failures: AtomicUsize,
+    /// 各 backend 的累计/最大同步 raw ticks；只在 perf memory_io 窗口记录。
+    #[cfg(feature = "perf_stats")]
+    tlb_sync_ticks_by_kind_total: [AtomicUsize; TLB_SHOOTDOWN_KIND_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_sync_ticks_by_kind_max: [AtomicUsize; TLB_SHOOTDOWN_KIND_COUNT],
+    /// SBI RFENCE range 的延迟分桶，并关联每桶页数和远端 hart fanout。
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_calls: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_ticks: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_pages: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    tlb_rfence_bucket_targets: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    /// kernel-global shootdown 按调用原因和延迟分桶归因。
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_calls: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_targets: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_ticks_total: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_ticks_max: [AtomicUsize; KERNEL_TLB_REASON_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_calls: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_ticks: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_bucket_targets: [AtomicUsize; TLB_RFENCE_BUCKET_COUNT],
+    #[cfg(feature = "perf_stats")]
+    kernel_tlb_reason_bucket_calls:
+        [AtomicUsize; KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
     /// 本 CPU 必须执行的 membarrier 完整内存屏障序号。
     memory_barrier_request: AtomicUsize,
     /// 本 CPU 执行完整内存屏障后发布的对应确认序号。
@@ -120,6 +178,39 @@ impl PerCpu {
             tlb_sync_ticks_total: AtomicUsize::new(0),
             tlb_sync_ticks_max: AtomicUsize::new(0),
             tlb_sync_failures: AtomicUsize::new(0),
+            #[cfg(feature = "perf_stats")]
+            tlb_sync_ticks_by_kind_total: [const { AtomicUsize::new(0) };
+                TLB_SHOOTDOWN_KIND_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_sync_ticks_by_kind_max: [const { AtomicUsize::new(0) };
+                TLB_SHOOTDOWN_KIND_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_calls: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_ticks: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_pages: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            tlb_rfence_bucket_targets: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_calls: [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_targets: [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_ticks_total: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_ticks_max: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_calls: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_ticks: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_bucket_targets: [const { AtomicUsize::new(0) }; TLB_RFENCE_BUCKET_COUNT],
+            #[cfg(feature = "perf_stats")]
+            kernel_tlb_reason_bucket_calls: [const { AtomicUsize::new(0) };
+                KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
             memory_barrier_request: AtomicUsize::new(0),
             memory_barrier_ack: AtomicUsize::new(0),
             pending_ipi: AtomicU32::new(0),
@@ -173,6 +264,43 @@ pub(crate) struct CpuDiagnostics {
     pub(crate) ipi_reasons_published: [usize; IPI_REASON_COUNT],
     pub(crate) ipi_reasons_consumed: [usize; IPI_REASON_COUNT],
     pub(crate) task: crate::task::processor::CpuTaskDiagnostics,
+}
+
+/// 全 CPU 远端 TLB 同步计数的无锁聚合快照。
+///
+/// 这些字段只用于诊断导出；快照期间各 CPU 仍可更新，因此不同字段之间不是
+/// 事务一致的。`sync_ticks_*` 使用 [`crate::hal::get_time`] 的原始 timebase tick。
+#[derive(Default)]
+pub(crate) struct TlbDiagnostics {
+    pub(crate) kernel_full: usize,
+    pub(crate) user_full: usize,
+    pub(crate) user_range_firmware: usize,
+    pub(crate) user_range_ipi: usize,
+    pub(crate) user_range_fallback: usize,
+    pub(crate) user_range_pages: usize,
+    pub(crate) remote_targets: usize,
+    pub(crate) sync_ticks_total: usize,
+    pub(crate) sync_ticks_max: usize,
+    pub(crate) sync_failures: usize,
+    pub(crate) sync_ticks_by_kind_total: [usize; TLB_SHOOTDOWN_KIND_COUNT],
+    pub(crate) sync_ticks_by_kind_max: [usize; TLB_SHOOTDOWN_KIND_COUNT],
+    pub(crate) rfence_bucket_calls: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_ticks: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_pages: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) rfence_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_reason_calls: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_targets: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_ticks_total: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_reason_ticks_max: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_bucket_calls: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_bucket_ticks: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_bucket_targets: [usize; TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_reason_bucket_calls:
+        [usize; KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT],
+    pub(crate) kernel_deferred_reason_requests: [usize; KERNEL_TLB_REASON_COUNT],
+    pub(crate) kernel_deferred_flushes: usize,
+    pub(crate) kernel_deferred_ticks_total: usize,
+    pub(crate) kernel_deferred_ticks_max: usize,
 }
 
 /// 一次远端“ASID + 有界连续区间”失效的无锁共享槽。
@@ -351,9 +479,31 @@ static PER_CPUS: [PerCpu; MAX_CPUS] = [
     PerCpu::new(15),
 ];
 
-// build.rs 会拒绝除单字节字符串 1/2/4/8 之外的构建参数。
+/// 任务映射发布改由目标 CPU 在 context switch 前本地确认时的诊断。
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_REASON_REQUESTS: [AtomicUsize; KERNEL_TLB_REASON_COUNT] =
+    [const { AtomicUsize::new(0) }; KERNEL_TLB_REASON_COUNT];
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_FLUSHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_stats")]
+static KERNEL_TLB_DEFERRED_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
+
+const fn parse_configured_cpu_count(value: &[u8]) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < value.len() {
+        count = count * 10 + (value[index] - b'0') as usize;
+        index += 1;
+    }
+    count
+}
+
+// build.rs 会拒绝架构构建合同之外的参数，因此这里可以无分支解析十进制值。
 // FDT `/cpus` 探测失败（如 LA64 静态板级）时作为运行时 CPU 数的兜底值。
-const CONFIGURED_CPU_COUNT: usize = (env!("MANGO_CORE_NUM").as_bytes()[0] - b'0') as usize;
+const CONFIGURED_CPU_COUNT: usize =
+    parse_configured_cpu_count(env!("MANGO_CORE_NUM").as_bytes());
 
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
@@ -363,6 +513,11 @@ const STOP_TIMEOUT_SECONDS: usize = 1;
 // those protocols, but give this sequence/ack protocol its own budget so a
 // slow emulated vCPU is not mistaken for a lost mapping publication.
 const KERNEL_TLB_TIMEOUT_SECONDS: usize = 5;
+// User shootdowns use the same level-triggered mailbox protocol as kernel
+// shootdowns.  Under MTTCG a target vCPU can retain the published reason while
+// its one-shot hardware doorbell is coalesced, so allow delivery retries before
+// treating a still-live CPU as a correctness failure.
+const USER_TLB_TIMEOUT_SECONDS: usize = 5;
 const UNCLAIMED_BOOT_HARDWARE_ID: usize = usize::MAX;
 
 /// CPU0 等待 AP 停止时唯一可能返回的错误。
@@ -416,11 +571,32 @@ pub(crate) enum UserTlbSyncError {
 /// 五个分支互斥，避免把“原生全刷”和“精准请求退化为全刷”混在同一计数里。
 #[derive(Clone, Copy)]
 enum TlbShootdownKind {
-    KernelFull,
+    KernelFull { reason: KernelTlbSyncReason },
     UserFull,
     UserRangeFirmware { pages: usize },
     UserRangeIpi { pages: usize },
     UserRangeFallback,
+}
+
+#[cfg(feature = "perf_stats")]
+impl TlbShootdownKind {
+    const fn index(self) -> usize {
+        match self {
+            Self::KernelFull { .. } => 0,
+            Self::UserFull => 1,
+            Self::UserRangeFirmware { .. } => 2,
+            Self::UserRangeIpi { .. } => 3,
+            Self::UserRangeFallback => 4,
+        }
+    }
+}
+
+#[cfg(feature = "perf_stats")]
+fn tlb_latency_bucket(elapsed: usize) -> usize {
+    TLB_RFENCE_BUCKET_UPPER_TICKS
+        .iter()
+        .position(|upper| elapsed <= *upper)
+        .unwrap_or(TLB_RFENCE_BUCKET_COUNT - 1)
 }
 
 /// 在发起 CPU 记录一轮远端 TLB 同步的最终结果。
@@ -435,7 +611,10 @@ fn record_tlb_shootdown(
     debug_assert_ne!(remote_targets, 0);
     let local = &PER_CPUS[self::cpu_id()];
     match kind {
-        TlbShootdownKind::KernelFull => &local.tlb_kernel_full,
+        TlbShootdownKind::KernelFull { reason } => {
+            let _ = reason;
+            &local.tlb_kernel_full
+        }
         TlbShootdownKind::UserFull => &local.tlb_user_full,
         TlbShootdownKind::UserRangeFirmware { pages } => {
             local
@@ -453,9 +632,10 @@ fn record_tlb_shootdown(
     }
     .fetch_add(1, Ordering::Relaxed);
 
+    let remote_target_count = remote_targets.count_ones() as usize;
     local
         .tlb_remote_targets
-        .fetch_add(remote_targets.count_ones() as usize, Ordering::Relaxed);
+        .fetch_add(remote_target_count, Ordering::Relaxed);
     let elapsed = crate::hal::get_time().wrapping_sub(started_at);
     local
         .tlb_sync_ticks_total
@@ -466,7 +646,114 @@ fn record_tlb_shootdown(
     if failed {
         local.tlb_sync_failures.fetch_add(1, Ordering::Relaxed);
     }
+
+    #[cfg(feature = "perf_stats")]
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        let kind_index = kind.index();
+        local.tlb_sync_ticks_by_kind_total[kind_index].fetch_add(elapsed, Ordering::Relaxed);
+        local.tlb_sync_ticks_by_kind_max[kind_index].fetch_max(elapsed, Ordering::Relaxed);
+        if let TlbShootdownKind::UserRangeFirmware { pages } = kind {
+            let bucket = tlb_latency_bucket(elapsed);
+            local.tlb_rfence_bucket_calls[bucket].fetch_add(1, Ordering::Relaxed);
+            local.tlb_rfence_bucket_ticks[bucket].fetch_add(elapsed, Ordering::Relaxed);
+            local.tlb_rfence_bucket_pages[bucket].fetch_add(pages, Ordering::Relaxed);
+            local.tlb_rfence_bucket_targets[bucket]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+        }
+        if let TlbShootdownKind::KernelFull { reason } = kind {
+            let reason_index = reason.index();
+            let bucket = tlb_latency_bucket(elapsed);
+            local.kernel_tlb_reason_calls[reason_index].fetch_add(1, Ordering::Relaxed);
+            local.kernel_tlb_reason_targets[reason_index]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+            local.kernel_tlb_reason_ticks_total[reason_index]
+                .fetch_add(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_reason_ticks_max[reason_index].fetch_max(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_bucket_calls[bucket].fetch_add(1, Ordering::Relaxed);
+            local.kernel_tlb_bucket_ticks[bucket].fetch_add(elapsed, Ordering::Relaxed);
+            local.kernel_tlb_bucket_targets[bucket]
+                .fetch_add(remote_target_count, Ordering::Relaxed);
+            local.kernel_tlb_reason_bucket_calls
+                [reason_index * TLB_RFENCE_BUCKET_COUNT + bucket]
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
+
+/// kernel-global shootdown 的上层触发原因；只影响诊断，不改变同步协议。
+#[derive(Clone, Copy)]
+pub(crate) enum KernelTlbSyncReason {
+    TaskPublish,
+    TaskMigration,
+    MappingRetire,
+}
+
+#[cfg(feature = "perf_stats")]
+impl KernelTlbSyncReason {
+    const fn index(self) -> usize {
+        match self {
+            Self::TaskPublish => 0,
+            Self::TaskMigration => 1,
+            Self::MappingRetire => 2,
+        }
+    }
+}
+
+/// 双架构默认把远端任务映射确认推迟到目标 CPU 的切换安全点。
+///
+/// 生产路径对 RV64 与 LA64 都是编译期常量 `true`：新内核栈映射的可见性由
+/// 目标 CPU 在 idle 栈上的 flush-before-switch 保证，发布方不再等待远端 IPI
+/// ack。LA64 原 eager 路径在官方 12 核评测中复现了 `kernel_tlb_request` 单
+/// 请求 5 秒未 ack 的 panic（`task/manager.rs` publish 路径），与 RV8 曾观测
+/// 到的 2.8 秒级 ack 长尾同源（MTTCG 远端 hart 唤醒尾部），因此 LA64 也切到
+/// deferred。`perf_diag` 可用 `mango.rv.kernel_task_sync` /
+/// `mango.la.kernel_task_sync` 显式指定 `eager` 回到旧同步等待协议做 A/B；
+/// 全 CPU 的 kernel mapping retire 不经过本开关，仍保持同步等待。
+#[cfg(feature = "perf_diag")]
+pub(crate) fn kernel_task_sync_deferred_enabled() -> bool {
+    static ENABLED: spin::Once<bool> = spin::Once::new();
+    *ENABLED.call_once(|| {
+        let mut enabled = true;
+        for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+            match arg {
+                "mango.rv.kernel_task_sync=eager" => enabled = false,
+                "mango.rv.kernel_task_sync=deferred" => enabled = true,
+                "mango.la.kernel_task_sync=eager" => enabled = false,
+                "mango.la.kernel_task_sync=deferred" => enabled = true,
+                _ => {}
+            }
+        }
+        enabled
+    })
+}
+
+#[cfg(not(feature = "perf_diag"))]
+pub(crate) const fn kernel_task_sync_deferred_enabled() -> bool {
+    true
+}
+
+#[cfg(feature = "perf_stats")]
+fn record_deferred_kernel_tlb_request(reason: KernelTlbSyncReason) {
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        KERNEL_TLB_DEFERRED_REASON_REQUESTS[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "perf_stats"))]
+fn record_deferred_kernel_tlb_request(_reason: KernelTlbSyncReason) {}
+
+#[cfg(feature = "perf_stats")]
+fn record_deferred_kernel_tlb_flush(started_at: usize) {
+    if crate::task::perf::stats_enabled_for(crate::task::perf::STATS_PROFILE_MEMORY_IO) {
+        let elapsed = crate::hal::get_time().wrapping_sub(started_at);
+        KERNEL_TLB_DEFERRED_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        KERNEL_TLB_DEFERRED_TICKS_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        KERNEL_TLB_DEFERRED_TICKS_MAX.fetch_max(elapsed, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "perf_stats"))]
+fn record_deferred_kernel_tlb_flush(_started_at: usize) {}
 
 /// 跨 CPU 完整内存屏障协议可能返回的错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -624,6 +911,160 @@ pub(crate) fn cpu_diagnostics(cpu_id: usize) -> CpuDiagnostics {
         }),
         task: cpu.task_state.read_diagnostics(),
     }
+}
+
+/// 汇总所有运行时 CPU 的远端 TLB 同步计数，不触碰任务锁或同步协议状态。
+pub(crate) fn tlb_diagnostics() -> TlbDiagnostics {
+    let mut total = TlbDiagnostics::default();
+    for cpu in PER_CPUS.iter().take(runtime_cpu_count()) {
+        total.kernel_full = total
+            .kernel_full
+            .wrapping_add(cpu.tlb_kernel_full.load(Ordering::Relaxed));
+        total.user_full = total
+            .user_full
+            .wrapping_add(cpu.tlb_user_full.load(Ordering::Relaxed));
+        total.user_range_firmware = total.user_range_firmware.wrapping_add(
+            cpu.tlb_user_range_firmware.load(Ordering::Relaxed),
+        );
+        total.user_range_ipi = total
+            .user_range_ipi
+            .wrapping_add(cpu.tlb_user_range_ipi.load(Ordering::Relaxed));
+        total.user_range_fallback = total.user_range_fallback.wrapping_add(
+            cpu.tlb_user_range_fallback.load(Ordering::Relaxed),
+        );
+        total.user_range_pages = total
+            .user_range_pages
+            .wrapping_add(cpu.tlb_user_range_pages.load(Ordering::Relaxed));
+        total.remote_targets = total
+            .remote_targets
+            .wrapping_add(cpu.tlb_remote_targets.load(Ordering::Relaxed));
+        total.sync_ticks_total = total
+            .sync_ticks_total
+            .wrapping_add(cpu.tlb_sync_ticks_total.load(Ordering::Relaxed));
+        total.sync_ticks_max = total
+            .sync_ticks_max
+            .max(cpu.tlb_sync_ticks_max.load(Ordering::Relaxed));
+        total.sync_failures = total
+            .sync_failures
+            .wrapping_add(cpu.tlb_sync_failures.load(Ordering::Relaxed));
+        #[cfg(feature = "perf_stats")]
+        for index in 0..TLB_SHOOTDOWN_KIND_COUNT {
+            total.sync_ticks_by_kind_total[index] = total.sync_ticks_by_kind_total[index]
+                .wrapping_add(cpu.tlb_sync_ticks_by_kind_total[index].load(Ordering::Relaxed));
+            total.sync_ticks_by_kind_max[index] = total.sync_ticks_by_kind_max[index]
+                .max(cpu.tlb_sync_ticks_by_kind_max[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..TLB_RFENCE_BUCKET_COUNT {
+            total.rfence_bucket_calls[index] = total.rfence_bucket_calls[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_calls[index].load(Ordering::Relaxed));
+            total.rfence_bucket_ticks[index] = total.rfence_bucket_ticks[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_ticks[index].load(Ordering::Relaxed));
+            total.rfence_bucket_pages[index] = total.rfence_bucket_pages[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_pages[index].load(Ordering::Relaxed));
+            total.rfence_bucket_targets[index] = total.rfence_bucket_targets[index]
+                .wrapping_add(cpu.tlb_rfence_bucket_targets[index].load(Ordering::Relaxed));
+            total.kernel_bucket_calls[index] = total.kernel_bucket_calls[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_calls[index].load(Ordering::Relaxed));
+            total.kernel_bucket_ticks[index] = total.kernel_bucket_ticks[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_ticks[index].load(Ordering::Relaxed));
+            total.kernel_bucket_targets[index] = total.kernel_bucket_targets[index]
+                .wrapping_add(cpu.kernel_tlb_bucket_targets[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..KERNEL_TLB_REASON_COUNT {
+            total.kernel_reason_calls[index] = total.kernel_reason_calls[index]
+                .wrapping_add(cpu.kernel_tlb_reason_calls[index].load(Ordering::Relaxed));
+            total.kernel_reason_targets[index] = total.kernel_reason_targets[index]
+                .wrapping_add(cpu.kernel_tlb_reason_targets[index].load(Ordering::Relaxed));
+            total.kernel_reason_ticks_total[index] = total.kernel_reason_ticks_total[index]
+                .wrapping_add(cpu.kernel_tlb_reason_ticks_total[index].load(Ordering::Relaxed));
+            total.kernel_reason_ticks_max[index] = total.kernel_reason_ticks_max[index]
+                .max(cpu.kernel_tlb_reason_ticks_max[index].load(Ordering::Relaxed));
+        }
+        #[cfg(feature = "perf_stats")]
+        for index in 0..KERNEL_TLB_REASON_COUNT * TLB_RFENCE_BUCKET_COUNT {
+            total.kernel_reason_bucket_calls[index] = total.kernel_reason_bucket_calls[index]
+                .wrapping_add(cpu.kernel_tlb_reason_bucket_calls[index].load(Ordering::Relaxed));
+        }
+    }
+    #[cfg(feature = "perf_stats")]
+    {
+        for index in 0..KERNEL_TLB_REASON_COUNT {
+            total.kernel_deferred_reason_requests[index] =
+                KERNEL_TLB_DEFERRED_REASON_REQUESTS[index].load(Ordering::Relaxed);
+        }
+        total.kernel_deferred_flushes = KERNEL_TLB_DEFERRED_FLUSHES.load(Ordering::Relaxed);
+        total.kernel_deferred_ticks_total =
+            KERNEL_TLB_DEFERRED_TICKS_TOTAL.load(Ordering::Relaxed);
+        total.kernel_deferred_ticks_max = KERNEL_TLB_DEFERRED_TICKS_MAX.load(Ordering::Relaxed);
+    }
+    total
+}
+
+/// 清零远端 TLB 同步诊断窗口；仅由 perf stats reset 路径调用。
+#[cfg(feature = "perf_stats")]
+pub(crate) fn reset_tlb_diagnostics() {
+    for cpu in PER_CPUS.iter().take(runtime_cpu_count()) {
+        cpu.tlb_kernel_full.store(0, Ordering::Relaxed);
+        cpu.tlb_user_full.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_firmware.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_ipi.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_fallback.store(0, Ordering::Relaxed);
+        cpu.tlb_user_range_pages.store(0, Ordering::Relaxed);
+        cpu.tlb_remote_targets.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_ticks_total.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_ticks_max.store(0, Ordering::Relaxed);
+        cpu.tlb_sync_failures.store(0, Ordering::Relaxed);
+        for counter in &cpu.tlb_sync_ticks_by_kind_total {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_sync_ticks_by_kind_max {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_ticks {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_pages {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.tlb_rfence_bucket_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_ticks_total {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_ticks_max {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_ticks {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_bucket_targets {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for counter in &cpu.kernel_tlb_reason_bucket_calls {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+    for counter in &KERNEL_TLB_DEFERRED_REASON_REQUESTS {
+        counter.store(0, Ordering::Relaxed);
+    }
+    KERNEL_TLB_DEFERRED_FLUSHES.store(0, Ordering::Relaxed);
+    KERNEL_TLB_DEFERRED_TICKS_TOTAL.store(0, Ordering::Relaxed);
+    KERNEL_TLB_DEFERRED_TICKS_MAX.store(0, Ordering::Relaxed);
 }
 
 /// 向一组 online CPU 发布同一个幂等 reason，再逐个触发硬件 doorbell。
@@ -1001,6 +1442,7 @@ pub(crate) fn synchronize_memory(targets: usize) -> Result<(), MemoryBarrierErro
 fn synchronize_kernel_mapping_mask(
     targets: usize,
     stopped_is_ack: bool,
+    reason: KernelTlbSyncReason,
 ) -> Result<(), KernelTlbSyncError> {
     let configured = expected_online_mask();
     if targets == 0 || targets & !configured != 0 {
@@ -1109,7 +1551,7 @@ fn synchronize_kernel_mapping_mask(
         spin_loop();
     };
     record_tlb_shootdown(
-        TlbShootdownKind::KernelFull,
+        TlbShootdownKind::KernelFull { reason },
         remote,
         started_at,
         result.is_err(),
@@ -1117,18 +1559,83 @@ fn synchronize_kernel_mapping_mask(
     result
 }
 
-/// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
-pub(crate) fn synchronize_kernel_mapping(cpu_id: usize) -> Result<(), KernelTlbSyncError> {
+/// 把任务所需的 kernel-global 映射序号发布给目标 CPU，但不等待远端 ack。
+///
+/// request 的 AcqRel RMW 位于 PTE 写入之后、runqueue 入队之前。目标 CPU 只有在
+/// 成功取得该任务后才会进入 [`service_deferred_kernel_tlb`]，其 Acquire 快照和
+/// 本地失效共同保证新内核栈在 `__switch` 改写 SP 前立即可见。
+fn defer_kernel_mapping_for_task(
+    cpu_id: usize,
+    reason: KernelTlbSyncReason,
+) -> Result<(), KernelTlbSyncError> {
     if cpu_id >= runtime_cpu_count() {
         return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
     }
-    synchronize_kernel_mapping_mask(1usize << cpu_id, false)
+    let target = 1usize << cpu_id;
+    let online = online_cpu_mask();
+    let available = online & !stopped_cpu_mask();
+    if target & online == 0 || target & available == 0 {
+        return Err(KernelTlbSyncError::UnavailableTargets {
+            targets: target,
+            available,
+        });
+    }
+    let sequence = PER_CPUS[cpu_id]
+        .kernel_tlb_request
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    assert_ne!(sequence, 0, "deferred kernel TLB sequence wrapped");
+    record_deferred_kernel_tlb_request(reason);
+    Ok(())
+}
+
+/// 在目标 CPU 的 idle 栈上、切入已取得任务前完成延迟的 kernel-global 失效。
+///
+/// Svvptc 允许 invalid→valid 偶发一次额外页故障，但新内核栈无法安全承受首次
+/// 压栈时的 spurious fault，因此这里始终保留本地 full flush，不做无 fence 旁路。
+pub(crate) fn service_deferred_kernel_tlb() -> bool {
+    if !kernel_task_sync_deferred_enabled() {
+        return false;
+    }
+    let local = &PER_CPUS[self::cpu_id()];
+    let sequence = local.kernel_tlb_request.load(Ordering::Acquire);
+    if local.kernel_tlb_ack.load(Ordering::Acquire) >= sequence {
+        return false;
+    }
+    let started_at = crate::hal::get_time();
+    crate::hal::kernel_tlb_invalidate();
+    local.kernel_tlb_ack.store(sequence, Ordering::Release);
+    record_deferred_kernel_tlb_flush(started_at);
+    true
+}
+
+/// 在任务入队前，把新建的 kernel-global 映射同步到指定 CPU。
+pub(crate) fn synchronize_kernel_mapping(
+    cpu_id: usize,
+    reason: KernelTlbSyncReason,
+) -> Result<(), KernelTlbSyncError> {
+    if cpu_id >= runtime_cpu_count() {
+        return Err(KernelTlbSyncError::InvalidCpu { cpu_id });
+    }
+    // Work stealing already runs on the destination CPU while still using its
+    // idle stack. Keep that local case immediate; deferral only replaces the
+    // remote publisher's IPI/ack wait.
+    if cpu_id != self::cpu_id()
+        && kernel_task_sync_deferred_enabled()
+        && matches!(
+            reason,
+            KernelTlbSyncReason::TaskPublish | KernelTlbSyncReason::TaskMigration
+        )
+    {
+        return defer_kernel_mapping_for_task(cpu_id, reason);
+    }
+    synchronize_kernel_mapping_mask(1usize << cpu_id, false, reason)
 }
 
 /// 撤销共享内核映射后，使所有仍可能执行内核代码的 CPU 完成失效。
 pub(crate) fn synchronize_kernel_mapping_all() -> Result<(), KernelTlbSyncError> {
     let targets = online_cpu_mask() & !stopped_cpu_mask();
-    synchronize_kernel_mapping_mask(targets, true)
+    synchronize_kernel_mapping_mask(targets, true, KernelTlbSyncReason::MappingRetire)
 }
 
 /// 让调用方选定的 CPU 集合同步完成用户 TLB 失效。
@@ -1232,14 +1739,17 @@ pub(crate) fn synchronize_user_tlb(
                     context.mark_cpu_observed(generation, self::cpu_id());
                 }
             }
-            let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
+            let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_RANGE_SYNC).err();
             let _irq_guard = IpiWaitIrqGuard::enter();
-            let deadline = crate::hal::get_time().saturating_add(
-                crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS),
-            );
+            let clock_freq = crate::hal::get_clock_freq();
+            let deadline = crate::hal::get_time()
+                .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+            let kick_interval = (clock_freq / 100).max(1);
+            let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
             loop {
                 let acknowledged = slot.acknowledged();
-                let missing = remote & !stopped_cpu_mask() & !acknowledged;
+                let stopped = stopped_cpu_mask();
+                let missing = remote & !stopped & !acknowledged;
                 if missing == 0 {
                     slot.release();
                     record_tlb_shootdown(
@@ -1250,7 +1760,19 @@ pub(crate) fn synchronize_user_tlb(
                     );
                     return Ok(());
                 }
-                if crate::hal::get_time() >= deadline {
+                let now = crate::hal::get_time();
+                if now >= next_kick {
+                    // The slot payload and target bits remain unchanged until
+                    // every target acks. Re-publishing the idempotent reason
+                    // only repairs a delayed/coalesced LA64 QEMU doorbell.
+                    if let Err(error) = send_ipi_mask(missing, IpiReason::USER_TLB_RANGE_SYNC) {
+                        if send_error.is_none() {
+                            send_error = Some(error);
+                        }
+                    }
+                    next_kick = now.saturating_add(kick_interval);
+                }
+                if now >= deadline {
                     // 不释放槽：迟到的目标只能看到本轮原 payload，不能把 stale
                     // doorbell 错配到后续请求。正常 TlbFlush 会在返回错误后 fail-stop。
                     record_tlb_shootdown(
@@ -1285,13 +1807,16 @@ pub(crate) fn synchronize_user_tlb(
     if live_targets & current_bit != 0 {
         crate::hal::user_tlb_invalidate();
     }
-    let send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
+    let mut send_error = send_ipi_mask(remote, IpiReason::USER_TLB_SYNC).err();
 
     // 等待者本身也可能同时成为另一轮 user/kernel shootdown 的目标。临时开放
     // 本地中断后双方都能进入只做原子操作的 handler，不会形成 ack 环形等待。
     let _irq_guard = IpiWaitIrqGuard::enter();
+    let clock_freq = crate::hal::get_clock_freq();
     let deadline = crate::hal::get_time()
-        .saturating_add(crate::hal::get_clock_freq().saturating_mul(STOP_TIMEOUT_SECONDS));
+        .saturating_add(clock_freq.saturating_mul(USER_TLB_TIMEOUT_SECONDS));
+    let kick_interval = (clock_freq / 100).max(1);
+    let mut next_kick = crate::hal::get_time().saturating_add(kick_interval);
     let result = loop {
         let stopped = stopped_cpu_mask();
         let mut missing = None;
@@ -1308,7 +1833,29 @@ pub(crate) fn synchronize_user_tlb(
         let Some((cpu_id, observed)) = missing else {
             break Ok(());
         };
-        if crate::hal::get_time() >= deadline {
+        let now = crate::hal::get_time();
+        if now >= next_kick {
+            let mut kick_targets = 0usize;
+            for target in 0..runtime_cpu_count() {
+                let bit = 1usize << target;
+                if remote & bit != 0
+                    && stopped & bit == 0
+                    && PER_CPUS[target].user_tlb_ack.load(Ordering::Acquire)
+                        < expected[target]
+                {
+                    kick_targets |= bit;
+                }
+            }
+            if kick_targets != 0 {
+                if let Err(error) = send_ipi_mask(kick_targets, IpiReason::USER_TLB_SYNC) {
+                    if send_error.is_none() {
+                        send_error = Some(error);
+                    }
+                }
+            }
+            next_kick = now.saturating_add(kick_interval);
+        }
+        if now >= deadline {
             break Err(UserTlbSyncError::Timeout {
                 cpu_id,
                 expected: expected[cpu_id],
@@ -1361,6 +1908,18 @@ pub(crate) fn local_sched_tick_deadline() -> u64 {
     PER_CPUS[self::cpu_id()]
         .sched_tick_deadline_ns
         .load(Ordering::Acquire)
+}
+
+/// Restart the current CPU's scheduler tick after an idle timer park.
+///
+/// AP idle deliberately quiesces its one-shot timer.  The next runnable task
+/// must receive a fresh full quantum rather than inheriting the stale deadline
+/// from before the CPU entered WFI.
+pub(crate) fn restart_local_sched_tick(deadline_ns: u64) {
+    assert_ne!(deadline_ns, 0, "scheduler tick deadline cannot be zero");
+    PER_CPUS[self::cpu_id()]
+        .sched_tick_deadline_ns
+        .store(deadline_ns, Ordering::Release);
 }
 
 /// 若本地调度 tick 已到期，则按绝对时间推进到下一周期。
@@ -1501,8 +2060,8 @@ pub(crate) fn schedulers_released() -> bool {
 /// 发布 scheduler-ready，并等待所有 AP 进入各自的本地调度循环。
 ///
 /// 该函数必须在 VFS、任务 registry 等 kernel-only 任务依赖的全局对象完成
-/// 初始化后调用。普通用户任务仍默认首次发布到 CPU0；B29 的受控迁移不能据此
-/// 外推为已经解除用户 MM 与共享子系统限制。
+/// 初始化后调用。PID1 仍首次发布到 CPU0；正式 normal 用户态会在 fork/exec
+/// test-runner 前扩展 affinity，其余精确目标任务继续服从显式 mask。
 pub fn release_secondary_schedulers() {
     assert_eq!(self::cpu_id(), BOOT_CPU_ID);
     let online = online_cpu_mask();

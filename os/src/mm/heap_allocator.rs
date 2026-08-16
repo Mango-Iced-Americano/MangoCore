@@ -265,6 +265,7 @@ impl KernelAllocator {
 // returned pointers come from the `HEAP_SPACE` region given exclusively to it.
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        crate::task::perf::record_heap_alloc_request(layout.size());
         for _ in 0..3 {
             let lock_start = memory_perf_time_now();
             let mut guard = self.inner.lock();
@@ -282,11 +283,13 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 crate::task::perf::record_heap_alloc();
                 crate::task::perf::record_heap_alloc_cost(elapsed);
                 crate::task::perf::record_heap_alloc_path(slab_class);
+                crate::task::perf::record_heap_slab_result(result.new_page);
                 let charge = result.charge;
                 let ptr = result.ptr;
                 crate::task::perf::record_heap_lock(
                     lock_acquired.wrapping_sub(lock_start),
                     memory_perf_time_now().wrapping_sub(lock_acquired),
+                    true,
                 );
                 drop(guard);
                 self.record_charge(charge);
@@ -295,6 +298,10 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 #[cfg(feature = "heap_trace")]
                 crate::mm::heap_trace::probe_49152_alloc(layout);
                 return ptr.as_ptr();
+            }
+
+            if slab_class.is_some() {
+                crate::task::perf::record_heap_slab_fallback();
             }
 
             // Direct buddy allocation for objects too large for slab.
@@ -308,6 +315,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     crate::task::perf::record_heap_lock(
                         lock_acquired.wrapping_sub(lock_start),
                         memory_perf_time_now().wrapping_sub(lock_acquired),
+                        true,
                     );
                     drop(guard);
                     self.record_charge(charge);
@@ -322,17 +330,22 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     crate::task::perf::record_heap_alloc();
                     crate::task::perf::record_heap_alloc_cost(elapsed);
                     crate::task::perf::record_heap_alloc_path(None);
+                    crate::task::perf::record_heap_direct_buddy_failure();
                     crate::task::perf::record_heap_lock(
                         lock_acquired.wrapping_sub(lock_start),
                         memory_perf_time_now().wrapping_sub(lock_acquired),
+                        true,
                     );
                     drop(guard);
-                    if !self.recover_for(layout) {
+                    let recovered = self.recover_for(layout);
+                    crate::task::perf::record_heap_recovery(recovered);
+                    if !recovered {
                         break;
                     }
                 }
             }
         }
+        crate::task::perf::record_heap_final_failure();
         core::ptr::null_mut()
     }
 
@@ -365,6 +378,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
             crate::task::perf::record_heap_lock(
                 lock_acquired.wrapping_sub(lock_start),
                 memory_perf_time_now().wrapping_sub(lock_acquired),
+                false,
             );
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);
@@ -376,6 +390,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
             crate::task::perf::record_heap_lock(
                 lock_acquired.wrapping_sub(lock_start),
                 memory_perf_time_now().wrapping_sub(lock_acquired),
+                false,
             );
             drop(guard);
             KERNEL_HEAP_CURRENT_BYTES.fetch_sub(charge, Ordering::Relaxed);

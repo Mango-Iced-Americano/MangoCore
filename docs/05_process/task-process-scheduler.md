@@ -3,7 +3,7 @@ title: "任务、进程与调度器协作路径"
 category: process
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-13
 tags: [process, task, scheduler, integration]
 ---
 
@@ -83,7 +83,8 @@ pub struct CpuTaskState {
 }
 ```
 
-普通用户任务默认仍限制在 CPU0，但 AP 已能执行受控内核/用户任务、
+底层新 TCB 默认使用 CPU0-only 安全 mask；正式 normal 启动由 PID1 在派生
+test-runner 前扩为全部在线 CPU，fork/exec 后的普通用户任务因此可在 AP 执行、
 远程唤醒和迁移。退出 TCB 的调度 Arc 不再进入全局 registry，而是由退出
 CPU 切回 idle 栈后本地回收。
 

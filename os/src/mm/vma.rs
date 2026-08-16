@@ -11,6 +11,7 @@
 
 use core::fmt::Debug;
 
+use super::filemap::ElfLazyBacking;
 use super::frame_store::{Frame, FrameState, VmPageStore};
 use super::page_table::PageTable;
 use super::user_mapper::UserMapper;
@@ -21,6 +22,7 @@ use super::{AddressSpace, FaultAccess, MemoryError, PageTableImpl};
 use super::{PhysPageNum, VirtAddr, VirtPageNum};
 use crate::fs::vfs::IndexNode;
 use crate::mm::frame_allocator::frame_alloc_uninit;
+use crate::mm::frame_allocator::try_frame_alloc_prezeroed;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -34,6 +36,7 @@ impl Debug for Vma {
                 "map_file",
                 &if self.map_file.is_some() { "yes" } else { "no" },
             )
+            .field("elf_lazy", &self.elf_lazy.is_some())
             .field("wipe_on_fork", &self.wipe_on_fork)
             .field("dont_fork", &self.dont_fork)
             .field("fork_inherited", &self.fork_inherited)
@@ -50,6 +53,10 @@ pub struct Vma {
     /// Permissions which are the or of RWXU, where U stands for user.
     pub map_perm: MapPermission,
     pub map_file: Option<Arc<dyn IndexNode>>,
+    /// Immutable PT_LOAD recipe for demand-paged executable VMAs. This is
+    /// separate from ordinary mmap file backing because resident ELF pages are
+    /// private frames assembled from potentially overlapping segments.
+    pub(super) elf_lazy: Option<Arc<ElfLazyBacking>>,
     /// Offset into the file where this VMA starts (in bytes).
     /// For anonymous mappings, this is always 0.
     pub map_file_offset: usize,
@@ -144,6 +151,7 @@ impl Vma {
             inner,
             map_perm: self.map_perm,
             map_file: self.map_file.clone(),
+            elf_lazy: self.elf_lazy.clone(),
             map_file_offset: self.map_file_offset,
             may_write: self.may_write,
             write_sealed: self.write_sealed,
@@ -178,6 +186,7 @@ impl Vma {
             inner,
             map_perm,
             map_file,
+            elf_lazy: None,
             map_file_offset,
             may_write: true,
             write_sealed: false,
@@ -198,6 +207,7 @@ impl Vma {
             )),
             map_perm: another.map_perm,
             map_file: another.map_file.clone(),
+            elf_lazy: another.elf_lazy.clone(),
             map_file_offset: another.map_file_offset,
             may_write: another.may_write,
             write_sealed: another.write_sealed,
@@ -256,9 +266,20 @@ impl Vma {
         mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
@@ -271,9 +292,20 @@ impl Vma {
         mapper: &mut UserMapper<'_, T>,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         if let Err(err) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
             self.inner.remove_in_memory(&vpn);
             return Err(err);
@@ -281,13 +313,76 @@ impl Vma {
         Ok(ppn)
     }
 
+    /// Best-effort map of one already-zeroed speculative anonymous page.
+    ///
+    /// `Ok(None)` means the bounded prezero pool is empty. This path never
+    /// falls back to synchronous zeroing or OOM recovery.
+    pub(super) fn try_map_one_prezeroed_unchecked<T: PageTable>(
+        &mut self,
+        mapper: &mut UserMapper<'_, T>,
+        vpn: VirtPageNum,
+    ) -> Result<Option<PhysPageNum>, MemoryError> {
+        let Some(frame) = try_frame_alloc_prezeroed() else {
+            return Ok(None);
+        };
+        let ppn = frame.ppn;
+        self.inner.alloc_in_memory(vpn, frame)?;
+        if let Err(error) = self.map_page_with_perm(mapper, vpn, ppn, self.map_perm) {
+            self.inner.remove_in_memory(&vpn);
+            return Err(error);
+        }
+        Ok(Some(ppn))
+    }
+
     pub fn alloc_one_zeroed_unmapped(
         &mut self,
         vpn: VirtPageNum,
     ) -> Result<PhysPageNum, MemoryError> {
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
         let frame = frame_alloc().ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
         let ppn = frame.ppn;
-        self.inner.alloc_in_memory(vpn, frame)?;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
+        Ok(ppn)
+    }
+
+    /// Allocate one frame without clearing it and retain it in this VMA without
+    /// publishing a user PTE.
+    ///
+    /// # Safety
+    ///
+    /// The caller must completely initialize the whole page before installing
+    /// a PTE or otherwise exposing the frame to a reader. On every failure path
+    /// it must remove the unpublished frame with [`Self::remove_unmapped_frame`].
+    pub(super) unsafe fn alloc_one_uninit_unmapped(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Result<PhysPageNum, MemoryError> {
+        // Safety: this function preserves the uninitialized-frame contract for
+        // its caller and does not publish a PTE.
+        let alloc_started = crate::task::perf::perf_memory_io_time_now();
+        let frame = unsafe { frame_alloc_uninit() }.ok_or(MemoryError::OutOfMemory)?;
+        crate::task::perf::record_pagefault_stage(
+            3,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(alloc_started),
+        );
+        let ppn = frame.ppn;
+        let store_started = crate::task::perf::perf_memory_io_time_now();
+        let stored = self.inner.alloc_in_memory(vpn, frame);
+        crate::task::perf::record_pagefault_stage(
+            7,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(store_started),
+        );
+        stored?;
         Ok(ppn)
     }
 
@@ -808,6 +903,7 @@ impl Vma {
             inner: second_frames,
             map_perm: self.map_perm,
             map_file: second_file,
+            elf_lazy: self.elf_lazy.clone(),
             map_file_offset: second_offset,
             may_write: self.may_write,
             write_sealed: self.write_sealed,
@@ -935,6 +1031,7 @@ impl Vma {
 pub(super) enum VmAreaKind {
     Anonymous,
     FileBacked,
+    ElfLazy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -975,7 +1072,9 @@ impl Vma {
     }
 
     pub(super) fn vm_kind(&self) -> VmAreaKind {
-        if self.map_file.is_some() {
+        if self.elf_lazy.is_some() {
+            VmAreaKind::ElfLazy
+        } else if self.map_file.is_some() {
             VmAreaKind::FileBacked
         } else {
             VmAreaKind::Anonymous
@@ -1039,6 +1138,10 @@ impl Vma {
 
     pub(super) fn vm_file(&self) -> Option<Arc<dyn IndexNode>> {
         self.map_file.clone()
+    }
+
+    pub(super) fn vm_elf_backing(&self) -> Option<Arc<ElfLazyBacking>> {
+        self.elf_lazy.clone()
     }
 
     pub(super) fn vm_file_offset(&self, vpn: VirtPageNum) -> Result<usize, MemoryError> {

@@ -177,15 +177,15 @@ macro_rules! writable_data_inode_mutations {
 
         fn sync(&self) -> Result<(), crate::utils::error::SyscallErr> {
             let fs = self.fs_arc()?;
-            if let Some(cache) = self.page_cache() {
-                cache.writeback_all_before_io_gate()?;
-                return cache.with_io_gate(|| {
-                    let generation = self
-                        .lifetime
-                        .size_generation
-                        .load(core::sync::atomic::Ordering::Acquire);
-                    let id = u32::try_from(self.key.inode_id())
-                        .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
+            let id = u32::try_from(self.key.inode_id())
+                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
+            let sync_metadata = || {
+                let generation = self
+                    .lifetime
+                    .size_generation
+                    .load(core::sync::atomic::Ordering::Acquire);
+                let timestamps = self.lifetime.dirty_timestamps();
+                if generation != 0 {
                     let size = self
                         .lifetime
                         .logical_size
@@ -193,9 +193,19 @@ macro_rules! writable_data_inode_mutations {
                     fs.run_metadata_operation(|| {
                         fs.inner().commit_inode_size(id, size as u64, None)
                     })?;
-                    let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
-                    fs.flush_device()?;
-                    if self
+                }
+                let committed_timestamps = if timestamps.is_some() {
+                    fs.commit_lifetime_timestamps(id, &self.lifetime)?
+                } else {
+                    None
+                };
+
+                // The generation and timestamp snapshots remain dirty until
+                // every preceding data/metadata write crosses a successful
+                // durability boundary. A failed flush must be retryable.
+                fs.flush_device()?;
+                if generation != 0
+                    && self
                         .lifetime
                         .size_generation
                         .compare_exchange(
@@ -205,45 +215,19 @@ macro_rules! writable_data_inode_mutations {
                             core::sync::atomic::Ordering::Acquire,
                         )
                         .is_ok()
-                    {
-                        self.lifetime.release_dirty_page_cache();
-                    }
-                    if let Some(timestamps) = timestamps {
-                        self.lifetime.finish_timestamp_commit(timestamps);
-                    }
-                    Ok(())
-                });
+                {
+                    self.lifetime.release_dirty_page_cache();
+                }
+                if let Some(timestamps) = committed_timestamps {
+                    self.lifetime.finish_timestamp_commit(timestamps);
+                }
+                Ok(())
+            };
+            if let Some(cache) = self.page_cache() {
+                cache.writeback_all_before_io_gate()?;
+                return cache.with_io_gate(sync_metadata);
             }
-            let id = u32::try_from(self.key.inode_id())
-                .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            let generation = self
-                .lifetime
-                .size_generation
-                .load(core::sync::atomic::Ordering::Acquire);
-            let size = self
-                .lifetime
-                .logical_size
-                .load(core::sync::atomic::Ordering::Acquire);
-            fs.run_metadata_operation(|| fs.inner().commit_inode_size(id, size as u64, None))?;
-            let timestamps = fs.commit_lifetime_timestamps(id, &self.lifetime)?;
-            let generation_committed = self
-                .lifetime
-                .size_generation
-                .compare_exchange(
-                    generation,
-                    0,
-                    core::sync::atomic::Ordering::AcqRel,
-                    core::sync::atomic::Ordering::Acquire,
-                )
-                .is_ok();
-            fs.flush_device()?;
-            if generation_committed {
-                self.lifetime.release_dirty_page_cache();
-            }
-            if let Some(timestamps) = timestamps {
-                self.lifetime.finish_timestamp_commit(timestamps);
-            }
-            Ok(())
+            sync_metadata()
         }
 
         fn datasync(&self) -> Result<(), crate::utils::error::SyscallErr> {

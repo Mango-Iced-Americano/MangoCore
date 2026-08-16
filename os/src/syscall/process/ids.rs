@@ -285,9 +285,9 @@ pub fn sys_uname(buf: *mut u8) -> isize {
         release: field(b"5.10.0-1-la64"),
         version: field(b"#1 SMP blossom 5.10.0-1 (2025-01-10)"),
         #[cfg(feature = "riscv")]
-        machine: field(b"rv64"),
+        machine: field(b"riscv64"),
         #[cfg(feature = "loongarch64")]
-        machine: field(b"la64"),
+        machine: field(b"loongarch64"),
         domainname,
     };
 

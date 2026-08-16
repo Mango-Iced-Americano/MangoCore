@@ -21,6 +21,32 @@ server_run = False
 from run_qemu import run_qemu, run_qemu_loong
 
 
+class ArchConfigJob:
+    """Expose an architecture-local QEMU topology to the shared runner.
+
+    The platform launches RV64 and LA64 concurrently, while legacy run_qemu
+    consumes the scalar ``qemu.smp`` key from Job.get_config().  A shared Job
+    therefore cannot describe the formal 8/12 CPU topology without a race.
+    This read-only view copies the config per architecture and delegates every
+    other Job operation (logging, testcase state, and artifacts) unchanged.
+    """
+
+    def __init__(self, job: Job, arch: str):
+        self._job = job
+        self._arch = arch
+
+    def get_config(self):
+        config = dict(self._job.get_config())
+        formal_cpus = {"rv64": 8, "la64": 12}
+        config["qemu.smp"] = int(
+            config.get(f"qemu.smp.{self._arch}", formal_cpus[self._arch])
+        )
+        return config
+
+    def __getattr__(self, name):
+        return getattr(self._job, name)
+
+
 def pe(e: exec):
     loge(f"CMD: {e.cmd}\nOUT:\n{e.stdout}\nERR:\n{e.stderr}\nRETCODE:{e.returncode}")
 
@@ -186,10 +212,12 @@ def run(job: gg.Job, testcase: gg.TestCases.SingleTestCase):
 
     os.chdir(config['submit_dir'])
     logexec(f"cp {config['testcase_dir']}/sdcard-rv.img.gz sdcard-rv.img.gz")
-    trv = threading.Thread(target=run_qemu, args=(job, config["sbi_file"], "kernel-rv", "sdcard-rv.img", "os_serial_out_rv.txt"))
+    rv_job = ArchConfigJob(job, "rv64")
+    trv = threading.Thread(target=run_qemu, args=(rv_job, config["sbi_file"], "kernel-rv", "sdcard-rv.img", "os_serial_out_rv.txt"))
 
     logexec(f"cp {config['testcase_dir']}/sdcard-la.img.gz sdcard-la.img.gz")
-    tla = threading.Thread(target=run_qemu_loong, args=(job, config["sbi_file"], "kernel-la", "sdcard-la.img", "os_serial_out_la.txt"))
+    la_job = ArchConfigJob(job, "la64")
+    tla = threading.Thread(target=run_qemu_loong, args=(la_job, config["sbi_file"], "kernel-la", "sdcard-la.img", "os_serial_out_la.txt"))
 
     trv.start()
     tla.start()
@@ -437,4 +465,3 @@ if __name__ == '__main__':
     pdb.set_trace()
     result['rv'] = parse_serial_out_new_new("os_serial_out_rv.txt")
     
-

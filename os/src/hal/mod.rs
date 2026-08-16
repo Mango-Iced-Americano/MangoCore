@@ -27,6 +27,7 @@ pub use arch::remote_user_tlb_invalidate_range;
 pub use arch::reboot;
 pub use arch::tlb_invalidate;
 pub use arch::user_tlb_invalidate;
+pub use arch::local_user_fault_tlb_invalidate_page;
 pub use arch::user_tlb_invalidate_page;
 pub use arch::user_tlb_invalidate_range;
 #[cfg(feature = "loongarch64")]

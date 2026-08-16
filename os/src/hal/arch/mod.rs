@@ -30,7 +30,7 @@ pub use loongarch64::{
     },
     trap_cx_bottom_from_tid, user_hwcap, user_tlb_invalidate, user_tlb_invalidate_page,
     user_tlb_invalidate_range, ustack_bottom_from_tid, KernelPageTableImpl, KernelStack,
-    PageTableImpl, BLOCK_SZ,
+    PageTableImpl, BLOCK_SZ, local_user_fault_tlb_invalidate_page,
 };
 #[cfg(target_arch = "riscv64")]
 pub mod riscv;
@@ -51,7 +51,7 @@ pub use riscv::{
     sbi::{
         configure_runtime_console, console_flush, console_getchar, console_putchar,
         console_write_bytes, drain_runtime_console_rx, irq_enabled, local_irq_restore,
-        local_irq_save, machine_shutdown, init_runtime_console_rx, panic_console_write, set_timer,
+        local_irq_save, machine_shutdown, init_runtime_console_rx, panic_console_write,
         shutdown, take_runtime_console_rx_interrupt,
     },
     cpu_wait_for_interrupt, secondary_cpu_stop, send_ipi, start_secondary_cpu,
@@ -66,5 +66,5 @@ pub use riscv::{
         trap_return, UserContext, UserSignalMask,
     },
     user_hwcap, user_tlb_invalidate, user_tlb_invalidate_page, user_tlb_invalidate_range,
-    KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl,
+    KernelPageTableImpl, MachineContext, PageTableImpl, TrapImpl, local_user_fault_tlb_invalidate_page,
 };

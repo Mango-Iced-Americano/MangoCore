@@ -77,8 +77,9 @@ pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
 #[cfg(target_arch = "riscv64")]
 pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
     use crate::drivers::block::virtio_blk::VirtioHal;
-    #[cfg(feature = "block_virt_pci")]
-    use crate::drivers::block::virtio_blk_pci::VirtioHal;
+    // 熵源固定走 virtio-mmio 传输（QEMU virt 的 rng 挂在 mmio bus.2）；
+    // 块设备切换到 virtio-pci（block_virt_pci）时不改变该传输选择，因此
+    // 这里不得再导入 virtio_blk_pci::VirtioHal，避免与上方同名冲突。
     use crate::hal::device::DeviceManager;
     use alloc::vec::Vec;
     use core::ptr::NonNull;
@@ -107,7 +108,11 @@ pub fn fill_entropy(dst: &mut [u8]) -> Result<EntropySource, EntropyError> {
         if range.base % core::mem::align_of::<VirtIOHeader>() != 0 {
             continue;
         }
-        let Some(header) = NonNull::new(range.base as *mut VirtIOHeader) else {
+        let Some(header) = NonNull::new(
+            crate::mm::PhysAddr(range.base)
+                .direct_map_ptr()
+                .cast::<VirtIOHeader>(),
+        ) else {
             continue;
         };
         // SAFETY: [Categories 6 and 13 — aligned access and library contract]

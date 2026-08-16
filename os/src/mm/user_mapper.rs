@@ -25,6 +25,38 @@ pub(crate) struct UserMapper<'a, T: PageTable> {
     gather: &'a mut MmuGather,
 }
 
+/// 是否跳过 fresh map（invalid→valid）的 TLB 失效。
+///
+/// 默认按整机能力门控：所有 enabled CPU 的 FDT 都明确报告 Svvptc 时启用，
+/// 否则 fail-closed 保持既有 flush 语义；`perf_diag` 构建可用
+/// `mango.rv.fresh_map_flush=on/off` 显式覆盖做同镜像 A/B。
+/// QEMU TCG 的 softmmu TLB 不缓存“PTE 不存在”的负结果，每次隐式访问都
+/// 重走 guest 页表，因此启用后本地与远端都立即看到新 PTE；真硬件由
+/// Svvptc（或 do_page_fault 的 spurious-fault 快路）保证最终收敛。
+/// 破坏性更新（unmap/PPN 替换/权限收紧/页表层级回收）仍走 `record_change`。
+#[cfg(target_arch = "riscv64")]
+fn fresh_map_no_flush_enabled() -> bool {
+    static ENABLED: spin::Once<bool> = spin::Once::new();
+    *ENABLED.call_once(|| {
+        #[cfg(feature = "perf_diag")]
+        {
+            for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+                match arg {
+                    "mango.rv.fresh_map_flush=on" => return false,
+                    "mango.rv.fresh_map_flush=off" => return true,
+                    _ => {}
+                }
+            }
+        }
+        crate::hal::arch::riscv::platform_supports_svvptc()
+    })
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+fn fresh_map_no_flush_enabled() -> bool {
+    false
+}
+
 impl<'a, T: PageTable> UserMapper<'a, T> {
     /// 绑定当前地址空间的页表与 MMU 修改记录。
     pub(super) fn new(page_table: &'a mut T, gather: &'a mut MmuGather) -> Self {
@@ -161,8 +193,22 @@ impl<'a, T: PageTable> UserMapper<'a, T> {
         ppn: PhysPageNum,
         flags: MapPermission,
     ) -> MmResult<()> {
-        self.page_table.try_map_no_flush(vpn, ppn, flags)?;
-        self.gather.record_change(vpn);
+        let started = crate::task::perf::perf_memory_io_time_now();
+        let result = self.page_table.try_map_no_flush(vpn, ppn, flags);
+        crate::task::perf::record_pagefault_stage(
+            2,
+            crate::task::perf::perf_memory_io_time_now().wrapping_sub(started),
+        );
+        result?;
+        if fresh_map_no_flush_enabled() {
+            // fresh map 是严格 invalid→valid（已有 PTE 会被 try_map_no_flush
+            // 拒绝），按规范不需要 TLB 失效；见 fresh_map_no_flush_enabled 的
+            // 能力边界说明。本轮若已记录破坏性修改，range 仍非空，flush 照常。
+            crate::task::perf::record_fresh_map_outcome(true);
+        } else {
+            crate::task::perf::record_fresh_map_outcome(false);
+            self.gather.record_change(vpn);
+        }
         Ok(())
     }
 }

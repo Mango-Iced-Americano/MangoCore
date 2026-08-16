@@ -3,7 +3,7 @@ title: "启动与陷阱路径 (Boot and Trap Flow)"
 category: architecture
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-09
+last_updated: 2026-08-14
 tags: [architecture, boot, trap, syscall, smp]
 entry_points:
   - "os/src/main.rs"
@@ -14,6 +14,7 @@ entry_points:
   - "os/src/hal/arch/loongarch64/boot.rs"
 code_paths:
   - "os/src/hal/platform/"
+  - "os/src/hal/arch/riscv/time.rs"
   - "os/src/hal/arch/riscv/trap/"
   - "os/src/hal/arch/loongarch64/trap/"
 ---
@@ -54,18 +55,20 @@ CPU0 发起的 AP STOP/ack 终态协议。CPU0 的用户 syscall 已在完整 tr
 frame 内开放受控 timer/IPI 窗口。B19 又建立 scheduler-ready 屏障和 AP 本地
 调度循环，B20 允许受控 kernel-only 任务阻塞后回到最近运行 AP。B28 再增加一个
 严格受限的用户探针：CPU0 构造并发布，CPU1 进入真实用户态执行 getpid/yield/exit，
-CPU0 负责观察与回收。它不访问文件系统、网络或设备；普通新任务和用户任务仍由
-CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内真实 yield 后从 CPU1
+CPU0 负责观察与回收。它不访问文件系统、网络或设备；在该里程碑上普通新任务和用户任务
+仍由 CPU0 独占。B29 将同一探针改为先在 CPU0 起跑，再在 syscall 内真实 yield 后从 CPU1
 恢复；这动态覆盖了跨 CPU 恢复 `schedule()`、trap current owner 和 MM 激活。B30 在这条
-既有闭环上让 getcpu 返回连续逻辑 CPU：探针在 yield 前后分别验证 0 和 1，但没有改变普通
-任务固定 CPU0 的发布策略。
+既有闭环上让 getcpu 返回连续逻辑 CPU：探针在 yield 前后分别验证 0 和 1，当时尚未改变
+普通任务的发布策略。
 B31/B32 又为该受控迁移建立 per-thread `cpus_allowed` 并返回真实 affinity；B33 不再依赖
 显式 yield，而是让 CPU1 的生产 `RESCHEDULE` IPI 在 CPU0 用户 trap-return 安全点触发
 同一 owner 交接。B34 允许 current 线程在 syscall 安全点修改运行期 mask，并在排除 source
 时自迁到合法 CPU；B35 允许远程稳定 Blocked 线程在 registry 锁内修改 mask，并让后续 wake
 按新允许集重新选点；B36 允许稳定 Queued 线程经短暂 `Migrating` 搬到合法 runqueue。
 B38 又通过单槽请求完成远程 Running/Blocking owner 交接。B39 为所有在线 CPU 开放
-独立 100Hz 调度 tick；普通任务默认 affinity 仍为 bit0。
+独立 100Hz 调度 tick；TCB 构造时 affinity 仍以 bit0 作为未发布安全默认值。正式 normal
+启动会在 AP 全部 online 后把 PID1 mask 扩为全部在线 CPU，fork/exec 后代继承该 mask；
+评测拓扑使用 RV64 8 核、LA64 12 核。
 B40 让永久 group exit 复用同一个任务安全点：进程退出码用原子快照发布，
 远端 sibling 只在所属 CPU 上清理并以 live token ack；clone 的成员登记与首次
 runqueue 发布由同一线程组门禁线性化。
@@ -97,15 +100,17 @@ EFI 查找精确返回 `MissingSystemTable`，内核才从 QEMU virt 规定的�
 `PlatformInfo`。该对象在启动 AP 前通过 `spin::Once` 完整发布；AP 不解析固件数据、
 不写平台状态，只读取 BSP 已发布的快照。
 
-RISC-V 和 LoongArch 都为最多 8 个硬件 CPU 预留独立 boot stack。入口在
+共享 SMP 表与双架构入口都按 12 个硬件 CPU 的上限预留独立 boot stack；正式
+BuildStorm 拓扑由架构 Make 合同进一步限制为 RV64 8 核、LA64 12 核。入口在
 使用栈之前验证 CPU ID，并按 `base + (cpu_id + 1) * BOOT_STACK_SIZE`
 计算向下增长栈的初始栈顶。整个 `.bss.stack` 位于普通 `sbss` 之前，因此
 CPU0 的 `mem_clear()` 不会清除 AP 正在使用的启动栈。
 
 RV64 的可重定位 Image 会在进入 Rust 前建立临时 Sv39 根页表，同时提供 DRAM
-低地址恒等映射和固定高半区别名。两侧各使用 16 个 1 GiB 叶子，使 8 GiB QEMU
-放在 RAM 顶部的 FDT 在 `populate_memory_regions()` 阶段仍可访问；最终内核页表
-仍由固件报告的真实内存区构造，不继承这组宽松的早期 RWX 叶子。
+低地址恒等映射、链接高半区别名和 supervisor physmap 三组窗口。每组都从运行期
+Image 所在的 1 GiB 对齐 DRAM base 动态覆盖到 64 GiB 物理上限，而不是固定映射
+16 个叶子；因此高地址 FDT 和 final physmap 构造期的 frame 访问都在临时页表内。
+最终内核页表仍由固件报告的真实 RAM/MMIO 区间构造，不继承这些宽松的早期 RWX 叶子。
 
 两架构还按 configured CPU 数预留页对齐的 `.bss.idle_stack`。该 section
 由现有 `.bss.*` 通配符放入 `sbss..ebss`，因此 CPU0 会在 Release AP 前清零
@@ -171,7 +176,8 @@ mailbox 表示“待处理原因集合”，不是可累计的事件队列。B95
 发送某个 doorbell 失败时，发送方仍继续通知本轮其余目标，并保留失败目标
 已经发布的 reason；原子 mailbox 不能安全“回滚”，后续中断仍可消费它。
 
-B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射发布协议：
+B19 为远程任务的动态内核栈增加了一个受限的映射发布协议。当前 LA64 保留原始
+eager 协议：
 
 1. CPU0 在 `KERNEL_SPACE` 锁内建立 stack PTE，然后释放页表锁；
 2. CPU0 递增目标 CPU 的 `kernel_tlb_request`，发送 `KERNEL_TLB_SYNC`；
@@ -181,7 +187,14 @@ B19 为远程 kernel-only 任务的动态内核栈增加了一个受限的映射
 
 sequence 允许合并同一目标的并发发布请求；ack 覆盖该序号之前的 PTE 写入。
 
-B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映射协议：
+RV64 production 已把新增任务映射改为目标侧延迟确认：发布方在 runqueue 可见前以
+AcqRel 递增目标 `kernel_tlb_request`，但不发送 `KERNEL_TLB_SYNC`、不等待 ack；目标 CPU
+取得任务后仍运行在 idle 栈上，在 `__switch` 改写 SP 前 Acquire 快照 request、执行本地
+全 TLB 失效并 Release ack。目标就是当前 CPU 时仍立即本地失效。该路径不依赖 Svvptc
+跳过 fence，因为新内核栈的首次压栈不能安全承受 stale-invalid 引发的偶发页故障。
+
+B21 把同一 mailbox/sequence 基础设施扩展为动态 kernel-global 撤映射协议；它不使用
+上述任务发布快路：
 
 1. 在 `KERNEL_SPACE` 锁内清除 PTE，并把含 `FrameTracker` 的映射对象移出集合；
 2. 释放页表锁后，先为所有远端目标发布独立 request 序号，再做本地全量失效并广播 IPI；
@@ -200,8 +213,9 @@ range shootdown 由下面的独立协议处理。
 B22/B23 为用户 MM 增加了独立于 kernel-global 的激活、IPI 与修改侧提交协议，
 B51 又把保守的历史集合收紧为精确驻留集合：
 
-1. 用户 trap-return 在恢复用户页表根前，取得进程 VM 锁并把当前 CPU 加入该 MM 的
-   `active_cpus`；登记必须先于 generation 读取；
+1. 用户 trap-return 在恢复用户现场前，取得进程 VM 锁并把当前 CPU 加入该 MM 的
+   `active_cpus`；RV64 随后在同一个 IRQ-off transaction 内安装目标 SATP，登记必须
+   先于 generation/ASID epoch 读取；
 2. 若本 CPU 的 observed generation 落后，RV64 执行全量 `sfence.vma`，LA64 执行
    `invtlb 0x3` 清除全部 non-global 项，然后重查 generation；
 3. `MmuGather` 在 VM 锁内合并失效范围和退休 frame，并以 active CPU mask
@@ -212,8 +226,9 @@ B51 又把保守的历史集合收紧为精确驻留集合：
    必须先释放 VM/PTE/runqueue 锁，并保留失效 frame 直到全部 ack。
 
 B51 让每个 `CpuTaskState` 用一个 `Arc<AddressSpace>` 记住本 CPU 当前仍可直接返回的
-用户 MM。任务切回 idle 栈后、改变 current owner 前，`leave_user_vm()` 在同一 VM 锁内
-执行完整屏障并清除 active bit；再次运行必须重新经过 generation 检查。PTE writer 若在
+用户 MM。任务切回 idle 栈后、改变 current owner 前，RV64 `leave_user_vm()` 先在 IRQ-off
+transaction 内安装共享内核根，再在同一 VM 锁序下清除 active bit；再次运行必须重新经过
+generation/epoch 检查。PTE writer 若在
 active mask 为空时修改映射，不发送无意义 IPI，但仍推进 generation，保证保留旧 ASID
 翻译的 CPU 下次进入前先本地补刷。Per-CPU Arc 同时固定 exec 前的旧 MM，避免
 `process.vm` 已替换后误清新地址空间的 bit。
@@ -222,14 +237,15 @@ B23 通过 `AddressSpace::write()` 把同步边界固化到公开接口：锁内
 `UserMapper` 修改 PTE、由 `MmuGather` 合并失效范围和退休 frame，再推进
 generation 并冻结目标；块作用域结束后先解锁，
 再执行本地失效、IPI/ack 等待、observed 推进和 frame 释放。调用方不再能取得可变
-`MutexGuard<AddressSpace>`，因而不能把 VM 锁意外带过 shootdown 等待点。普通用户任务
-仍固定 CPU0；这一限制现在是为了 uaccess 生命周期、共享子系统和跨核进程语义审计，
-不再是因为用户 PTE 修改缺少远端协议。
+`MutexGuard<AddressSpace>`，因而不能把 VM 锁意外带过 shootdown 等待点。该里程碑仍把
+普通用户任务固定在 CPU0；当前 normal PID1 已在 AP online 后显式开放全 CPU affinity，
+不再依赖单核发布掩盖用户 PTE 的远端一致性问题。
 
 B24—B27 已补齐双架构页级后端与 ASID 生命周期：用户 trap-return 通过
 `activate_user_vm()` 一次取得页表根与 MM-owned ASID，编号只在全 CPU flush/ack 后跨
 epoch 复用。RV64 探测 `SATP.ASID`，本地执行 `sfence.vma va, asid`，远端优先使用
-SBI RFENCE FID 2；有 ASID 时 trap 切根不再固定全刷，ASIDLEN=0 时保留兼容路径。
+SBI RFENCE FID 2；有 ASID 时调度换根不再固定全刷，普通 trap 不换根，ASIDLEN=0 时
+保留真实换根后的兼容全刷路径。
 LA64 通过固定 per-CPU slot 传递 ASID/range 并执行 `invtlb 0x5`。B51 已完成安全
 CPU detach；B52 已把双架构精准后端扩展到最多 64 页的连续区间，更大跨度仍全刷。
 B53 规定软件 range handler 在硬件失效后、slot ack 前推进目标 CPU 的 observed
@@ -240,7 +256,7 @@ generation，避免本次 IPI 返回用户态时再由激活路径全刷。真�
 B28 首次让受控用户任务在 AP 走完整 trap 路径。远程发布必须先同步新内核栈映射，
 再把任务放入 CPU1 runqueue，最后在队列锁释放后发送 `RESCHEDULE`。用户 trap 进入
 Rust 后由 `current_trap_task()` 克隆本 CPU current，并在锁外校验状态必须为
-`Running(cpu)`；它取代旧的 CPU0-only 断言，但没有改变普通任务的目标选择。
+`Running(cpu)`；它取代旧的 CPU0-only 断言，但在该里程碑上没有改变普通任务的目标选择。
 每次返回用户态仍由执行返回的 CPU 重写 trap context 中的 `tp/$r21` 锚点并激活该
 MM 的页表根与 ASID。
 
@@ -305,7 +321,9 @@ user a7/a0..a5 → arch trap entry → trap handler
 `AddressSpace::do_page_fault()` 分流到 VMA、filemap、shared-write 或
 CoW；所有 PTE 改动必须经 HAL 刷新 TLB。
 
-RISC-V 返回用户态时通过 trampoline 中的 `__restore` 切换 `satp`；
+RISC-V 在 `trap_return()` 的 `switch_user_vm()` 中先安装目标 `satp`，trampoline 中的
+`__restore` 只恢复现场；普通 trap 入口和返回都保持当前页表根。用户根共享
+supervisor-only 内核分支，因此 Rust trap handler 可直接在用户根下执行。
 LoongArch static link 直接使用已链接的 `__restore` 地址，避免对符号重复
 重定位后误跳入 kernel trap stub。
 
@@ -315,7 +333,8 @@ RISC-V 的 `stvec` 指向独立的 `__kern_trap`。入口在当前内核栈上�
 272 字节、16 字节对齐的 frame，保存 `x1`、`x3..x31`、原始 `sp`、
 `sstatus` 和 `sepc`；Rust handler 接受 Supervisor Software Interrupt
 和 Supervisor Timer Interrupt，其他内核异常仍然 panic。IPI 先清 SSIP，
-再消费 per-CPU mailbox；timer 只静默 SBI one-shot 并发布 deferred 状态。
+再消费 per-CPU mailbox；timer 只把已选择 backend 的 one-shot compare 推到最大值
+并发布 deferred 状态。RV64 backend 可能是 Sstc `stimecmp`，也可能是 SBI fallback。
 
 LoongArch 复用现有内核 trap frame，但把 IPI fast path 放在 BADV 和 console
 诊断之前。handler 先向 IOCSR `CORE_CLEAR` 写 1 清除 level-triggered
@@ -392,7 +411,8 @@ pending，IPI hard IRQ 仍只操作 per-CPU 原子状态，两者都不在被打
 
 每个在线 CPU 的用户/内核 timer trap 共用同一 hard-IRQ fast path：
 
-1. RV64 把 SBI timer compare 写成 `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
+1. RV64 通过启动时选定的 Sstc `stimecmp` 或 SBI fallback，把 timer compare 写成
+   `usize::MAX`；LA64 先清 `TCFG.En` 停止计数，
    再写 TICLR 清除 level-triggered pending；
 2. 当前 `PerCpu.timer_irq_count` 只做无锁诊断计数；
 3. 以 Release 发布 `timer_pending=true` 后立即返回被中断现场。

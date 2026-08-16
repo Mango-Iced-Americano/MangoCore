@@ -59,9 +59,12 @@ all: toolchain-preflight $(if $(filter 1,$(BUILD_ROOTFS)),fs-img,) build
 
 debug: build mv-debug
 
-stage-kernel:
+# 评测机只认根目录 kernel-rv。RV64 内核 ELF 的 PhysAddr 是链接虚拟地址
+# （0xffffffc0...），QEMU 无法按 program header 加载，因此必须发布 strip 后的
+# raw binary（与 Image 同源），而不是带 debuginfo 的 ELF。
+stage-kernel: kernel
 	@mkdir -p $(dir $(PRODUCT_ROOT)/kernel/kernel-rv)
-	cp -f $(KERNEL_ELF) $(PRODUCT_ROOT)/kernel/kernel-rv
+	cp -f $(KERNEL_IMAGE) $(PRODUCT_ROOT)/kernel/kernel-rv
 
 mv: stage-kernel
 	@echo "[deprecated] mv stages the RV64 kernel; root publication happens only after make all succeeds"
@@ -69,7 +72,7 @@ mv: stage-kernel
 mv-debug:
 	cp -f $(KERNEL_ELF) ../kernel-rv
 
-build: env kernel
+build: env stage-kernel
 
 toolchain-preflight:
 	@sh ../scripts/rustup-preflight.sh

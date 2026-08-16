@@ -83,15 +83,28 @@ fn be_u32(device: &DeviceInfo, name: &str) -> Result<u32, DwMshcError> {
 #[inline(always)]
 fn read(base: usize, offset: usize) -> u32 {
     // SAFETY: Categories 6 and 11. The validated JH7110 CRG base and aligned
-    // register offsets are identity-mapped before this driver probes.
-    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
+    // register offsets are supervisor-mapped before this driver probes.
+    unsafe {
+        core::ptr::read_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+        )
+    }
 }
 
 #[inline(always)]
 fn write(base: usize, offset: usize, value: u32) {
     // SAFETY: Categories 6 and 11. The validated JH7110 CRG base and aligned
     // register offsets target only documented clock/reset control registers.
-    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) }
+    unsafe {
+        core::ptr::write_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+            value,
+        )
+    }
 }
 
 fn update(base: usize, offset: usize, transform: impl FnOnce(u32) -> u32) {

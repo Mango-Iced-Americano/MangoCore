@@ -86,7 +86,7 @@ impl crate::net::Socket for PacketSocket {
         }
     }
 
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, _backlog: u32) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
 

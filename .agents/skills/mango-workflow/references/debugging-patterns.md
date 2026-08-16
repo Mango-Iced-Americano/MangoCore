@@ -50,6 +50,31 @@
 - **教训**: 任何在堆分配器就绪前（即 post-heap FDT 枚举前）需要访问的 MMIO 外设，其地址范围必须显式加入编译期 identity MMIO 映射表。仅依赖 FDT/PlatformInfo 动态映射的地址在早期启动阶段不可访问。此类问题表现为早期 boot 路径中的 `StorePageFault` 而非设备探测失败。
 - **相关文件**: `os/src/hal/platform/riscv/vf2.rs`、`os/src/mm/kernel_space.rs`、`os/src/drivers/net/gmac_jh7110/mmio.rs`
 
+### 大内存启动早期 OOM：bootstrap heap 必须覆盖按 RAM 线性增长的结构
+
+- **现象**: 提高 QEMU 内存后（如 la64 `-m 36G -smp 12`、rv64 `-m 16G`），内核在启动早期
+  `Console initialized.` 之后、`init_runtime_heap` 之前 panic：
+  `HEAP ALLOCATION FAILED (FATAL) layout: size=9356593, align=1`，`KERNEL_HEAP_SIZE` 显示的
+  仍是 bootstrap heap 大小（如 8MiB 减去 metadata 后的 8335360）。`align=1` 是 `Vec<bool>`/
+  `Vec<u8>` 类分配的指纹。
+- **根因**: `StackFrameAllocator::init`（`frame_allocator.rs`）为每个 DRAM region 调用
+  `FrameRegion::new()`，其 `recycled_flags: Vec<bool>` 按 region 页数 1 字节/页分配，随
+  物理内存线性增长（36G ≈ 9.35M 页 → 9.36MiB）；buddy 分配又把它圆整到下一个 2 的幂
+  order（9.36MiB → order 12 = 16MiB 连续块）。这些结构在 runtime heap（DRAM 扩展堆）
+  建立前就要分配，8MiB bootstrap heap 必然失败。la64 还有 `laflex::IdentityDirtyMap`
+  （highest_end/4096/64 个 `AtomicUsize`，36G 约 1.19MiB）同样在预 runtime 期分配。
+- **修复**: 调大双架构 `KERNEL_BOOTSTRAP_HEAP_SIZE`（8MiB → 32MiB），把 buddy 圆整后的
+  order 12 块 + IdentityDirtyMap + slab 余量都覆盖进去。数值推导写入 config.rs 注释，
+  避免后人盲目改小。
+- **教训**: ① 启动早期 OOM 先看 `align` 指纹——`align=1` 且 size 接近页数 = per-page
+  结构；size 是 2 的幂 order 倍数 = buddy 圆整，别只按"实际字节 < 堆大小"判断。②
+  随物理内存线性增长的结构（frame flags、bitmap、dirty map）必须按评测最大内存推导
+  bootstrap heap 需求，不能只按默认内存（768MiB/1GiB）验证。③ 修复后必须用评测
+  级内存重新 QEMU 验证，且注意 rv64 要用 strip 后的 `Image`/`kernel-rv` raw binary
+  启动（ELF PhysAddr 是链接虚拟地址，QEMU 加载不了）。
+- **相关文件**: `os/src/mm/frame_allocator.rs`、`os/src/mm/heap_allocator.rs`、
+  `os/src/hal/arch/{riscv,loongarch64}/config.rs`、`os/src/hal/arch/loongarch64/laflex.rs`
+
 ### PCI host 的 `ranges` 与 `reg` 必须在预堆阶段同时映射
 
 - **现象**: RV64 用 `BLK_MODE=virt_pci` 启动时，PCI config access 或 VirtIO BAR access 触发 page fault；仅把固定 ECAM 地址加到板级 MMIO 常量会使 QEMU 特例可用，但仍无法适配 FDT 描述的不同 host。
@@ -99,6 +124,33 @@
 ### 进程停止/继续状态异常
 - 检查 `SIGSTOP`/`SIGCONT` 是否正确更新进程状态
 - 检查父进程 wait 是否正确消费 stopped/continued 事件
+
+### 线程组退出后父进程永久等不到 SIGCHLD（timeout(1) 卡死）
+
+- **现象**: LA64 评测 buildstorm 的隐藏 boot 段（内层 `qemu-system-loongarch64`
+  启动 ArceOS）启动后整机"静默停滞"：串口日志停在启动脚本的开头两条
+  `unsupported syscall` 后不再增长，内层 QEMU 主线程一直循环
+  `clock_gettime`/`futex`/`ppoll`，vCPU 无输出，最终被最外层墙钟杀掉。
+  对比 RV64 同一段脚本瞬间完成。CPU 快照显示所有核 idle/无 spin 段，
+  与锁自旋死锁（有 CPU 卡在 spinlock PC）不同——这是"等待永不发生的事件"。
+- **根因**: 线程组退出时，最后完成进程级收尾（`finish_exit`）的可能是非
+  leader sibling 线程，其 TCB `exit_signal` 为空；旧代码按"最后收尾线程"的
+  `exit_signal` 通知父进程，于是父进程（如 `timeout --foreground`，用
+  `rt_sigsuspend` 等 SIGCHLD）永远收不到信号，脚本的 `wait` 永不复返。
+- **修复**: PCB 增加进程级 `exit_signal_hint` 原子快照：非 `CLONE_THREAD`
+  clone 时写入 exit_signal，非 leader exec 接管（`become_group_leader`）时
+  恢复 `SIGCHLD`；`finish_exit()` 一律按该快照通知。Linux 语义就是线程组
+  退出通知信号取自 leader，与收尾线程无关。
+- **教训**:
+  - "静默停滞 + 等待者循环 ppoll/futex/clock_gettime + 无 spin 现场"优先
+    怀疑信号/等待事件丢失，而不是调度 liveness 或 IPI。
+  - 进程级语义必须存在进程级 owner（PCB）；依赖"最后执行的线程碰巧携带
+    正确状态"在任意线程完成收尾的协议下必然有窗口。
+  - 复现路径的最小化：官方脚本未公开时，可以在最小镜像里注入等价脚本
+    （后台启动内层 qemu + `timeout --foreground` + 轮询 `kill -0`），
+    比完整 buildstorm 快两个数量级。
+- **相关文件**: `os/src/task/process.rs` — `finish_exit()`/`exit_signal_hint`,
+  `os/src/task/task.rs` — `sys_clone()`/`become_group_leader()`
 
 ## Errno 返回值问题
 
@@ -1632,3 +1684,89 @@
   通过不能证明另一方向可用**（首试命中会掩盖缺失的唤醒路径）。测试设计应让"先等后发"时序
   覆盖两个方向。
 - **相关文件**：`os/src/net/socket/unix/stream/{mod.rs,inner.rs}`、`os/src/net/socket/mod.rs`
+## 文件后备的懒加载 VMA 必须优先保留 resident 页状态和后备生命周期
+
+- **危险模式**：看到 `VmAreaKind::ElfLazy` 且 PTE 不存在就无条件从文件重建页。PTE 可能因 TLB/`mprotect`、压缩或换出被撤销，但 VMA 内已经保存了进程修改后的私有 frame；重读文件会丢数据。
+- **固定协议**：在无 PTE 分支中先查 `VmPageState`：`InMemory -> ResidentWithoutPte`、`Compressed -> Decompress`、`SwappedOut -> SwapIn`，只有 `Unallocated` 才启动文件后备装页。目标 frame 必须先填充再发布 PTE；冷源页以 Retry 移到 VM 锁外读取。
+- **生命周期**：后备对象不只要保存 PageCache 配方，还要强持有源 inode 并保持 ETXTBSY。该 `Arc` 必须在 VMA clone/split/fork 中保留；动态解释器有独立 inode，不能只依赖 PCB 的主 `exe` 引用。
+- **验收**：构造 ELF 地址空间后 entry/BSS 应无 target frame；分别 fault entry 和不同页 BSS，验证文件字节、零填充和“未触发页仍未 resident”。
+- **相关文件**：`os/src/mm/{address_space,filemap,page_fault,vma}.rs`、`os/src/task/process.rs`、`os/src/kernel_tests/mm.rs`
+## 状态修复成功路径不能广播异常事件
+
+- **危险模式**：trap/syscall 先尝试修复状态，随后不看结果就统一通知 signal、poll 或其他
+  waiter。高频成功路径会为每次 lazy fault、重试或缓存填充支付无关锁和 listener 扫描，
+  还把“状态已修复”错误表达成“异常事件已产生”。
+- **固定协议**：把结果明确拆成“修复成功”“实际入队事件”“只发布其他状态”。只有事件
+  真正入队后才通知相应 wait queue，并先释放 pending owner 锁；仅设置 OOM/退出等其他
+  状态时，走其自己的安全点或唤醒协议。
+- **验收**：先用计数证明成功次数远高于错误次数；再覆盖成功 hot path、真实错误信号和
+  非信号状态三类。错误测试必须证明 waiter 仍被唤醒，成功测试则确认没有虚假通知。
+- **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/process.rs`
+
+## 多后端文件系统默认 feature 与旧 C FFI 链接隔离
+
+- **现象**: 默认切换到 Rust another_ext4 后，`cargo check` 可以通过，但完整链接仍报告旧 lwext4 的 `ext4_*` undefined symbol。
+- **根因**: 旧后端模块无条件编译；即使后端分派 cfg 选择 another，公开的 lwext4 Rust 包装仍会被链接，而当前构建只为显式 legacy 路径准备 C 静态库。
+- **修复**: 后端分派使用互斥 feature；`ext4_lwext4` 模块、依赖其符号的诊断和 legacy-only kernel tests 均以 `ext4_lwext4_backend` 条件编译。默认 another 构建不携带旧 FFI 符号；显式 `--no-default-features --features ext4_lwext4_backend` 仍单独检查。
+- **教训**: 多实现 trait/后端迁移时，不能只 cfg 入口函数；必须沿模块、诊断、测试和 FFI 符号引用做完整可达性切片。`cargo check` 不经过最终链接，必须额外执行目标架构 release link。
+- **相关文件**: `os/src/fs/mod.rs`, `os/src/fs/ext4_backend.rs`, `os/src/task/perf.rs`, `os/src/fs/sysfs/files/diag.rs`
+
+## JBD2 checksum-v3 descriptor 误读 UUID
+
+- **现象**：Linux 生成的 ext4 镜像具有 `64BIT + CSUM_V3` journal，superblock 和 descriptor checksum 均有效，但 another_ext4 在挂载恢复阶段返回 `EIO`。
+- **根因**：旧式 checksum-none JBD2 tag 在 `SAME_UUID` 清零时带 16 字节 inline UUID；checksum-v2/v3 的固定宽度 tag 不带这个字段。无条件消费 UUID 会把下一 tag 的偏移前移，随后校验或块号解析失败。
+- **修复**：在通用 descriptor parser 和 recovery parser 中仅当 `ChecksumMode::None && SAME_UUID == 0` 时读取 inline UUID；checksum-v2/v3 直接从固定宽度 tag 进入下一项。
+- **教训**：审计日志格式时必须把 feature bit 与字段布局一起判断，不能把 legacy 扩展字段按 flag 单独套用到新 checksum 版本；遇到挂载 `EIO`，先用 `dumpe2fs`/`debugfs logdump` 校验真实 journal feature 和 tag 边界，再做最小独立 block-device probe。
+- **相关文件**: `dependency/another_ext4/src/jbd2.rs`, `dependency/another_ext4/src/ext4/journal_recovery.rs`
+
+## 嵌套 QEMU 启动前卡死时先隔离 CPU 特性探测
+
+- **现象**：用户态 QEMU 的 ELF、动态库和构造器均已装载，却在 `main()` 前不再输出；去掉 `cpuinfo_init` 或 NOP 掉特性探测指令后可以启动同一内核产物。
+- **根因模式**：`riscv_hwprobe(258)` 返回 `ENOSYS` 后，QEMU 会安装 `SA_SIGINFO` SIGILL handler 并执行可选扩展探针。若内核的 signal-frame/ucontext ABI 与 Linux 有偏移，handler 写回的 PC 不会被 `rt_sigreturn` 从同一位置恢复，非法指令便会重复执行。
+- **根因修复**：Linux RISC-V `__riscv_mc_fp_state` 是以 Q 扩展成员决定大小和 16-byte 对齐的 union，即使内核只保存 D 扩展，用户态 `mcontext_t` 仍须为它保留 528 bytes。用紧凑 `FloatRegs` 直接拼 `MachineContext` 会把 `uc_mcontext` 从 glibc/QEMU 预期的 offset 176 提前到 168；应把内核保存态与用户 ABI 表示分开，并用编译期断言锁定 `MachineContext size=784/alignment=16`、`UserContext mcontext_offset=176/size=960`。
+- **纵深兼容**：同时实现 QEMU 使用的 all-online-CPU hwprobe 查询：保持 Linux 16-byte pair 布局，key 3 只报告 IMA，key 4 报 0 个可选扩展，未知 key 写回 `-1/0`；非零 flags、CPU mask 和 `WHICH_CPUS` fail closed 为 `EINVAL`。绝不能虚报扩展，false negative 只损失优化，false positive 会让 QEMU 在宿主执行不支持的指令。
+- **验证方法**：先用静态 `SA_SIGINFO` 程序触发 SIGILL 并推进保存 PC，验证 signal delivery 与 `rt_sigreturn` 对同一 ABI 位置读写；再用无 libc 小程序校验 syscall 258 的返回 pair；最后必须运行未修改的原版 QEMU 和同一 ArceOS 产物。若测试框架在 NTP、布局或 mount 前置阶段卡住，必须用 marker 和已知可用 QEMU 对照证明是否真正触达目标路径，不能把 harness timeout 写成 syscall 失败或 PASS。
+- **边界**：当前 hwprobe 只是保守子集，依赖 CPU mask/`WHICH_CPUS` 的程序仍可能降级或失败；signal ABI 修复负责保证 fallback 正确，hwprobe 子集负责减少不必要的 SIGILL 探测，两者是纵深防御而不是相互替代。
+- **相关文件**：`os/src/hal/arch/riscv/trap/context.rs`、`os/src/syscall/mod.rs`、`docs/Work_Log/evidence/2026-08-14/develop-eval-adapt-summary.md`
+
+## 官方 raw judge 低分时先分离路径合同、解析器与真实语义
+
+- **路径合同**：双盘系统中 x0 root 未必有 MBR，而旧测试二进制可能仍硬编码 `/dev/vda2`。
+  先核对实际 partition descriptor 与测试字符串；兼容别名只能在真实名字不存在、canonical
+  分区唯一存在时发布，不能改写权威 x0/x1 顺序或让两个不同分区同名。
+- **物理路径**：symlink 看似等价于 bind mount，但 `getcwd(2)` 返回物理解析路径。官方程序若
+  使用固定小 buffer，`/glibc/...` 退化成 `/sdcard/glibc/...` 会得到 `ERANGE`。排查时同时记录
+  syscall size、最终物理 cwd 和 mount 类型，不能只看 `chdir` 成功。
+- **解析器分账**：raw judge 对并发交错输出可能漏记分。例如两个进程的 `cpid:` 行拼接后，
+  只要完整 block 仍包含父子两次输出、PID 集合为 `{0, positive}`、write 成功和 END，就应在
+  semantic 账本中按既有规则归一化；原始分数必须原样保留，不能覆盖或伪造 judge 输出。
+- **验收顺序**：先证明四组 START/END、PID1 exit 0、无 panic/fatal，再列出每个 partial case，
+  最后应用受约束的 semantic normalization。构建 warning、raw parser loss 和真实 syscall
+  failure 必须分别报告。
+- **相关文件**：`os/src/fs/boot_block.rs`、`user/src/bin/init/mounts.rs`、
+  `user/src/bin/test_runner/bootstrap/layout.rs`、`docs/Work_Log/2026-08-14.md`
+
+## 官方脚本会删除失败证据时，先保留输出文件再复现
+
+- **场景**: 官方 CAgent/BuildStorm `testcode.sh` 在每个用例结束后 `rm -f "$output_file"`，
+  评测日志里只剩 `testcase cagent xxx fail <ms>`，无法判断失败环节。
+- **做法**: 用 debugfs 把镜像内的官方脚本 dump 出来，删除 `rm -f` 一行后写回镜像副本，
+  再用与评测一致的 QEMU 命令复现；guest 把输出写到 chroot 的 `/tmp`（bind 到镜像 ext4），
+  跑完后 `debugfs dump` 取回每个 testcase 的完整 agent 输出。
+- **收益**: 一次复现即拿到 `Connection failed to 127.0.0.1:8080`（listen 槽竞争），直接
+  推翻"awk 子进程/syscall 缺口"假设；对照通过用例的输出可精确区分 connect 失败、tool
+  执行失败与最终答案校验失败。失败用例的 `<ms>` 时长（数百 ms vs 数秒）也是线索：快速
+  失败通常是连接/参数层，慢失败才是多轮 LLM 交互。
+- **相关文件**: `testsuits-for-oskernel/cagent-test/`（agent/server 源码与官方脚本参考）
+
+## 用 LOG=info 的 write 返回值定位串口丢尾
+
+- **现象**: 串口某一行尾部（换行符）消失并与下一行合并，肉眼看起来像多进程并发写交错。
+- **做法**: 用 `LOG=info` 构建内核重跑，`[syscall] write(64) -> XX` 的返回值是十六进制
+  字节数；若返回值小于请求长度（如 52/53），说明是 syscall 层截断而不是终端交错。
+  再用 `grep -abo` 找到字符串在 ELF 中的文件偏移，结合 `readelf -l` 的段表计算其虚拟页内
+  偏移，判断缓冲区是否跨页、哪一页是"从未被访问"的惰性页。
+- **边界**: 用户侧 `println!` 等包装忽略 `write` 返回值，内核短写会被放大成静默丢字节；
+  排查时两者都要验证。同一进程的两个 `println!` 顺序调用不可能真正交错——若它们看起来
+  交错，优先怀疑短写丢换行，而不是 console 锁。
+- **相关文件**: `os/src/syscall/fs/common.rs`、`user/src/console.rs`

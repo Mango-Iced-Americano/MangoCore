@@ -332,9 +332,15 @@ impl TaskManager {
 fn select_wake_cpu(task: &TaskControlBlock) -> usize {
     let last_cpu = task.last_cpu();
     let target = super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(last_cpu));
-    let load = super::run_queue::nr_running(target)
-        + super::processor::cpu_current_count(target);
-    crate::task::perf::record_wake_selection(target == last_cpu, load == 0);
+    let load = super::run_queue::nr_running(target) + super::processor::cpu_current_count(target);
+    let last_busy =
+        super::run_queue::nr_running(last_cpu) + super::processor::cpu_current_count(last_cpu) != 0;
+    let idle_available = super::run_queue::has_idle_runnable_cpu(task.cpus_allowed());
+    crate::task::perf::record_wake_selection(
+        target == last_cpu,
+        load == 0,
+        last_busy && idle_available,
+    );
     target
 }
 
@@ -391,9 +397,10 @@ pub(crate) fn try_publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) -> Re
     );
 
     if cpu != crate::smp::cpu_id() {
-        crate::smp::synchronize_kernel_mapping(cpu).unwrap_or_else(|error| {
-            panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
-        });
+        crate::smp::synchronize_kernel_mapping(cpu, crate::smp::KernelTlbSyncReason::TaskPublish)
+            .unwrap_or_else(|error| {
+                panic!("failed to publish kernel stack to CPU {}: {:?}", cpu, error)
+            });
     }
     let published = process.publish_thread(&task, || super::run_queue::publish(task.clone(), cpu));
     if !published {
@@ -419,8 +426,9 @@ pub(crate) fn publish_task_on(task: Arc<TaskControlBlock>, cpu: usize) {
 
 /// 按任务 affinity 和当前负载尝试发布普通新任务。
 ///
-/// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。调用 CPU 仅作为
-/// locality 提示；若它不在 mask 中或明显过载，选择器会返回其它合法 CPU。
+/// clone/fork 已继承父线程 mask，不能再无条件投递 CPU0。新任务没有最近运行
+/// 的 cache locality，允许集合存在 idle CPU 时优先唤醒该 CPU；所有 CPU 都忙
+/// 时才把调用 CPU 作为 fallback locality 提示。
 pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize> {
     // 启动期的 init/ktest runner 在 CPU0 首次进入 run_tasks() 前发布，此时
     // 本 CPU 还没有 current，scheduler-entered mask 也尚未包含 bit0。
@@ -429,7 +437,7 @@ pub(crate) fn try_publish_task(task: Arc<TaskControlBlock>) -> Result<(), isize>
         return try_publish_task_on(task, crate::smp::BOOT_CPU_ID);
     }
     let target =
-        super::run_queue::select_runnable_cpu(task.cpus_allowed(), Some(crate::smp::cpu_id()));
+        super::run_queue::select_new_task_cpu(task.cpus_allowed(), Some(crate::smp::cpu_id()));
     try_publish_task_on(task, target)
 }
 
@@ -448,14 +456,17 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
     loop {
         match task.task_status() {
             TaskStatus::Running(owner) if owner == cpu => {
-                let run_started = task
-                    .run_started_ticks
-                    .swap(0, AtomicOrdering::AcqRel);
-                if run_started != 0 {
-                    crate::task::perf::record_task_run_slice(
-                        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE)
+                #[cfg(feature = "perf_stats")]
+                {
+                    let run_started = task.run_started_ticks.swap(0, AtomicOrdering::AcqRel);
+                    if run_started != 0 {
+                        crate::task::perf::record_task_run_slice(
+                            crate::task::perf::perf_time_now_for(
+                                crate::task::perf::STATS_PROFILE_CORE,
+                            )
                             .wrapping_sub(run_started),
-                    );
+                        );
+                    }
                 }
                 // current 槽已在 idle 栈清空，但 Running(owner) 仍是唯一
                 // 权威状态。持请求槽锁直到新 runqueue owner 提交，防止
@@ -515,6 +526,13 @@ pub fn finish_switch_out(task: Arc<TaskControlBlock>, cpu: usize) {
                 // processor 已在 idle 栈撤销 current 槽；到这里才能允许
                 // 非 leader exec 交换旧 leader 的 TID。
                 task.process.publish_exit_inactive(&task);
+                // processor 已先在 idle 栈安装 kernel root 并清除 active bit。
+                // 只有到这里，未共享 zombie MM 才能安全提前丢弃用户叶子映射；
+                // 页表根继续由 AddressSpace 持有到最终 Arc drop。
+                if task.process.is_zombie() {
+                    let vm = task.process.vm();
+                    let _ = vm.release_zombie_mappings_if_inactive();
+                }
                 // 当前代码已运行在退出 CPU 的 idle 栈；把最后一个调度 owner
                 // 交给本 CPU 回收队列，不再跨核竞争全局 TaskManager。
                 super::processor::enqueue_zombie(cpu, task);
@@ -796,7 +814,11 @@ pub(crate) fn set_remote_affinity(task: &Arc<TaskControlBlock>, mask: usize) -> 
                 // 排除 owner 时才需要预先发布目标内核栈映射。不能持
                 // 请求槽锁等待 TLB ack；同步期间的状态变化由下方锁内复核处理。
                 if let Some(target) = target {
-                    crate::smp::synchronize_kernel_mapping(target).unwrap_or_else(|error| {
+                    crate::smp::synchronize_kernel_mapping(
+                        target,
+                        crate::smp::KernelTlbSyncReason::TaskMigration,
+                    )
+                    .unwrap_or_else(|error| {
                         panic!(
                             "failed to synchronize remote task {} stack to CPU {}: {:?}",
                             task.gettid(),
@@ -2075,7 +2097,7 @@ static TIMEOUT_WAITQUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 static KERNEL_TIMER_QUEUE_NEXT_NS: AtomicU64 = AtomicU64::new(0);
 
 // 每 CPU 使用同一周期，但各自维护绝对 deadline，避免多核共同推进一个 tick。
-const SCHED_TICK_NS: u64 = 10_000_000; // 100 Hz = 10 ms
+const SCHED_TICK_NS: u64 = 20_000_000; // 50 Hz = 20 ms
 
 /// 按当前 CPU 的职责重编程本地 one-shot timer。
 ///
@@ -2094,6 +2116,21 @@ fn rearm_local_timer() {
     let delta_ns = next_ns.saturating_sub(now_ns).max(1);
     let delta_ticks = crate::timer::ns_to_ticks_ceil(delta_ns);
     crate::hal::program_timer_delta(delta_ticks);
+}
+
+/// Stop an idle AP's scheduler tick.  CPU0 is excluded because it owns global
+/// timers and periodic housekeeping.
+pub(crate) fn park_secondary_idle_timer() {
+    debug_assert_ne!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+    crate::hal::quiesce_local_timer_interrupt();
+}
+
+/// Give the first task dispatched after AP idle a fresh scheduler quantum.
+pub(crate) fn restart_secondary_sched_timer() {
+    debug_assert_ne!(crate::smp::cpu_id(), crate::smp::BOOT_CPU_ID);
+    let now_ns = crate::timer::now_ns();
+    crate::smp::restart_local_sched_tick(now_ns.saturating_add(SCHED_TICK_NS));
+    rearm_local_timer();
 }
 
 /// 初始化当前 CPU 的本地调度 timer。
@@ -2299,13 +2336,51 @@ pub fn run_task_safe_point() {
         task.process.check_interval_cpu_timers();
         task.process.check_posix_cpu_timers(task);
     }
+    let current_tid_for_preempt = task.as_ref().map(|current| current.gettid()).unwrap_or(0);
+    let migration_pending = task
+        .as_ref()
+        .is_some_and(|current| current.has_migration_target());
+    #[cfg(feature = "perf_stats")]
+    let current_for_run_checkpoint = task.as_ref().cloned();
     // 后续可能 context switch；不能把 current 的 Arc 带过 schedule。
     drop(task);
     let timer_resched = run_deferred_timer_work();
     run_deferred_external_work();
     let ipi_resched = crate::smp::take_reschedule_request();
     if timer_resched || ipi_resched {
-        crate::task::suspend_current_and_run_next();
+        let cpu = crate::smp::cpu_id();
+        let local_competitor = super::run_queue::nr_running(cpu) != 0;
+        let must_schedule = ipi_resched || local_competitor || migration_pending;
+        if timer_resched && current_tid_for_preempt != 0 {
+            if !must_schedule {
+                crate::task::perf::record_timer_preemption_elided();
+                #[cfg(feature = "perf_stats")]
+                if let Some(current) = current_for_run_checkpoint.as_ref() {
+                    // Periodic switch-out used to keep TASK_RUN_SLICE current.
+                    // Tick elision removes that boundary, so perf builds split
+                    // the still-running slice here without changing ownership.
+                    let now =
+                        crate::task::perf::perf_time_now_for(crate::task::perf::STATS_PROFILE_CORE);
+                    let started = current.run_started_ticks.swap(now, AtomicOrdering::AcqRel);
+                    if started != 0 {
+                        crate::task::perf::record_task_run_slice(now.wrapping_sub(started));
+                    }
+                }
+                crate::hal::local_irq_restore(irq_was_enabled);
+                return;
+            }
+            crate::task::perf::record_timer_preemption(
+                cpu,
+                current_tid_for_preempt,
+                local_competitor,
+                ipi_resched,
+            );
+        }
+        if must_schedule {
+            #[cfg(feature = "perf_stats")]
+            drop(current_for_run_checkpoint);
+            crate::task::suspend_current_and_run_next();
+        }
     }
     crate::hal::local_irq_restore(irq_was_enabled);
 }

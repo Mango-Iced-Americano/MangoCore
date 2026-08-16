@@ -157,6 +157,7 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     // PlatformInfo 内含 String/Vec，只能在堆可用后构造；bring_up AP 之前
     // 完成 Once 发布，保证 AP 后续只能看到完整的不可变对象。
     hal::platform::init_platform();
+    crate::mm::init_zero_accelerator();
     let platform_info = hal::platform::platform_info();
     println!(
         "[kernel] Firmware resources: ram_regions={}, reserved={}, early_mmio={}, usable={} MiB",
@@ -233,8 +234,8 @@ fn bsp_main(cpu_id: usize, hardware_id: usize, boot_arg: usize) -> ! {
     crate::fs::vfs::posix_lock::init_posix_lock_manager();
 
     // 到这里，kernel-only 任务依赖的堆、VFS、task registry 和机器级状态
-    // 已完成一次性初始化。Release 发布后 AP 才能进入本地调度循环；普通
-    // 用户任务仍由下面的 CPU0 路径创建并固定在 CPU0。
+    // 已完成一次性初始化。Release 发布后 AP 才能进入本地调度循环；PID1
+    // 仍由下面的 CPU0 路径首次发布，随后在用户态扩展正式进程树的 affinity。
     smp::release_secondary_schedulers();
 
     // ── Kernel self-test mode (mango.mode=ktest) ──

@@ -1212,10 +1212,19 @@ impl PipeRingBuffer {
         self.read_end = Some(Arc::downgrade(read_end));
     }
     pub(crate) fn all_write_ends_closed(&self) -> bool {
-        self.write_end.as_ref().unwrap().upgrade().is_none()
+        // 这里绝不能调用 `Weak::upgrade()`：poll/splice/tee 都在持有 ring
+        // Mutex 时执行本检查。若对端仍存活，upgrade 产生的临时 Arc<Pipe>
+        // 会在语句结束时被 drop，而 Pipe::drop 又反向获取同一把 ring
+        // Mutex，立即自死锁（写端 drop -> peer_read_end -> lock ring）。
+        // `strong_count == 0` 不构造强引用，也不在锁内触发对端析构。
+        self.write_end
+            .as_ref()
+            .map_or(true, |write_end| write_end.strong_count() == 0)
     }
     pub(crate) fn all_read_ends_closed(&self) -> bool {
-        self.read_end.as_ref().unwrap().upgrade().is_none()
+        self.read_end
+            .as_ref()
+            .map_or(true, |read_end| read_end.strong_count() == 0)
     }
 }
 

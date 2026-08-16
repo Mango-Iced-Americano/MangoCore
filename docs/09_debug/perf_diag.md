@@ -3,7 +3,7 @@ title: "统一内核观测系统 (perf_diag)"
 category: debug
 status: stable
 author: MangoCore Team
-last_update: 2026-08-08
+last_update: 2026-08-14
 tags: [perf, trace, stats, debugging, sysfs, diag]
 ---
 
@@ -71,7 +71,7 @@ cat /sys/kernel/stats/features
 | `profile` | rw | `core` / `memory_io` / `network_runtime`；诊断窗口一次只启用一组 |
 | `reset` | wo | 重置所有 delta 计数器 |
 | `boot` | ro | 从 Rust 入口起算的 console/MM/driver/net/FS/initproc/scheduler 累计 ticks；不随 `reset` 清零 |
-| `taskq` | ro | 调度队列指标（15 项） |
+| `taskq` | ro | 调度队列、wake/steal、抢占归因与新任务放置指标（schema v7） |
 | `timer` | ro | 内核计时器指标（9 项） |
 | `syscall` | ro | Syscall/trap 延迟（4 项） |
 | `vm` | ro | filemap、VM 锁/TLB、exec 路径和 MM 切换归因 |
@@ -162,6 +162,18 @@ echo 1 > /sys/kernel/tracing/clear
 | `zombie_drain_calls` | counter | zombie drain 调用次数 |
 | `zombie_drain_removed` | counter | zombie drain 移除总数 |
 | `ready_nonzero_nice_cur` | gauge | 当前 nice≠0 任务数 |
+| `new_task_idle_available` | counter | 新任务发布时允许集合中存在空闲 CPU 的次数 |
+| `new_task_selected_idle` | counter | 新任务发布实际选择空闲 CPU 的次数 |
+| `new_task_kept_busy_parent` | counter | 所有允许 CPU 都忙时仍保留创建者 CPU 的次数 |
+| `timer_preemptions` | counter | timer 安全点实际进入调度切换的次数 |
+| `timer_preemptions_no_local_competitor` | counter | 实际切换时本地 runqueue 没有竞争者的次数 |
+| `timer_preemptions_with_local_competitor` | counter | 实际切换时本地 runqueue 有竞争者的次数 |
+| `timer_preemptions_with_ipi` | counter | timer 与 RESCHEDULE IPI 合并后实际切换的次数 |
+| `timer_preemptions_elided_no_competitor` | counter | 无本地竞争者、IPI 或迁移请求时安全省略切换的次数 |
+| `timer_same_task_resumes` | counter | timer 切换后仍恢复同一 TID 的次数 |
+
+schema v7 在安全省略 timer context switch 时仍会对当前任务的运行片段做诊断 checkpoint，
+因此 `task_run_slice_ticks_total` 继续表示任务实际运行时间，而不是仅统计最终发生切换的片段。
 
 ### timer（内核计时器）
 
@@ -185,6 +197,8 @@ echo 1 > /sys/kernel/tracing/clear
 | `syscall_getppid_total` | counter | getppid（syscall 173）调用次数 |
 | `syscall_cost_max_ticks` | max | 单次 syscall 最大耗时（timer timebase tick） |
 | `trap_enter_cost_max_ticks` | max | 单次 trap 最大耗时（timer timebase tick） |
+| `user_trap_returns` | counter | 进入最终用户恢复跳转的次数；只做事件计数，不在返回热路径读时钟 |
+| `user_return_barriers` | counter | 上述返回中实际执行 `fence.i`（RV，QEMU TCG 默认 0；真实硬件默认等于返回数）或 `ibar 0`（LA）的次数 |
 | `user_unaligned_traps` | counter | 用户态非对齐访存异常总数（LoongArch） |
 | `user_unaligned_ticks_total/max` | counter/max | 非对齐 Rust handler 的累计/最大耗时；不含汇编 trap entry/restore |
 | `user_unaligned_load_{2,4,8}` | counter | 按访问宽度分类的非对齐 load |
@@ -201,6 +215,18 @@ echo 1 > /sys/kernel/tracing/clear
 | `frame_alloc_hits` / `frame_alloc_ticks_total` | counter | frame 分配次数与累计 timer timebase ticks |
 | `frame_free_hits` | counter | frame 释放次数 |
 | `tlb_{full,page,activate,global}` | counter | 各类 TLB 操作；`activate` 不是实际地址空间切换数 |
+| `tlb_shootdown_{kernel_full,user_full,user_range_firmware,user_range_ipi,user_range_fallback}` | counter | 所有 CPU 发起侧聚合的远端 shootdown 最终 backend；五类互斥 |
+| `tlb_shootdown_{range_pages,remote_targets}` | counter | 精确 range backend 处理页数，以及所有远端同步 fanout 之和 |
+| `tlb_shootdown_sync_ticks_{total,max}` | counter/max | 发起侧等待远端同步的累计/最大 raw timebase tick；跨 CPU 求和，不等同 wall time |
+| `tlb_shootdown_<backend>_ticks_{total,max}` | counter/max | 按上述五个最终 backend 拆分的累计/最大 raw ticks；仅在 `memory_io` 记录窗口增长 |
+| `tlb_rfence_bucket_<range>_{calls,ticks,pages,targets}` | histogram | SBI RFENCE range 延迟桶及每桶累计耗时、页数、远端 hart fanout；仅在 `memory_io` 记录窗口增长 |
+| `tlb_kernel_reason_<reason>_{calls,targets,ticks_total,ticks_max}` | counter/max | kernel-global shootdown 按 `task_publish`、`task_migration`、`mapping_retire` 拆分 |
+| `tlb_kernel_bucket_<range>_{calls,ticks,targets}` | histogram | kernel-global shootdown 的延迟、累计耗时和 fanout 分桶 |
+| `tlb_kernel_reason_<reason>_bucket_<range>_calls` | histogram | 各 kernel-global 原因在相同延迟桶内的调用次数 |
+| `tlb_kernel_task_sync_deferred` | gauge | RV `perf_diag` 是否启用目标 CPU context-switch 前本地确认模式 |
+| `tlb_kernel_deferred_reason_<reason>_requests` | counter | 按原因累计的延迟 kernel mapping request |
+| `tlb_kernel_deferred_{flushes,ticks_total,ticks_max}` | counter/max | 目标 CPU 切换前执行的本地 full flush 次数和 raw ticks |
+| `tlb_shootdown_{failures,clock_freq_hz}` | counter/gauge | 同步失败数与 ticks 换算频率 |
 | `pc_read/write/wb_*` | counter | PageCache 读、写、写回次数、页数和 ticks |
 | `sata_read/write_{reqs,bytes,ticks_total}` | counter | 2K1000LA AHCI 数据请求、字节与累计完成耗时 |
 | `sata_flush_{reqs,ticks_total}` | counter | SATA cache flush 次数与累计耗时 |
@@ -208,13 +234,34 @@ echo 1 > /sys/kernel/tracing/clear
 | `device_flush_count` | counter | 实际提交到 VirtIO 块设备的 flush 请求数 |
 | `virtio_write_{requests,bytes}` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的写请求数及字节数 |
 | `virtio_read_requests` | counter | MMIO/PCI VirtIO 在 DMA fallback 分片后实际提交的读请求数 |
+| `virtio_dma_small_pool_enabled` | gauge | 固定小描述符 DMA 池是否成功初始化 |
+| `virtio_dma_share_{header,status,indirect}_pool` | counter | block VirtIO 请求头、状态字节、间接描述符从小池复用的次数 |
 | `writeback_{batch_count,page_count}` | counter | 成功完成的 PageCache writeback run 数与页数 |
 | `pc_write_{lookup,lease,copy,commit}_cycles` | counter | `PageCache::write_user` 中 PageEntries 查找、写 lease、用户缓冲复制及 Dirty 发布的累计周期；仅在 `memory_io` profile 下记录 |
+| `ext4_pc_readpages_{calls,pages}` | counter | PageCache 后端批量读取的调用数与页数；another_ext4 demand miss 每次最多 32 页（128 KiB） |
+| `ext4_pc_readpages_runs` | counter | legacy ext4 后端按物理连续块合并的读取 run 数（another_ext4 不使用该字段） |
 | `wb_tx_data_write_{calls,bytes,ticks}` | counter | another_ext4 journal-backed data write 的次数、字节数与累计 ticks |
 | `wb_tx_alloc_extent_{calls,pages,ticks}` | counter | data write 路径中 alloc/extent 准备的次数、页数与累计 ticks |
 | `wb_tx_journal_{commit_ticks,staged_blocks,tx_first,tx_last}` | counter/gauge | 已提交 journal transaction 的累计 ticks、staged block 数及本窗口 transaction id 范围 |
 | `wb_tx_journal_flush_{count,ticks}` | counter | `ActiveLog`、`CommitRecord`、`Checkpoint`、`TailUpdate` 四个 journal phase 的设备 flush 次数与累计 ticks |
 | `wb_tx_boundary_flush_{count,ticks}` | counter | journal 外明确 durability boundary 的设备 flush 次数与累计 ticks |
+
+RFENCE 延迟桶边界是 `<=1000`、`<=10000`、`<=100000`、`<=1000000`、
+`<=10000000`、`>10000000` raw ticks。应使用同一输出中的
+`tlb_shootdown_clock_freq_hz` 换算；例如 10 MHz timebase 下依次为 `<=0.1 ms`、
+`<=1 ms`、`<=10 ms`、`<=100 ms`、`<=1 s`、`>1 s`。每桶 `pages/calls` 与
+`targets/calls` 可区分大 range/fanout 和工作量正常但等待异常的固件/MTTCG 长尾。
+kernel-global 统计复用相同 raw tick 桶。`task_publish` 表示新任务内核栈映射向远端 CPU
+发布，`task_migration` 包括 affinity/migration/steal 的目标栈同步，`mapping_retire`
+表示动态 kernel mapping 撤销后的全 CPU 失效；目标为当前 CPU 的本地同步不会进入远端
+`kernel_full` 计数。
+
+RV64 与 LA64 production 都默认使用目标 CPU context-switch 前本地确认协议；`perf_diag`
+可用 `mango.rv.kernel_task_sync=eager` / `mango.la.kernel_task_sync=eager` 回到旧的同步
+等待路径，或显式指定 `deferred` 做同镜像 A/B。
+该模式不依赖 Svvptc 直接跳过 fence：远端发布方在 runqueue 可见前递增目标 request，目标 CPU
+取得任务后、`__switch` 改写内核栈指针前执行本地 full flush 并确认序号。目标就是当前 CPU 时
+仍立即本地刷新；`mapping_retire` 在所有模式下始终保持全 CPU 同步等待。
 
 `clock_freq_hz` 是上述 perf timer tick 的唯一换算分母：`µs = ticks × 1_000_000 / clock_freq_hz`。不要将它与 RV64 `rdcycle` 或跨架构 CPU cycle 数混用。
 
@@ -238,6 +285,13 @@ another_ext4 的 transaction 诊断会在串口输出 `[wb_txn]` 事件：`commi
 | `filemap_backend_read_calls` | counter | filemap 调用 PageCache 后端读取的次数 |
 | `filemap_backend_read_ticks_total` | counter | 上述 PageCache 读取累计 ticks |
 | `filemap_backend_read_under_vm_calls` | counter | 后端读取发生在 VM 写锁内的次数 |
+| `filemap_fault_around_calls/pages_requested` | counter | filemap 冷缺页触发的受限窗口次数与请求页数 |
+| `filemap_fault_around_pages_missing/published` | counter | admission 时实际缺页数与代际重验后实际发布页数 |
+| `filemap_fault_around_pages_prefetched` | counter | 发布页中除 demand 页外带 readahead 标记的页数 |
+| `filemap_fault_around_backend_runs` | counter | 连续 miss run 产生的真实后端 `read_pages` 调用数 |
+| `filemap_fault_around_useful_hits` | counter | readahead 页随后被 PageCache/filemap 消费的次数 |
+| `filemap_fault_around_unused_discards` | counter | readahead 页未使用即被回收、truncate 或 invalidate 的次数 |
+| `filemap_fault_around_aborts` | counter | 批量 admission 因 I/O、内存或 generation 变化放弃的次数 |
 | `exec_direct_count` | counter | exec 尝试 direct ELF loader 的次数 |
 | `exec_direct_enosys_count` | counter | direct loader 返回 ENOSYS 的次数 |
 | `exec_fallback_count` | counter | 回退到通用 ELF loader 的次数 |
@@ -395,6 +449,7 @@ perf_diag feature 关闭时（默认构建）：
 | `os/src/syscall/mod.rs` | Syscall 入口/出口计时 |
 | `os/src/syscall/process/exec.rs` | direct ELF loader 与 fallback 路径计数 |
 | `os/src/hal/arch/*/trap/mod.rs` | Trap enter 计时 |
+| `os/src/smp.rs` | 远端 TLB backend、range/fanout、同步 ticks 的 per-CPU 记录与聚合快照 |
 | `os/src/trace.rs` | Ring buffer + tracing_on/dropped 运行时控制 |
 | `os/src/fs/sysfs/mod.rs` | sysfs 写支持（write_fn + write_at + resize） |
 | `os/src/fs/sysfs/files/diag.rs` | /sys/kernel/ 文件注册与内容格式化 |

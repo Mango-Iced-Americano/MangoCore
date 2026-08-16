@@ -4,6 +4,7 @@
 use core::convert::Infallible;
 use core::ptr::{read_volatile, write_volatile};
 use embedded_hal::serial::nb::{Read, Write};
+use crate::mm::PhysAddr;
 
 pub const LSR_OVERRUN: u8 = 1 << 1;
 pub const LSR_PARITY: u8 = 1 << 2;
@@ -31,7 +32,10 @@ impl Ns16550a {
     fn register_address(&self, register: usize) -> Option<usize> {
         let offset = register.checked_shl(self.register_shift as u32)?;
         let end = offset.checked_add(self.register_io_width)?;
-        (end <= self.size).then_some(self.base.checked_add(offset)?)
+        (end <= self.size).then_some(
+            PhysAddr(self.base.checked_add(offset)?)
+                .direct_map_ptr() as usize,
+        )
     }
 
     fn read_register(&self, register: usize) -> Option<u8> {
@@ -39,7 +43,7 @@ impl Ns16550a {
         match self.register_io_width {
             1 => {
                 // SAFETY: FDT validation bounds the selected register within the
-                // identity-mapped UART range; byte-wide UARTs permit u8 MMIO.
+                // supervisor physmap UART range; byte-wide UARTs permit u8 MMIO.
                 Some(unsafe { read_volatile(address as *const u8) })
             }
             4 => {
@@ -58,7 +62,7 @@ impl Ns16550a {
         match self.register_io_width {
             1 => {
                 // SAFETY: FDT validation bounds the selected register within the
-                // identity-mapped UART range; byte-wide UARTs permit u8 MMIO.
+                // supervisor physmap UART range; byte-wide UARTs permit u8 MMIO.
                 unsafe { write_volatile(address as *mut u8, value) };
                 true
             }

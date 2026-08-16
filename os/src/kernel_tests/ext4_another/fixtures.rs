@@ -3,9 +3,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
-use crate::drivers::block::{
-    BlockDevice, BlockDeviceError, BlockDeviceResult,
-};
+use crate::drivers::block::{BlockDevice, BlockDeviceError, BlockDeviceResult};
 use crate::fs::vfs::FileSystem;
 use crate::hal::BLOCK_SZ;
 
@@ -29,11 +27,6 @@ impl BlockDevice for ZeroBlockDevice {
     fn write_block(&self, _block_id: usize, _buf: &[u8]) -> BlockDeviceResult {
         Err(BlockDeviceError::DeviceError)
     }
-}
-
-pub(super) struct FlushFailsAfterMountDevice {
-    inner: Arc<dyn BlockDevice>,
-    flush_count: AtomicUsize,
 }
 
 /// Fails flushes only while explicitly armed by a test.
@@ -88,41 +81,6 @@ impl BlockDevice for ArmableFlushDevice {
 
     fn supports_reliable_flush(&self) -> bool {
         self.inner.supports_reliable_flush()
-    }
-
-    fn size_bytes(&self) -> Option<u64> {
-        self.inner.size_bytes()
-    }
-}
-
-impl FlushFailsAfterMountDevice {
-    pub(super) fn new(inner: Arc<dyn BlockDevice>) -> Self {
-        Self {
-            inner,
-            flush_count: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl BlockDevice for FlushFailsAfterMountDevice {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> BlockDeviceResult {
-        self.inner.read_block(block_id, buf)
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) -> BlockDeviceResult {
-        self.inner.write_block(block_id, buf)
-    }
-
-    fn flush(&self) -> BlockDeviceResult {
-        if self.flush_count.fetch_add(1, Ordering::AcqRel) < 4 {
-            self.inner.flush()
-        } else {
-            Err(BlockDeviceError::DeviceError)
-        }
-    }
-
-    fn supports_reliable_flush(&self) -> bool {
-        true
     }
 
     fn size_bytes(&self) -> Option<u64> {

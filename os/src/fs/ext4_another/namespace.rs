@@ -30,6 +30,7 @@ macro_rules! writable_namespace_inode_mutations {
                             ),
                         )
                     })?;
+                    self.invalidate_directory_snapshot();
                     super::inode::Ext4Inode::new(fs, child_id)
                         .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
                 }
@@ -78,6 +79,7 @@ macro_rules! writable_namespace_inode_mutations {
                 })?,
                 _ => return Err(crate::utils::error::SyscallErr::EINVAL),
             };
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child_id)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -94,11 +96,7 @@ macro_rules! writable_namespace_inode_mutations {
             if name.is_empty() || name.len() > 255 || name.contains('/') {
                 return Err(crate::utils::error::SyscallErr::EINVAL);
             }
-            if fs.inner().lookup(
-                u32::try_from(self.key.inode_id())
-                    .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?,
-                name,
-            ).is_ok() {
+            if self.directory_snapshot(&fs)?.find(name).is_some() {
                 return Err(crate::utils::error::SyscallErr::EEXIST);
             }
             let parent = u32::try_from(self.key.inode_id())
@@ -111,6 +109,7 @@ macro_rules! writable_namespace_inode_mutations {
                     another_ext4::InodeOwner { uid: 0, gid: 0 },
                 )
             })?;
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child.ino)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -141,6 +140,7 @@ macro_rules! writable_namespace_inode_mutations {
                     },
                 )
             })?;
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child.ino)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -159,7 +159,7 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            if fs.inner().lookup(parent, name).is_ok() {
+            if self.directory_snapshot(&fs)?.find(name).is_some() {
                 return Err(crate::utils::error::SyscallErr::EEXIST);
             }
             let target = other
@@ -172,7 +172,9 @@ macro_rules! writable_namespace_inode_mutations {
             }
             let child = u32::try_from(target.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
-            fs.run_metadata_operation(|| fs.inner().link(child, parent, name))
+            fs.run_metadata_operation(|| fs.inner().link(child, parent, name))?;
+            self.invalidate_directory_snapshot();
+            Ok(())
         }
 
         fn mknod(
@@ -225,6 +227,7 @@ macro_rules! writable_namespace_inode_mutations {
                     another_ext4::InodeOwner { uid: 0, gid: 0 },
                 )
             })?;
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child_id)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -281,6 +284,7 @@ macro_rules! writable_namespace_inode_mutations {
                     },
                 )
             })?;
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child_id)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -307,6 +311,7 @@ macro_rules! writable_namespace_inode_mutations {
                     permission,
                 )
             })?;
+            self.invalidate_directory_snapshot();
             super::inode::Ext4Inode::new(fs, child_id)
                 .map(|inode| inode as alloc::sync::Arc<dyn crate::fs::vfs::IndexNode>)
         }
@@ -352,6 +357,10 @@ macro_rules! writable_namespace_inode_mutations {
                     new_name,
                 )
             })?;
+            self.invalidate_directory_snapshot();
+            if !alloc::sync::Arc::ptr_eq(&self.lifetime, &target_parent.lifetime) {
+                target_parent.invalidate_directory_snapshot();
+            }
             if let Some(handle) = reclaim {
                 fs.attach_reclaim_handle(handle)?;
             }
@@ -369,6 +378,7 @@ macro_rules! writable_namespace_inode_mutations {
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let reclaim = fs.run_metadata_operation(|| fs.inner().unlink(parent, name))?;
+            self.invalidate_directory_snapshot();
             if let Some(handle) = reclaim {
                 fs.attach_reclaim_handle(handle)?;
             }
@@ -386,6 +396,7 @@ macro_rules! writable_namespace_inode_mutations {
             let parent = u32::try_from(self.key.inode_id())
                 .map_err(|_| crate::utils::error::SyscallErr::EFBIG)?;
             let reclaim = fs.run_metadata_operation(|| fs.inner().rmdir(parent, name))?;
+            self.invalidate_directory_snapshot();
             if let Some(handle) = reclaim {
                 fs.attach_reclaim_handle(handle)?;
             }

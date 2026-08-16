@@ -4,6 +4,7 @@ category: architecture
 status: stable
 author: MangoCore Team
 last_update: 2026-08-15
+last_update: 2026-08-14
 tags: [architecture, riscv64, hal]
 ---
 
@@ -11,7 +12,10 @@ tags: [architecture, riscv64, hal]
 
 ## 1. 概述
 
-RISC-V 后端位于 `os/src/hal/arch/riscv/`。该后端面向 `riscv64gc-unknown-none-elf`，通过 OpenSBI 完成 console、timer、shutdown 等底层服务，并向架构无关层提供 `Sv39PageTable`、trap context、内核栈、上下文切换和时间接口。
+RISC-V 后端位于 `os/src/hal/arch/riscv/`。该后端面向 `riscv64gc-unknown-none-elf`，
+通过 OpenSBI 完成 console、shutdown 等底层服务；timer 在固件明确报告整机 Sstc
+时由 S-mode 直写 `stimecmp`，否则回退 OpenSBI TIME。后端向架构无关层提供
+`Sv39PageTable`、trap context、内核栈、上下文切换和时间接口。
 
 统一类型别名位于 `hal/arch/riscv/mod.rs`：
 
@@ -53,9 +57,10 @@ os/src/hal/arch/riscv/
 | `kern_stack.rs` | 内核栈分配、trap context/user stack 地址计算 |
 | `plic.rs` | QEMU/实板 PLIC supervisor context 初始化、claim/complete 与外部 IRQ 分发 |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
+| `sbi.rs` | OpenSBI 调用、console、timer fallback、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表、PTE flag、TLB 刷新 |
 | `switch.S` | 任务上下文切换汇编 |
-| `time.rs` | 时间读取、时钟频率、timer delta |
+| `time.rs` | 时间读取、时钟频率、Sstc/SBI backend 选择与 timer delta |
 | `trap/mod.rs` | trap handler、syscall、缺页、timer interrupt、返回用户态 |
 | `trap/context.rs` | `TrapContext`、`UserContext`、用户信号 mask 上下文 |
 
@@ -71,6 +76,7 @@ pub fn machine_init() {
     if plic_ready {
         trap::enable_external_interrupt();
     }
+    time::init_timer_backend();
     // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
     // 每个 CPU 的首个 timer deadline 由 timer_cpu_init() 设置。
 }
@@ -95,7 +101,11 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | `plic::init_boot_cpu()` | `plic.rs` | 从 FDT 选择 `sifive,plic-1.0.0`，清理 BSP supervisor context 的 enable/threshold，完成 MMIO fence 后发布 ready 状态 |
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
 | `trap::enable_external_interrupt()` | `trap/mod.rs` | 仅在 PLIC 已就绪时打开 supervisor external interrupt（SEIE） |
+| `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
+| `time::init_timer_backend()` | `time.rs` | 在 AP 发布和首个 deadline 前按全部 enabled CPU 的 FDT ISA 能力选择 Sstc；任何缺失、畸形或不一致都回退 SBI |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
+| `sbi::init_ipi()` | `sbi.rs` | 多核时一次性探测 IPI extension 并缓存；`send_ipi` 运行期只读缓存，不再每次 doorbell 做 BASE probe |
+| svvptc 标记 | `time.rs` | 复用 `platform_supports_isa_ext` 打印 `[mm] FDT per-hart svvptc: all enabled CPUs / missing(partial)`，与 Sstc 同一套 per-hart FDT ISA 解析 |
 
 第一次 timer deadline 没有在 `machine_init()` 中设置。每个 CPU 都先由
 `timer_cpu_init()` 写入首个绝对 deadline，再开放本地 timer interrupt，避免在 deadline
@@ -222,6 +232,10 @@ task.process.vm().write(|vm| vm.do_page_fault(addr, access))
 | `OutOfMemory` | `pending_oom_kill = true` |
 | 其他 | warn + `SIGSEGV` + `SEGV_MAPERR` |
 
+成功缺页没有产生 pending signal，因此不能扫描或唤醒 signalfd/signal waiters。rv64
+只在实际入队 `SIGBUS`/`SIGSEGV` 后，先释放 `task.inner` 锁再通知等待队列；OOM
+分支只设置 `pending_oom_kill`，同样不制造信号事件。
+
 ### 6.2 非法指令
 
 `IllegalInstruction` 和 `InstructionMisaligned` 注入 `SIGILL`，并使用 `SigInfo::ILL_ILLOPC`。其他未支持 trap 进入 panic，输出 cause 和 stval。
@@ -239,6 +253,8 @@ task::timer_interrupt_handler()
 ```
 
 该分支不直接调用 `set_next_trigger` 形式的接口；下一次 timer 触发由 task/timer 路径通过 HAL time 接口编程。
+HAL 对调用者隐藏 backend：整机所有 enabled CPU 都明确报告 Sstc 时直写 RV64
+`stimecmp` CSR，否则调用 SBI TIME。选择由 BSP 在 AP 发布前一次完成，启动后不可变。
 
 ## 8. 返回用户态
 
@@ -246,16 +262,16 @@ RISC-V `trap_return()`：
 
 ```rust
 let task = do_signal();
-set_user_trap_entry();
 let trap_cx_ptr = task.trap_cx_user_va();
-let user_satp = current_user_token();
+let user_vm = task.process.activate_user_vm(); // switch_user_vm installs SATP
 let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+drop(task);
+set_user_trap_entry();
 asm!(
     "fence.i",
     "jr {restore_va}",
     restore_va = in(reg) restore_va,
     in("a0") trap_cx_ptr,
-    in("a1") user_satp,
     options(noreturn)
 );
 ```
@@ -266,7 +282,7 @@ asm!(
 |------|------|
 | `do_signal()` | 返回用户态前交付信号和构造 signal frame |
 | `TRAMPOLINE` | 用户/内核页表都可见的恢复代码映射 |
-| `current_user_token()` | 用户页表 token，即恢复用户态所需 satp |
+| `activate_user_vm()` | 在 IRQ-off transaction 内取得 token/ASID/epoch 并安装目标 SATP |
 | `fence.i` | 保证指令流一致性 |
 | `options(noreturn)` | 恢复汇编不返回 Rust 调用点 |
 
@@ -292,17 +308,22 @@ asm!(
 | 能力 | 作用 |
 |------|------|
 | console put/get | 支撑 `console_putchar`、`console_getchar` |
-| timer | 设置 timer |
+| timer fallback | 平台未通过 Sstc 能力门禁时设置 timer |
 | shutdown | QEMU/OpenSBI 退出 |
 | local irq save/restore | 本地中断状态保存恢复 |
 | RFENCE FID 2 | 按 hart mask、字节 start/size 与 ASID 同步远端区间失效；跨度超过 64 页由上层改走全刷 |
 
 上层代码通过 `hal/mod.rs` 的 re-export 使用这些能力，不直接引用 `sbi.rs`。
 
-RISC-V 后端的阅读主线是“OpenSBI 提供底层服务，S-mode 内核建立 trap 和页表”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并打开 timer；syscall 和 page fault 都从 `trap/mod.rs` 分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
+RISC-V 后端的阅读主线是“OpenSBI 提供固件服务，S-mode 内核建立 trap、页表并选择
+timer backend”。启动后 `entry.asm` 进入 Rust，`machine_init()` 安装 trap 并在 Sstc
+直写与 SBI fallback 之间 fail-closed 选择；syscall 和 page fault 都从 `trap/mod.rs`
+分派；页表修改落到 `sv39.rs`，TLB 刷新最终是 `sfence.vma`。因此 rv64 上遇到用户态
+异常时，先看 `scause/stval/sepc` 对应分支，再看架构无关层返回的 errno 或 signal。
 
 RV64 现在会探测 `SATP.ASID` 的实际位数，并让一个 MM 在所有 hart 使用同一 versioned
-ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。有界区间由同一 `MmuGather` 主链
+ASID。用户根共享 supervisor kernel 映射，普通 trap 入口/返回保持当前 SATP；调度、exec
+或进入 idle 时才由 `switch_user_vm()` 换根。ASIDLEN=0 的平台仅在真实换根时全刷。有界区间由同一 `MmuGather` 主链
 冻结，RFENCE 不可用时改走每发起 CPU 固定 slot，不建立第二套 MM 提交结构。它仍没有 LA64 的用户非对齐访存
 模拟路径；未对齐兼容必须在 syscall/uaccess 或测试适配层显式处理，不能指望 trap 后端
 解码并模拟 load/store。
@@ -315,7 +336,7 @@ ASID；ASIDLEN=0 的平台自动退化到 switch-time 全刷。有界区间由�
 | syscall 编号错误 | `trap_handler()` syscall 分支 | `a7` 和 `a0..a5` 保存位置 |
 | 用户缺页反复触发 | `sv39.rs`, `page_fault.rs` | PTE 权限和 `sfence.vma` |
 | timer 不抢占 | `trap::enable_timer_interrupt()`、`time.rs` | `sie::set_stimer()` 和 timer delta |
-| 返回用户态失败 | `trap_return()`、`trap.S` | trampoline、satp、trap context VA |
+| 返回用户态失败 | `trap_return()`、`trap.S` | shared kernel roots、SATP epoch、trampoline、trap context VA |
 
 ## 12. 测试映射
 

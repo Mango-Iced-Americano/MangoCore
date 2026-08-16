@@ -8,9 +8,9 @@ RUSTUP_HOME ?= $(HOME)/.rustup
 CARGO_HOME ?= $(HOME)/.cargo
 export RUSTUP_HOME CARGO_HOME
 
-# submission 交付分支默认不制作 tools 盘，消除 Alpine 包下载等额外网络依赖；
-# 本地需要工具盘时显式 make BUILD_TOOLS_DISK=1 开启。
-BUILD_TOOLS_DISK ?= 0
+# 默认制作 tools 盘（含 Alpine 工具包下载等网络依赖），供 derived-comp/评测的 x1 驱动器使用；
+# 网络受限的交付/评测环境可显式 make BUILD_TOOLS_DISK=0 跳过。
+BUILD_TOOLS_DISK ?= 1
 
 # 评测不需要 rootfs 盘（make all 只产出内核/initramfs），默认跳过；
 # 本地需要时显式 make BUILD_ROOTFS=1 开启。
@@ -80,24 +80,24 @@ la64_all: prepare-cargo-config
 else
 rv64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-rv)
 	@echo "Building rv64"
-	$(MAKE) ARCH=rv64 PROFILE=normal -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
+	$(MAKE) ARCH=rv64 PROFILE=normal CORE_NUM=8 -f make/rv64.mk all MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/rv64/$(MODE)/normal/user" TOOLS_IMG_RV="$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img"
 
 la64_all: prepare-cargo-config $(if $(filter 1,$(BUILD_TOOLS_DISK)),tools-disk-la)
 	@echo "Building la64"
-	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
+	$(MAKE) ARCH=la64 PROFILE=normal CORE_NUM=12 -f make/la64.mk all MODE=$(MODE) LOG=$(LOG) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user" TOOLS_IMG_LA="$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img"
 endif
 
 publish-compatibility:
 	@echo "[publish-compatibility] publishing both completed architecture products"
 	@mkdir -p "$(COMPAT_OUTPUT_DIR)"
-	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
-	cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
-	cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
+	cp -f --remove-destination "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/kernel-rv" "$(COMPAT_OUTPUT_DIR)/kernel-rv"
+	cp -f --remove-destination "$(BUILD_ROOT)/la64/$(MODE)/normal/kernel/kernel-la" "$(COMPAT_OUTPUT_DIR)/kernel-la"
+	cp -f --remove-destination "$(BUILD_ROOT)/rv64/$(MODE)/normal/kernel/Image" "$(COMPAT_OUTPUT_DIR)/Image"
 	@if [ -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" ]; then \
-		cp -f "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"; \
+		cp -f --remove-destination "$(BUILD_ROOT)/rv64/$(MODE)/normal/tools/disk.img" "$(COMPAT_OUTPUT_DIR)/disk.img"; \
 	fi
 	@if [ -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" ]; then \
-		cp -f "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"; \
+		cp -f --remove-destination "$(BUILD_ROOT)/la64/$(MODE)/normal/tools/disk-la.img" "$(COMPAT_OUTPUT_DIR)/disk-la.img"; \
 	fi
 
 rv64-kernel-build-only: prepare-cargo-config

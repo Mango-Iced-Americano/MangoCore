@@ -56,6 +56,30 @@ fn set_user_trap_entry() {
     }
 }
 
+/// trap-return 指令屏障策略。
+///
+/// QEMU TCG 在 guest 写入可执行页后按当前内存内容重新翻译，不维护会导致
+/// stale instruction 的负 I-cache，因此默认省略每个用户 trap 的 `fence.i`；
+/// 真实硬件/未知平台仍默认执行。运行期 `mango.rv.trap_return_fence_i=on/off`
+/// 可强制覆盖，保留同镜像 A/B 能力。
+fn user_return_fence_i_enabled() -> bool {
+    static ENABLED: spin::Once<bool> = spin::Once::new();
+    *ENABLED.call_once(|| {
+        for arg in crate::bootargs::get_cmdline().split_ascii_whitespace() {
+            match arg {
+                "mango.rv.trap_return_fence_i=off" => return false,
+                "mango.rv.trap_return_fence_i=on" => return true,
+                _ => {}
+            }
+        }
+        let qemu_model = crate::hal::platform::platform_info()
+            .model
+            .as_deref()
+            .is_some_and(|model| model.contains("qemu"));
+        !qemu_model
+    })
+}
+
 pub fn enable_timer_interrupt() {
     unsafe {
         sie::set_stimer();
@@ -126,6 +150,21 @@ pub fn trap_handler() -> ! {
     // current 时会同时校验 `Running(cpu)`，不再把用户 trap 限制在 CPU0。
     let scause = scause::read();
     let stval = stval::read();
+
+    // trap 全程计时起点：只覆盖 handler 处理区间（到 trap_return 首行闭合），
+    // 汇编 entry/restore 与调度安全点不计入，供 RV8/LA12 配对比较边界成本。
+    crate::task::perf::record_trap_enter(match scause.cause() {
+        Trap::Exception(Exception::UserEnvCall) => crate::task::perf::TRAP_CAUSE_ECALL,
+        Trap::Exception(Exception::StoreFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::InstructionFault)
+        | Trap::Exception(Exception::InstructionPageFault)
+        | Trap::Exception(Exception::LoadFault)
+        | Trap::Exception(Exception::LoadPageFault) => crate::task::perf::TRAP_CAUSE_PAGE_FAULT,
+        Trap::Interrupt(Interrupt::SupervisorTimer) => crate::task::perf::TRAP_CAUSE_TIMER,
+        Trap::Interrupt(Interrupt::SupervisorSoft) => crate::task::perf::TRAP_CAUSE_IPI,
+        _ => crate::task::perf::TRAP_CAUSE_OTHER,
+    });
 
     if let Trap::Exception(Exception::UserEnvCall) = scause.cause() {
         let _trap_start = crate::task::perf::perf_time_now();
@@ -224,20 +263,24 @@ pub fn trap_handler() -> ! {
             );
             if let Err(error) = pf_result {
                 let mut inner = task.acquire_inner_lock();
-                match error {
+                let signal_enqueued = match error {
                     MemoryError::BeyondEOF | MemoryError::BackingStoreFailure => {
                         inner.add_signal(Signals::SIGBUS);
+                        true
                     }
                     MemoryError::NoPermission => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_ACCERR);
+                        true
                     }
                     MemoryError::BadAddress | MemoryError::NotMapped => {
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
                     MemoryError::OutOfMemory => {
                         inner.pending_oom_kill = true;
+                        false
                     }
                     other => {
                         log::warn!(
@@ -246,10 +289,14 @@ pub fn trap_handler() -> ! {
                         );
                         inner.sigmask.remove(Signals::SIGSEGV);
                         inner.add_signal_with_code(Signals::SIGSEGV, SigInfo::SEGV_MAPERR);
+                        true
                     }
+                };
+                drop(inner);
+                if signal_enqueued {
+                    task.process.notify_signal_waiters();
                 }
-            };
-            task.process.notify_signal_waiters();
+            }
             crate::task::perf::arm_pagefault_return();
         }
         Trap::Exception(Exception::IllegalInstruction)
@@ -290,6 +337,9 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 闭合本次 trap 的 handler 区间计时；必须在调度安全点之前，避免把
+    // 切换出去的等待时间计入 trap 成本。
+    crate::task::perf::record_trap_exit_ticks();
     // trap frame 已完整、当前任务锁均已释放；timer callback 与 RESCHEDULE
     // 只能在这个统一边界让出 CPU，不能从 hard IRQ 直接切换任务。
     crate::task::run_task_safe_point();
@@ -299,7 +349,6 @@ pub fn trap_return() -> ! {
     } else {
         0
     };
-    set_user_trap_entry();
     // Refresh after signal/exec context changes and on every future migration:
     // the CPU performing this return owns the pointer installed on next trap.
     {
@@ -319,8 +368,9 @@ pub fn trap_return() -> ! {
     );
     // 先登记本 CPU 可能缓存当前 MM，再取得权威 token。后续页表修改方将以
     // 该驻留集合为 shootdown 目标，不能继续只读无锁 token hint。
-    let user_vm = task.process.activate_user_vm();
-    let user_satp = super::sv39::satp_with_asid(user_vm.token, user_vm.asid);
+    // RV switch_mm installs a different root here, before releasing the old
+    // AddressSpace pin.  When the same MM is still active this is a no-op.
+    let _user_vm = task.process.activate_user_vm();
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     if pagefault_return_start != 0 {
         crate::task::perf::record_pagefault_stage(
@@ -331,22 +381,35 @@ pub fn trap_return() -> ! {
     // 安全点、信号递送和 MM 激活都仍属于内核态。必须到真正执行 SRET 前
     // 才闭合 system 区间并开启 user 区间，否则安全点调度出去的时间会被
     // 错算为 user time，并在迁移后归到错误 CPU。
-    let (user_us, system_us) = task
-        .acquire_inner_lock()
-        .update_process_times_enter_user();
+    let (user_us, system_us) = task.acquire_inner_lock().update_process_times_enter_user();
     task.process.account_cpu_time(user_us, system_us);
     // `asm!(noreturn)` 不会展开 Rust 栈帧。current 槽仍持有 owner，
     // 这个仅供恢复路径读取状态的本地 Arc 必须在跳转前释放。
     drop(task);
-    unsafe {
-        asm!(
-            "fence.i",
-            "jr {restore_va}",
-            restore_va = in(reg) restore_va,
-            in("a0") trap_cx_ptr,
-            in("a1") user_satp,
-            options(noreturn)
-        );
+    // 从这里到 __restore 不得再等待或临时开中断。若在 ASID rollover 前
+    // 切换 stvec，等待路径收到 IPI 时会把旧 sscratch 当成 TrapContext。
+    set_user_trap_entry();
+    let fence_i = user_return_fence_i_enabled();
+    crate::task::perf::record_user_trap_return(fence_i);
+    if fence_i {
+        unsafe {
+            asm!(
+                "fence.i",
+                "jr {restore_va}",
+                restore_va = in(reg) restore_va,
+                in("a0") trap_cx_ptr,
+                options(noreturn)
+            );
+        }
+    } else {
+        unsafe {
+            asm!(
+                "jr {restore_va}",
+                restore_va = in(reg) restore_va,
+                in("a0") trap_cx_ptr,
+                options(noreturn)
+            );
+        }
     }
 }
 

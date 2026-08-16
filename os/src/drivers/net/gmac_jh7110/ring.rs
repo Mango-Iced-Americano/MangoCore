@@ -1,6 +1,6 @@
 use crate::config::PAGE_SIZE;
 use crate::hal::{get_clock_freq, get_time};
-use crate::mm::{frame_alloc, FrameTracker};
+use crate::mm::{frame_alloc, FrameTracker, PhysAddr};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -107,12 +107,24 @@ impl DmaRings {
         self.rx_descriptor_base() + (RX_DESC_COUNT - 1) * DESC_SIZE
     }
 
+    fn rx_descriptor_address(&self, index: usize) -> usize {
+        self.rx_descriptor_base() + index * DESC_SIZE
+    }
+
+    fn tx_descriptor_address(&self, index: usize) -> usize {
+        self.tx_descriptor_base() + index * DESC_SIZE
+    }
+
     fn rx_descriptor(&self, index: usize) -> *mut DmaDesc {
-        (self.rx_descriptor_base() + index * DESC_SIZE) as *mut DmaDesc
+        PhysAddr(self.rx_descriptor_address(index))
+            .direct_map_ptr()
+            .cast::<DmaDesc>()
     }
 
     fn tx_descriptor(&self, index: usize) -> *mut DmaDesc {
-        (self.tx_descriptor_base() + index * DESC_SIZE) as *mut DmaDesc
+        PhysAddr(self.tx_descriptor_address(index))
+            .direct_map_ptr()
+            .cast::<DmaDesc>()
     }
 
     fn initialize(&self) -> Result<(), GmacJh7110Error> {
@@ -143,7 +155,7 @@ impl DmaRings {
         for _ in 0..RX_DESC_COUNT {
             let index = self.rx_index;
             let descriptor = self.rx_descriptor(index);
-            clean_dma_range(descriptor as usize, DESC_SIZE);
+            clean_dma_range(self.rx_descriptor_address(index), DESC_SIZE);
             dma_barrier();
             let des3 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3)) };
             if des3 & DESC_OWN != 0 {
@@ -163,7 +175,13 @@ impl DmaRings {
             if valid && length > 0 {
                 clean_dma_range(buffer, length);
                 dma_barrier();
-                unsafe { core::ptr::copy_nonoverlapping(buffer as *const u8, output.as_mut_ptr(), length) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        PhysAddr(buffer).direct_map_ptr().cast_const(),
+                        output.as_mut_ptr(),
+                        length,
+                    )
+                };
             }
             // Recycle descriptor: restore des0/des1 (buffer addr) and des2 (buffer size).
             unsafe {
@@ -182,9 +200,9 @@ impl DmaRings {
                     DESC_OWN | BUF1_VALID,
                 );
             }
-            clean_dma_range(descriptor as usize, DESC_SIZE);
+            clean_dma_range(self.rx_descriptor_address(index), DESC_SIZE);
             dma_barrier();
-            write_reg(DMA_CH0_RX_END, descriptor as u32);
+            write_reg(DMA_CH0_RX_END, self.rx_descriptor_address(index) as u32);
             if valid {
                 return Some(length);
             }
@@ -198,7 +216,7 @@ impl DmaRings {
         }
         let index = self.tx_index;
         let descriptor = self.tx_descriptor(index);
-        clean_dma_range(descriptor as usize, DESC_SIZE);
+        clean_dma_range(self.tx_descriptor_address(index), DESC_SIZE);
         dma_barrier();
         if unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3)) } & DESC_OWN != 0 {
             return None;
@@ -209,9 +227,14 @@ impl DmaRings {
         };
         let length = input.len().max(60);
         unsafe {
-            core::ptr::copy_nonoverlapping(input.as_ptr(), buffer as *mut u8, input.len());
+            let buffer_ptr = PhysAddr(buffer).direct_map_ptr();
+            core::ptr::copy_nonoverlapping(input.as_ptr(), buffer_ptr, input.len());
             if length > input.len() {
-                core::ptr::write_bytes((buffer + input.len()) as *mut u8, 0, length - input.len());
+                core::ptr::write_bytes(
+                    buffer_ptr.add(input.len()),
+                    0,
+                    length - input.len(),
+                );
             }
             core::ptr::write_volatile(
                 core::ptr::addr_of_mut!((*descriptor).des0),
@@ -234,10 +257,13 @@ impl DmaRings {
                 DESC_OWN | TX_FIRST | TX_LAST | (length as u32 & RX_FRAME_LEN_MASK),
             );
         }
-        clean_dma_range(descriptor as usize, DESC_SIZE);
+        clean_dma_range(self.tx_descriptor_address(index), DESC_SIZE);
         dma_barrier();
         self.tx_index = (index + 1) % TX_DESC_COUNT;
-        write_reg(DMA_CH0_TX_END, self.tx_descriptor(self.tx_index) as u32);
+        write_reg(
+            DMA_CH0_TX_END,
+            self.tx_descriptor_address(self.tx_index) as u32,
+        );
         Some(index)
     }
 
@@ -249,7 +275,7 @@ impl DmaRings {
                 let timeout = (get_clock_freq() / 10).max(1);
                 loop {
                     let descriptor = self.tx_descriptor(index);
-                    clean_dma_range(descriptor as usize, DESC_SIZE);
+                    clean_dma_range(self.tx_descriptor_address(index), DESC_SIZE);
                     dma_barrier();
                     let des3 = unsafe {
                         core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3))
@@ -274,7 +300,7 @@ impl DmaRings {
                 let mut rx_descriptor_valid = false;
                 for index in 0..RX_DESC_COUNT {
                     let descriptor = self.rx_descriptor(index);
-                    clean_dma_range(descriptor as usize, DESC_SIZE);
+                    clean_dma_range(self.rx_descriptor_address(index), DESC_SIZE);
                     dma_barrier();
                     let des3 = unsafe {
                         core::ptr::read_volatile(core::ptr::addr_of!((*descriptor).des3))

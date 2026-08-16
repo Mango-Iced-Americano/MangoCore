@@ -282,9 +282,16 @@ impl CpuTaskState {
 /// 在返回用户态前切换本 CPU 的活跃地址空间。
 ///
 /// 名称与 Linux `switch_mm()` 对齐。槽锁只用于交换 Arc，不跨 VM 锁、ASID
-/// rollover 或 IPI 等待；旧 MM 先 leave，新 MM 再以 generation 协议进入。
+/// rollover 或 IPI 等待。RV64 必须先把硬件切到新根，再允许旧 MM deactivate/drop；
+/// 否则 no-switch trap 模型会让 SATP 指向已经退休的页表页。
 pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmContext {
     let cpu = crate::smp::cpu_id();
+    // The MM context and its SATP installation are one rollover transaction.
+    // A leader cannot publish the next epoch until this CPU handles its IPI;
+    // keeping IRQs disabled here therefore freezes CURRENT_ASID_EPOCH.  The
+    // rollover wait path may temporarily enable IRQs internally before retrying.
+    #[cfg(target_arch = "riscv64")]
+    let irq_was_enabled = crate::hal::local_irq_save();
     let state = crate::smp::local_task_state();
     let (same_mm, previous) = {
         let mut active = state.active_user_vm.lock();
@@ -297,16 +304,44 @@ pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmCont
 
     if same_mm {
         crate::task::perf::record_mm_same_already_active();
-        return vm.activate_on(cpu);
+        let context = vm.activate_on(cpu);
+        #[cfg(target_arch = "riscv64")]
+        crate::hal::arch::riscv::sv39::install_page_table(
+            context.token,
+            context.asid,
+            context.asid_epoch,
+        );
+        #[cfg(target_arch = "riscv64")]
+        crate::hal::local_irq_restore(irq_was_enabled);
+        return context;
     }
+    // LA64 continues to execute the kernel through PGDH while __restore owns
+    // the PGDL switch, so its established deactivate-before-activate order is
+    // unchanged.
+    #[cfg(target_arch = "loongarch64")]
     if let Some(previous) = previous {
         previous.deactivate_on(cpu);
     }
 
     let context = vm.activate_on(cpu);
+    #[cfg(target_arch = "riscv64")]
+    {
+        // `previous` remains pinned and active until this write completes.
+        crate::hal::arch::riscv::sv39::install_page_table(
+            context.token,
+            context.asid,
+            context.asid_epoch,
+        );
+        if let Some(previous) = previous.as_ref() {
+            previous.deactivate_on(cpu);
+        }
+    }
     let mut active = state.active_user_vm.lock();
     assert!(active.is_none(), "active user MM changed during switch");
     *active = Some(vm);
+    drop(active);
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::local_irq_restore(irq_was_enabled);
     context
 }
 
@@ -316,10 +351,25 @@ pub(crate) fn switch_user_vm(vm: Arc<AddressSpace<PageTableImpl>>) -> UserVmCont
 /// 改变之前；之后该任务若再次运行，必须重新经过 `switch_user_vm()`。
 fn leave_user_vm(cpu: usize) {
     debug_assert_eq!(cpu, crate::smp::cpu_id());
+    #[cfg(target_arch = "riscv64")]
+    let irq_was_enabled = crate::hal::local_irq_save();
     let active = crate::smp::task_state(cpu).active_user_vm.lock().take();
     if let Some(active) = active {
+        #[cfg(target_arch = "riscv64")]
+        {
+            // The kernel root contains the same shared supervisor subtrees.
+            // Install it before clearing the active bit or dropping the Arc,
+            // so page-table retirement can never race a live SATP root.
+            crate::hal::arch::riscv::sv39::install_page_table(
+                crate::mm::kernel_token(),
+                crate::hal::arch::riscv::sv39::KERN_ASID,
+                crate::hal::arch::riscv::sv39::current_asid_epoch(),
+            );
+        }
         active.deactivate_on(cpu);
     }
+    #[cfg(target_arch = "riscv64")]
+    crate::hal::local_irq_restore(irq_was_enabled);
 }
 
 /// 在退出 CPU 的 idle 栈上接收终态任务的最后一个调度 owner。
@@ -424,7 +474,7 @@ fn drain_local_zombies(cpu: usize, limit: usize) -> usize {
     drained
 }
 
-/// 执行一轮由 CPU0 本地 10ms scheduler tick 驱动的全局维护。
+/// 执行一轮由 CPU0 本地 scheduler tick 驱动的全局维护。
 ///
 /// 该函数只在 idle 栈、IRQ-off 且未持有调度锁时调用。调度 tick 使用可合并
 /// 发布位，因此长临界区之后最多补做一轮，不按遗漏 tick 数追赶形成维护风暴。
@@ -564,6 +614,7 @@ pub fn run_tasks() -> ! {
     }
 
     let mut schedule_tick = 0usize;
+    let mut last_prezero_tick_deadline = 0u64;
     // 与 AP 一样让 idle 调度边界始终从 IRQ-off 开始。每轮只打开一个短窗口
     // 交付已经 pending 的 hard IRQ，完整维护仍在关中断 idle 栈上执行。
     let _ = crate::hal::local_irq_save();
@@ -636,6 +687,11 @@ pub fn run_tasks() -> ! {
             dispatch_task(cpu, task_state, task, sched_profile, loop_t0);
         } else {
             // 没有就绪的任务 → CPU idle
+            let tick_deadline = crate::smp::local_sched_tick_deadline();
+            if tick_deadline != last_prezero_tick_deadline {
+                last_prezero_tick_deadline = tick_deadline;
+                let _ = crate::mm::idle_prezero_refill();
+            }
             let stage_t0 = sched_profile_start(sched_profile);
             super::perf::record_scheduler_idle(cpu, true);
             sched_record_stage(
@@ -661,9 +717,10 @@ pub fn run_tasks() -> ! {
 /// 空队列检查与 wait 都在 IRQ-off 窗口内，远程 enqueue 后的 doorbell 或本地 tick
 /// 都必定使 wait 返回。
 ///
-/// AP 上的 timer callback 不会进入共享子系统；普通用户任务仍需等待共享 FS/net/
-/// driver 审计完成后再解除默认 CPU0 affinity。
+/// AP 上的 timer callback 不会进入共享子系统；正式 normal 进程树继承 PID1
+/// 的全核 affinity，独立内核任务和 focused probes 仍使用显式 placement。
 fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
+    let mut timer_parked = false;
     let _ = crate::hal::local_irq_save();
     loop {
         // 短暂打开全局 IRQ，使已经 pending 的 IPI 进入 hard handler；随后
@@ -675,6 +732,9 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         // timer hard IRQ 与 IPI 一样只发布无锁状态；在 idle 栈、尚未取得
         // runqueue/processor 锁时推进本地 tick 并重编程 one-shot。
         let _ = super::run_deferred_timer_work();
+        if crate::mm::take_idle_prezero_refill_request() {
+            let _ = crate::mm::idle_prezero_refill_batch();
+        }
         // 上一任务已经切回本 CPU idle 栈；只在这里释放本地 zombie Arc，
         // 避免 AP 退出路径再竞争全局 TaskManager 或等待 CPU0 代为回收。
         let _ = drain_local_zombies(cpu, 64);
@@ -684,11 +744,22 @@ fn run_secondary_scheduler(cpu: usize, task_state: &'static CpuTaskState) -> ! {
         let next_task = super::run_queue::fetch_or_steal(cpu);
         super::perf::record_schedule_loop(next_task.is_some());
         if let Some(task) = next_task {
+            if timer_parked {
+                super::manager::restart_secondary_sched_timer();
+                timer_parked = false;
+            }
             dispatch_task(cpu, task_state, task, false, 0);
         } else {
+            if !timer_parked {
+                // Fill a useful initial reserve before removing the periodic
+                // tick.  Later low-water notifications wake one AP with an IPI.
+                let _ = crate::mm::idle_prezero_refill_batch();
+                super::manager::park_secondary_idle_timer();
+                timer_parked = true;
+            }
             super::perf::record_task_switch_idle_no_next();
-            // 关中断检查到空队列后再 wait；并发发布者先入队后发 IPI，
-            // 所以 check→wait 窗口内到达的 doorbell 不会丢失。
+            // 关中断检查到空队列后再 wait；AP timer 此时已经停表。并发任务
+            // 发布和 prezero 低水位通知都先发布状态、后发 IPI，因此不会丢失。
             super::perf::record_scheduler_idle(cpu, true);
             crate::hal::cpu_wait_for_interrupt();
         }
@@ -708,6 +779,9 @@ fn dispatch_task(
     if task.is_kernel_only() {
         crate::task::perf::record_task_switch_to_kernel_only();
     }
+    // 延迟发布协议只允许目标 CPU 在取得任务后确认 request；此时仍运行在
+    // idle 栈且尚未发布 current，能够在 `__switch` 改写 SP 前安全完成本地全刷。
+    let _ = crate::smp::service_deferred_kernel_tlb();
     #[cfg(all(feature = "boot_la_uboot_dmw", feature = "bringup_trace"))]
     let trace_first_switch =
         cpu == crate::smp::BOOT_CPU_ID && !BOARD_FIRST_TASK_SWITCH.swap(true, Ordering::Relaxed);
@@ -725,6 +799,7 @@ fn dispatch_task(
     task_state
         .current_tid
         .store(task.gettid(), Ordering::Relaxed);
+    crate::task::perf::record_dispatch_after_timer_preemption(cpu, task.gettid());
     processor.current = Some(task);
     // 先写入权威 current 槽再发布负载提示；提示的瞬时误差只影响放置质量，
     // 不参与 owner 正确性判断。
@@ -988,6 +1063,16 @@ pub fn current_syscall_name() -> &'static str {
     match task_state.current_syscall_id.load(Ordering::Relaxed) {
         0 => "<none>",
         id => crate::syscall::syscall_name(id - 1),
+    }
+}
+
+/// 返回当前 CPU 正在处理的 syscall ID，仅供低频诊断记账。
+#[inline(always)]
+pub(crate) fn current_syscall_id() -> Option<usize> {
+    let task_state = crate::smp::try_local_task_state()?;
+    match task_state.current_syscall_id.load(Ordering::Relaxed) {
+        0 => None,
+        id => Some(id - 1),
     }
 }
 

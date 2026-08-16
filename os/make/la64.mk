@@ -70,9 +70,13 @@ all: toolchain-preflight $(if $(filter 1,$(BUILD_ROOTFS)),fs-img,) build
 
 debug: build mv-debug
 
-stage-kernel:
+# 评测机只认根目录 kernel-la。LA64 内核 ELF 的 PhysAddr 是真实物理地址
+# （0x80000000），QEMU 可直接按 program header 加载，因此保留 ELF 格式并
+# strip 掉 debuginfo（110MB -> ~10MB）。必须依赖 $(KERNEL_BIN)（其依赖 kernel）
+# 保证 strip 前 ELF 已构建完成。
+stage-kernel: $(KERNEL_BIN)
 	@mkdir -p $(dir $(KERNEL_LA))
-	cp -f $(KERNEL_ELF) $(KERNEL_LA)
+	$(OBJCOPY) $(KERNEL_ELF) --strip-all $(KERNEL_LA)
 
 mv: stage-kernel
 	@echo "[deprecated] mv stages the LA64 kernel; root publication happens only after make all succeeds"

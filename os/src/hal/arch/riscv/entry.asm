@@ -3,10 +3,10 @@
     .equ MAX_CPUS, 16
     .equ BOOT_STACK_SHIFT, 18
     .equ BOOT_STACK_SIZE, 1 << BOOT_STACK_SHIFT
-    # The early FDT parser runs before the final kernel page table exists.
-    # Keep enough temporary 1 GiB leaves for an 8 GiB QEMU guest (whose DTB is
-    # placed near the top of RAM), with headroom for larger validation guests.
-    .equ BOOTSTRAP_GIB_LEAVES, 16
+    # The final physmap accepts physical addresses below 64 GiB.  Bootstrap
+    # mappings must cover that same physical limit because FDT parsing and the
+    # early RAM clear run before the final page table is installed.
+    .equ BOOTSTRAP_PHYS_LIMIT_GIB, 64
 
     .section .text.entry
     .globl _start
@@ -36,15 +36,17 @@ _start:
     # The RAM base is NOT hardcoded: U-Boot may load the Image at any
     # platform DRAM base (QEMU virt: 0x8000_0000; VisionFive 2: 0x4000_0000).
     # Derive the 1 GiB-aligned base from the runtime physical Image address.
-    # BOOTSTRAP_GIB_LEAVES temporary 1 GiB leaves cover the high-address DTB
-    # that pre-heap FDT parsing reads before mm::init().  In particular, an
-    # 8 GiB QEMU guest places it near 0x27fe_0000_0; four leaves are not enough.
+    # Temporary 1 GiB leaves extend from the aligned DRAM base to the exclusive
+    # 64 GiB physical limit, covering a high-address DTB before mm::init().
     # Keep the derived base in t3 across the satp switch: `la` is no longer
     # physical once translation is enabled, so the high-half alias offset is
     # computed from t3 *before* enabling the MMU.
     la t3, riscv_image_header      # runtime physical Image address (MMU off)
     li t4, 0xffffffffc0000000      # 1 GiB alignment mask
     and t3, t3, t4                 # 1 GiB-aligned DRAM base (physical)
+    srli t6, t3, 30
+    li t2, BOOTSTRAP_PHYS_LIMIT_GIB
+    bgeu t6, t2, .Lboot_park
     srli t5, t3, 12                # PPN of the DRAM base
     slli t5, t5, 10                # PPN field position in the PTE
     li t4, 0xef                    # V|R|W|X|G|A|D leaf flags
@@ -53,14 +55,16 @@ _start:
     srli t5, t3, 30
     slli t5, t5, 3                 # * 8 bytes per PTE
     add t5, t5, t0
-    li t6, BOOTSTRAP_GIB_LEAVES
+    li t6, BOOTSTRAP_PHYS_LIMIT_GIB
+    srli t2, t3, 30
+    sub t6, t6, t2
     li t4, 0x10000000
 1:  sd t1, 0(t5)
     add t1, t1, t4
     addi t5, t5, 8
     addi t6, t6, -1
     bnez t6, 1b
-    # high-half aliases: fixed root indices 256..259 (KERNEL_VIRT_BASE >> 30)
+    # linked high-half aliases: fixed root indices starting at 256
     li t2, 2048
     add t2, t2, t0
     srli t1, t3, 12
@@ -68,12 +72,38 @@ _start:
     li t5, 0xef
     or t1, t1, t5
     li t4, 0x10000000
-    li t6, BOOTSTRAP_GIB_LEAVES
+    li t6, BOOTSTRAP_PHYS_LIMIT_GIB
+    srli t5, t3, 30
+    sub t6, t6, t5
 2:  sd t1, 0(t2)
     add t1, t1, t4
     addi t2, t2, 8
     addi t6, t6, -1
     bnez t6, 2b
+    # Supervisor physmap aliases.  PhysAddr helpers use
+    # MEMORY_HIGH_BASE + physical_address while the final shared kernel page
+    # table is being constructed, so the bootstrap root must expose the same
+    # window before frame allocation starts.  The physical DRAM base selects
+    # the first root entry within the reserved 64 GiB window.
+    li t2, 0xffffffd000000000    # MEMORY_HIGH_BASE
+    or t2, t2, t3
+    srli t2, t2, 30
+    andi t2, t2, 0x1ff
+    slli t2, t2, 3
+    add t2, t2, t0
+    srli t1, t3, 12
+    slli t1, t1, 10
+    li t5, 0xef
+    or t1, t1, t5
+    li t4, 0x10000000
+    li t6, BOOTSTRAP_PHYS_LIMIT_GIB
+    srli t5, t3, 30
+    sub t6, t6, t5
+3:  sd t1, 0(t2)
+    add t1, t1, t4
+    addi t2, t2, 8
+    addi t6, t6, -1
+    bnez t6, 3b
     srli t0, t0, 12
     li t1, 0x8000000000000000
     or t0, t0, t1

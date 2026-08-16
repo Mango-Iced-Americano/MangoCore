@@ -26,6 +26,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | Sisyphus | Orchestrator AI；commit metadata 标识为 `Sisyphus <clio-agent@sisyphuslabs.ai>` | OhMyOpenAgent / OhMyOpenCode | 2026-05 至 2026-06 | 多步骤任务规划、并行探索、文档重构、代码修改编排、工作日志维护 | 多个 commit 含 `Ultraworked with Sisyphus` 和 `Co-authored-by: Sisyphus` |
 | GPT-5.6-terra | `openai/gpt-5.6-terra` | OhMyOpenCode | 2026-07 至 2026-08 | no_std LTP runner 诊断实现、模块拆分、构建验证与工作日志维护 | `docs/Work_Log/2026-07-17.md`、`docs/Work_Log/2026-08-14.md` |
 | DeepSeek（Claude Code 兼容路由） | 本地 Claude Code CLI 对接的 DeepSeek 服务；底层精确版本未完整记录 | `cc-codex` 本地协作协议 | 2026-07 | SMP 设计只读审查、Docker/QEMU 证据归纳、独立修改建议；不授予 commit/push 权限 | `docs/Work_Log/2026-07-25.md`、`docs/Work_Log/2026-07-27.md`、对应 evidence 摘要 |
+| OpenAI Codex | GPT-5-based Codex agent；会话未另行公开更细模型版本 | Codex desktop | 2026-08 | 嵌套 QEMU 根因复核、RISC-V signal-frame ABI 修复、`riscv_hwprobe` 保守兼容、双架构评测形态验证与证据整理 | `docs/Work_Log/2026-08-14.md` |
 | Oracle | 高推理能力代码审查与架构咨询 agent；当前会话模型标识为 GPT-5.5 | OhMyOpenCode agent | 2026-04 至 2026-06 | 根因分析、架构评审、代码正确性验证、性能优化策略、文档事实核查 | `docs/Work_Log.md` 多处记录 `Oracle reviewed`、`Oracle analysis confirmed`、`Root cause analysis by Oracle` |
 | Explore | Codebase search / pattern discovery agent | OhMyOpenCode sub-agent | 2026-05 至 2026-06 | 跨模块代码搜索、调用关系梳理、实现模式对比 | Work log 和 Sisyphus task records |
 | librarian / plan / deep 等 sub-agents | 专用辅助 agents | OhMyOpenCode sub-agents | 2026-06 | 文档整理、资料检索、复杂任务拆分、局部实现检查 | Sisyphus 编排记录、文档生成 commit、Work_Log 记录 |
@@ -109,6 +110,8 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | Socket close smoltcp buffer 回收 | 2026-08-09 | Oracle, GPT-5.6-terra | 最后 fd/epoll 引用、弱 socket registry、worker pending 与 smoltcp TCP close timer 的因果链审查 | Oracle 识别 close 仅入队却未唤醒 worker、TCP 非 Closed 重排队未重驱动和 route 缺失不可观测；实现去重回收请求、generation timer、15 秒硬回收与 RV64 无流量 UDP payload ktest |
 | Firmware DTB safety gate | 2026-07-28 | Oracle, Sisyphus | 固件启动参数信任边界、FDT 保留区与 2K1000 编译验证 | Oracle 指出非 RISC-V FDT 协议的 `a1` 可能为垃圾值；修复协议门控、DTB 边界校验和保留区，并在 Docker 中完成三个目标编译 |
 | VisionFive 2 watchdog reboot | 2026-08-01 | Oracle, GPT-5.6-terra | OpenSBI SRST 固件依赖审查、JH7110 reset 序列与 QEMU 回归验证 | Oracle 定位 U-Boot 关闭 I2C5 后 OpenSBI PMIC cold reboot 会永久挂起；实现内核直接 watchdog reset，保留 QEMU shutdown |
+| 嵌套 QEMU 双架构评测适配 | 2026-08-14 | OpenAI Codex | QEMU `cpuinfo_init`、Linux RISC-V `ucontext_t`/`riscv_hwprobe` ABI、BuildStorm 双层 QEMU 运行形态复核 | 修复 RISC-V mcontext offset/size 并实现保守 syscall 258 子集；RV64 16G/8 核与 LA64 36G/12 核外层 MangoCore 均用原版内层 QEMU 启动既有 ArceOS 至 `Hello, world!`/rc=0 |
+| rv-satp-fix 合入 develop 提交前门禁 | 2026-08-14 | OpenAI Codex | 分支快进、官方 basic 路径合同、raw/semantic judge 分账、双架构多核与嵌套 QEMU 复核 | 最终 `make all`、四格 lint、RV/LA basic+busybox 受约束门禁通过；两架构均由外层 MangoCore 内原版 QEMU 启动既有 ArceOS 至 `Hello, world!`/rc=0；全量测试未运行 |
 | another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |
 | another_ext4 close 持久化语义 ktest | 2026-08-01 | Oracle, GPT-5.6-terra | close 不作为 durability barrier 的掉电重启、fsync/global-sync 与 clean-unmount 用例设计 | Oracle 约束可判定边界：close 后不观察 raw 介质；仅 fsync/sync/on_umount 后要求 raw remount；双架构 74/74 ktest 通过 |
 | VF2 稀疏 bootable-hart 与 LA64 AP pre-SIMD | 2026-08-14 | GPT-5.6-terra, Explore | FDT bootable-hart 映射、LA64 AP exception 16 根因定位、Docker/QEMU RED→GREEN 验证 | Explore 只读排除 mailbox ID 混用；人工复核后将 AP pre-SIMD 的自动向量化查找改为标量循环，LA64 CORE_NUM=2 ktest 与 RV64 regression 通过 |
@@ -1587,6 +1590,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | 2026-07-30 | 工作树（未提交） | another_ext4 pwrite write combining | Oracle P0/P1 建议；`docs/Work_Log/2026-07-30.md` | 双架构 build、RV64 ktest 与 lint 通过；iozone 测试资产缺失 |
 | 2026-08-01 | 工作树（未提交） | read_at_user 多页回归 | Oracle 根因与回退/游标方案；`docs/Work_Log/2026-08-01.md` | 受控 QEMU 5+5 取消 256KiB 系统性回归，并纠正原始 +16% 误报 |
 | 2026-08-01 | 工作树（未提交） | another_ext4 close 持久化语义 | Oracle 掉电重启测试方案；`docs/Work_Log/2026-08-01.md` | Docker 双架构 build、lint、ktest 74/74；证据保留 raw-remount 与 clean-RECOVER 检查 |
+| 2026-08-14 | 工作树（未提交） | 双架构 nested QEMU / RISC-V signal ABI / `riscv_hwprobe` | OpenAI Codex 实现与证据整理；`docs/Work_Log/2026-08-14.md` | 同步 `origin/develop@df17b5ac2` 后双架构 normal build、LA64 BuildStorm build、四格 lint 通过；RV64/LA64 均由外层 MangoCore 内原版 QEMU 启动既有 ArceOS 至 `Hello, world!`/rc=0 |
 
 ## 8. Work_Log 证据表
 
@@ -1693,6 +1697,7 @@ AI 输出进入项目之前，采用以下质量控制流程：
 | `docs/Work_Log/2026-07-30.md` | another_ext4 小 pwrite 写合并 | 记录 Oracle P0/P1 建议、写缓冲和 atomic dirty-cache pin 实现、双架构/ktest/lint 验证及 iozone 测试资产限制 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/read-at-user-fix-controlled-*` | read_at_user 多页回归 | 记录 Oracle 的 O(pages × segments) 根因、部分回退/顺序 cursor 方案、原始 +16% 纠正和受控 5+5 验证 |
 | `docs/Work_Log/2026-08-01.md`、`docs/Work_Log/evidence/2026-08-01/power-cut-ktest-20260801T000000Z/` | another_ext4 close 持久化语义 | 记录 Oracle 对 close 非 durability barrier、fsync/global sync 可判定持久化、journal replay 和 clean RECOVER 检查的边界约束 |
+| `docs/Work_Log/2026-08-14.md`、`docs/Work_Log/evidence/2026-08-14/develop-eval-adapt-summary.md` | 双架构 nested QEMU 评测适配 | 记录 Codex 对官方双层 QEMU 运行位置、RISC-V signal/hwprobe ABI、develop 同步冲突裁决、双架构构建/lint，以及 RV64 16G/8 核和 LA64 36G/12 核端到端 PASS 的复核 |
 
 ## 9. 交互记录与留痕方式
 

@@ -171,6 +171,7 @@ first-party:unknown:src/task/process.rs
 first-party:unknown:src/task/processor.rs
 first-party:unknown:src/task/quota.rs
 first-party:unknown:src/task/registry.rs
+first-party:unknown:src/task/run_queue.rs
 first-party:unknown:src/task/signal/action.rs
 first-party:unknown:src/task/signal/mod.rs
 first-party:unknown:src/task/signal/pending.rs
@@ -195,7 +196,6 @@ vendor:mismatched_lifetime_syntaxes:/app/dependency/dep_pci/pci/src/lib.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/rustsbi/src/util.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/smoltcp/src/socket/dhcpv4.rs
 vendor:mismatched_lifetime_syntaxes:/app/dependency/virtio-drivers/src/transport/pci/bus.rs
-vendor:non_fmt_panics:build.rs
 vendor:stable_features:/app/dependency/dep_iso/src/lib.rs
 vendor:stable_features:/app/dependency/riscv/src/lib.rs
 vendor:stable_features:/app/dependency/virtio-drivers/src/lib.rs
@@ -222,6 +222,6 @@ vendor:unused_mut:/app/dependency/dep_iso/src/net/ethernet/intel/ixgbe.rs
 vendor:unused_variables:/app/dependency/smoltcp/src/iface/interface/mod.rs
 
 # Summary
-first-party: 187
+first-party: 188
 maintained: 0
-vendor: 31
+vendor: 30

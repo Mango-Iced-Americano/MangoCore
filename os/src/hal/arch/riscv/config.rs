@@ -15,12 +15,13 @@ pub const USER_STACK_INIT_SIZE: usize = PAGE_SIZE * 0x40;
 pub const USER_HEAP_SIZE: usize = PAGE_SIZE * 0x100;
 
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 0x10;
+pub const KERNEL_STACK_SLOT_SIZE: usize = KERNEL_STACK_SIZE + PAGE_SIZE;
 // The FAT32 SMP ktest constructs the minimum standards-compliant 67,000-cluster
 // in-memory volume (34,588,672 bytes) before it can exercise concurrent cluster
 // allocation. Keep room for the live kernel and fixture instead of making the
 // test depend on an impossible sub-32MiB contiguous allocation.
 /// Bootstrap-only heap used before FRAME_ALLOCATOR can reserve runtime backing.
-pub const KERNEL_BOOTSTRAP_HEAP_SIZE: usize = 8 * 1024 * 1024;
+pub const KERNEL_BOOTSTRAP_HEAP_SIZE: usize = 32 * 1024 * 1024;
 pub const MEMORY_SIZE: usize = 0x4000_0000;
 pub const MMAP_BASE: usize = 0x2000_0000;
 pub const MMAP_END: usize = 0xb800_0000;
@@ -76,8 +77,20 @@ pub const USABLE_MEMORY_SIZE: usize = MEMORY_END - FIRMWARE_END;
 pub const BLOCK_SZ: usize = 4096;
 
 pub const BUFFER_CACHE_NUM: usize = 16;
-// dummy
-pub const MEMORY_HIGH_BASE: usize = 0x0000_0000_0000_000;
+/// Supervisor-only physical-address map.  Keeping RAM and MMIO out of the low
+/// user range lets every process root share the same kernel page-table
+/// subtrees and therefore lets traps stay on the current SATP root.
+pub const MEMORY_HIGH_BASE: usize = 0xffff_ffd0_0000_0000;
+/// The physmap reserves 64 GiB (SV39 root entries 320..383).
+pub const MEMORY_HIGH_SIZE: usize = 0x10_0000_0000;
+pub const MEMORY_HIGH_END: usize = MEMORY_HIGH_BASE + MEMORY_HIGH_SIZE;
+
+/// Guarded kernel stacks occupy the next dedicated 1 GiB SV39 root entry.
+/// This must not share root entry 511 with per-process trap-context pages.
+pub const KERNEL_STACK_BOTTOM: usize = MEMORY_HIGH_END;
+pub const KERNEL_STACK_TOP: usize = KERNEL_STACK_BOTTOM + 0x4000_0000;
+pub const KERNEL_STACK_MAX_SLOTS: usize =
+    (KERNEL_STACK_TOP - KERNEL_STACK_BOTTOM) / KERNEL_STACK_SLOT_SIZE;
 
 /// Sv39 high-half base which maps QEMU virt RAM at physical `0x8000_0000`.
 pub const KERNEL_VIRT_BASE: usize = 0xffff_ffc0_0000_0000;

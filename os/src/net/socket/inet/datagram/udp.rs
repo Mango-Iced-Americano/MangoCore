@@ -194,7 +194,7 @@ impl Socket for UdpSocket {
         ))))
     }
 
-    fn listen(&self) -> SyscallRet {
+    fn listen(&self, _backlog: u32) -> SyscallRet {
         Err(SyscallErr::EOPNOTSUPP)
     }
 

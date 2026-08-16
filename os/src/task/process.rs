@@ -651,6 +651,8 @@ pub struct ProcessControlBlock {
     sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
     user_token_hint: AtomicUsize,
+    /// 线程组 leader 的 exit_signal 快照；父进程 SIGCHLD 通知以它为准。
+    exit_signal_hint: AtomicUsize,
     /// Weak shared state retained by all pidfds for this process.
     ///
     /// The PCB never owns this state strongly: a pidfd keeps it alive across
@@ -669,6 +671,11 @@ pub struct ProcessInner {
     exec_key: Option<InodeBusyKey>,
     /// 可执行文件路径（用于 /proc/self/exe）。
     exe_path: String,
+    /// `perf_stats` 诊断构建保存的有界 exec 标签。
+    ///
+    /// 当前只记录 rustc 的 crate 名称，避免长期保留完整 argv 或把命令行
+    /// 内容带入默认构建。该字段只供低频 sysfs 快照使用。
+    exec_diag_label: String,
     /// 文件描述符表（新 VFS）。
     files: Arc<Mutex<vfs::FdTable>>,
     /// 文件系统状态（cwd 等）。
@@ -844,6 +851,33 @@ fn unregister_exec_key(key: InodeBusyKey) {
     unregister_busy_key(&EXEC_INODE_REFS, key);
 }
 
+/// Keeps an executable mapping's inode alive and enforces ETXTBSY until the
+/// last VMA backing is dropped. This is distinct from the PCB's main `exe`
+/// reference because a dynamic interpreter has its own independently faulted
+/// PT_LOAD pages.
+pub(crate) struct ExecutableMappingGuard {
+    _inode: Arc<dyn vfs::IndexNode>,
+    key: Option<InodeBusyKey>,
+}
+
+impl ExecutableMappingGuard {
+    pub(crate) fn new(inode: Arc<dyn vfs::IndexNode>) -> Self {
+        let key = inode_busy_key(&inode);
+        if let Some(key) = key {
+            register_exec_key(key);
+        }
+        Self { _inode: inode, key }
+    }
+}
+
+impl Drop for ExecutableMappingGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            unregister_exec_key(key);
+        }
+    }
+}
+
 pub fn is_executable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
     let key = match inode_busy_key(inode) {
         Some(key) => key,
@@ -876,6 +910,16 @@ pub fn is_writable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
 }
 
 impl ProcessControlBlock {
+    /// 记录线程组 leader 的 exit_signal；非 leader 线程最后收尾时也用它。
+    pub(crate) fn set_exit_signal_hint(&self, signal: Signals) {
+        self.exit_signal_hint
+            .store(signal.bits() as usize, Ordering::Relaxed);
+    }
+
+    /// 读取进程级 exit_signal 快照。
+    pub(crate) fn exit_signal_hint(&self) -> Signals {
+        Signals::from_bits_truncate(self.exit_signal_hint.load(Ordering::Relaxed) as signal_type!())
+    }
     /// 一次性释放进程级 clone quota。幂等，重复调用无副作用。
     /// 应在 wait_child、auto-reap、orphan-zombie-reap 路径中尽早调用，
     /// 不依赖 PCB Drop 的延迟释放。
@@ -1407,11 +1451,13 @@ impl ProcessControlBlock {
             sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             user_token_hint: AtomicUsize::new(user_token),
+            exit_signal_hint: AtomicUsize::new(0),
             pidfd_state: Mutex::new(Weak::new()),
             inner: Mutex::new(ProcessInner {
                 exe,
                 exec_key,
                 exe_path,
+                exec_diag_label: String::new(),
                 files,
                 fs,
                 uts,
@@ -1483,6 +1529,44 @@ impl ProcessControlBlock {
 
     pub fn set_exe_path(&self, exe_path: String) {
         self.inner.lock().exe_path = exe_path;
+    }
+
+    /// 原子更新 exec 路径与性能诊断标签。
+    ///
+    /// 普通构建只保存 Linux ABI 所需的 exe 路径。`perf_stats` 构建额外从
+    /// rustc argv 中提取 `--crate-name`，使 BuildStorm 快照能把 PID 对应到
+    /// crate，但不保留可能很长或包含敏感内容的完整命令行。
+    pub fn set_exec_identity(&self, exe_path: String, argv: &[String]) {
+        let mut inner = self.inner.lock();
+        inner.exe_path = exe_path;
+        inner.exec_diag_label.clear();
+        if !cfg!(feature = "perf_stats") {
+            return;
+        }
+
+        let mut crate_name = None;
+        let mut args = argv.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--crate-name" {
+                crate_name = args.next().map(String::as_str);
+                break;
+            }
+            if let Some(value) = arg.strip_prefix("--crate-name=") {
+                crate_name = Some(value);
+                break;
+            }
+        }
+        if let Some(crate_name) = crate_name {
+            for ch in crate_name.chars().take(64) {
+                inner.exec_diag_label.push(ch);
+            }
+        }
+    }
+
+    /// 返回低频任务快照所需的可执行路径和 crate 标签。
+    pub(crate) fn exec_diagnostics(&self) -> (String, String) {
+        let inner = self.inner.lock();
+        (inner.exe_path.clone(), inner.exec_diag_label.clone())
     }
 
     pub fn mark_execed(&self) {
@@ -2578,7 +2662,11 @@ impl ProcessControlBlock {
                 parent_process.child_exit_wait.lock().wake_all();
             } else {
                 parent_process.child_exit_wait.lock().wake_all();
-                let exit_signal = exit_task.exit_signal();
+                // 线程组退出时，最后完成进程级收尾的可能是非 leader sibling。
+                // 其 exit_signal 为空；Linux 仍按线程组 leader 的 exit_signal
+                // 通知父进程。否则父进程（例如 timeout(1)）会在子进程退出后
+                // 一直停在 rt_sigsuspend，拿不到 SIGCHLD。
+                let exit_signal = self.exit_signal_hint();
                 if !exit_signal.is_empty() {
                     if let Some(parent_task) = parent_process.any_live_thread() {
                         let mut parent_inner = parent_task.acquire_inner_lock();
@@ -2597,10 +2685,6 @@ impl ProcessControlBlock {
             Self::wake_child_waiters(&child_reaper);
         }
 
-        let vm = self.vm();
-        if Arc::strong_count(&vm) <= 2 {
-            vm.write(|vm| vm.release_for_zombie());
-        }
         self.close_files_on_exit();
     }
 }

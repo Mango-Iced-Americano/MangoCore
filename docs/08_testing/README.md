@@ -3,11 +3,17 @@ title: "测试体系 (Testing Framework)"
 category: testing
 status: stable
 author: MangoCore Team
-last_update: 2026-08-01
+last_update: 2026-08-11
 tags: [testing, ktest, cargo-test, LTP, regression, tap]
 ---
 
 # 测试体系
+
+## BuildStorm Linux/QEMU 对照诊断
+
+时间受限场景下的单轮 Linux/QEMU 对照、分层采样字段和 MangoCore 归因规则见
+[BuildStorm Linux/QEMU 对照诊断方案](buildstorm-linux-qemu-diagnostic.md)。该方案只运行
+一次低开销诊断，不额外要求无采样干净基线。
 
 ## CI 评分门禁
 

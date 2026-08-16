@@ -22,7 +22,10 @@ pub fn run_ltp_binaries(environ: &[*const u8], dir: &str, exclude: &[String], in
             println!("#### OS COMP TEST GROUP END ltp-{} ####", suffix);
             exit(0);
         }
-        let mut names = [0u8; 16384]; let mut used = 0usize; let mut buffer = [0u8; 4096];
+        // 目录项名缓冲区必须容纳整个 testcases/bin 目录：16384 字节在目录较大时
+        // 会静默丢弃后半段名字（拷贝条件 used + len + 1 <= names.len() 不满足即跳过），
+        // 导致 ltp_from 匹配不到位于目录后半段的用例而全部 SKIP。128KiB 可容纳约 2 万条目。
+        let mut names = [0u8; 131072]; let mut used = 0usize; let mut buffer = [0u8; 4096];
         loop { let count = getdents64(fd as usize, &mut buffer); if count <= 0 { break; } let mut offset = 0; while offset + 19 <= count as usize { let length = u16::from_ne_bytes([buffer[offset + 16], buffer[offset + 17]]) as usize; if length < 19 || offset + length > count as usize { break; } let start = offset + 19; let end = buffer[start..offset + length].iter().position(|v| *v == 0).map(|v| start + v).unwrap_or(offset + length); if end > start && used + end - start + 1 <= names.len() { names[used..used + end - start].copy_from_slice(&buffer[start..end]); used += end - start; names[used] = 0; used += 1; } offset += length; } }
         let _ = close(fd as usize); let mut offset = 0; let mut started = from.is_none(); while offset < used { let end = names[offset..used].iter().position(|v| *v == 0).map(|v| offset + v).unwrap_or(used); let name = core::str::from_utf8(&names[offset..end]).unwrap_or(""); offset = end + 1; if !started { started = Some(name) == from; if !started { println!("SKIP LTP CASE {} : before ltp_from", name); continue; } } if !include.is_empty() && !include.iter().any(|value| value == name) { continue; } if exclude.iter().any(|value| value == name) { println!("SKIP LTP CASE {} : excluded", name); continue; } if include.is_empty() { if let Some(reason) = prefixes::skip(name).or_else(|| exact::skip(name)) { println!("SKIP LTP CASE {} : {}", name, reason); continue; } } let command = format!("export LTPROOT={}/ltp; export LTP_IPC_PATH=/tmp; export PATH={}/ltp/testcases/bin:$PATH; ./ltp/testcases/bin/{}\0", root, root, name); let code = exit_code(run_bash_cmd_timeout(&command, environ, 30)); println!("{} LTP CASE {} : {}", if code == 0 { "DONE" } else { "FAIL" }, name, code); }
         println!("#### OS COMP TEST GROUP END ltp-{} ####", suffix); exit(0);

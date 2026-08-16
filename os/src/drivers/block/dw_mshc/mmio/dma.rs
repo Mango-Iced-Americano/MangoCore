@@ -20,6 +20,7 @@ const IDMAC_DESCRIPTOR_BYTES: usize = 16;
 const IDMAC_DESCRIPTOR_COUNT: usize = PAGE_SIZE / IDMAC_DESCRIPTOR_BYTES;
 const IDMAC_BUFFER_BYTES: usize = PAGE_SIZE;
 const IDMAC_BOUNCE_PAGES: usize = 16;
+const DMA32_EXCLUSIVE_END: usize = 1usize << 32;
 const _: [(); IDMAC_BOUNCE_PAGES * PAGE_SIZE] = [(); IDMAC_BOUNCE_BYTES];
 
 const IDMAC_DES0_ER: u32 = 1 << 5;
@@ -64,9 +65,17 @@ pub(super) struct DmaResources {
 impl DmaResources {
     pub(super) fn new() -> Option<Self> {
         let descriptor_frame = frames_alloc_fresh_contiguous(1)?.into_iter().next()?;
-        let descriptor_pa = u32::try_from(descriptor_frame.ppn.start_addr().0).ok()?;
+        let descriptor_start = descriptor_frame.ppn.start_addr().0;
+        if descriptor_start.checked_add(PAGE_SIZE)? > DMA32_EXCLUSIVE_END {
+            return None;
+        }
+        let descriptor_pa = u32::try_from(descriptor_start).ok()?;
         let bounce_frames = frames_alloc_fresh_contiguous(IDMAC_BOUNCE_PAGES)?;
-        let bounce_pa = u32::try_from(bounce_frames.first()?.ppn.start_addr().0).ok()?;
+        let bounce_start = bounce_frames.first()?.ppn.start_addr().0;
+        if bounce_start.checked_add(IDMAC_BOUNCE_BYTES)? > DMA32_EXCLUSIVE_END {
+            return None;
+        }
+        let bounce_pa = u32::try_from(bounce_start).ok()?;
         let resources = Self {
             descriptor_frame,
             descriptor_pa,
@@ -81,18 +90,20 @@ impl DmaResources {
         // SAFETY: [Category 13 — library unsafe contract] `descriptor_frame`
         // is uniquely owned by this DmaResources instance and no DMA transfer
         // is active while its descriptor ring is initialized.
-        unsafe { self.descriptor_frame.ppn.with_bytes_mut(|ring| {
-            ring.fill(0);
-            for index in 0..IDMAC_DESCRIPTOR_COUNT {
-                let next = if index + 1 == IDMAC_DESCRIPTOR_COUNT {
-                    self.descriptor_pa
-                } else {
-                    self.descriptor_pa + ((index + 1) * IDMAC_DESCRIPTOR_BYTES) as u32
-                };
-                write_descriptor_word(ring, index, 3, next);
-            }
-            write_descriptor_word(ring, IDMAC_DESCRIPTOR_COUNT - 1, 0, IDMAC_DES0_ER);
-        }) };
+        unsafe {
+            self.descriptor_frame.ppn.with_bytes_mut(|ring| {
+                ring.fill(0);
+                for index in 0..IDMAC_DESCRIPTOR_COUNT {
+                    let next = if index + 1 == IDMAC_DESCRIPTOR_COUNT {
+                        self.descriptor_pa
+                    } else {
+                        self.descriptor_pa + ((index + 1) * IDMAC_DESCRIPTOR_BYTES) as u32
+                    };
+                    write_descriptor_word(ring, index, 3, next);
+                }
+                write_descriptor_word(ring, IDMAC_DESCRIPTOR_COUNT - 1, 0, IDMAC_DES0_ER);
+            })
+        };
     }
 
     fn prepare(&self, bytes: usize) -> Result<(), DwMshcError> {
@@ -102,15 +113,17 @@ impl DmaResources {
         }
         // SAFETY: [Category 13 — library unsafe contract] `prepare()` writes
         // the private descriptor frame before the host is told to start DMA.
-        unsafe { self.descriptor_frame.ppn.with_bytes_mut(|ring| {
-            for index in 0..descriptors {
-                let offset = index * IDMAC_BUFFER_BYTES;
-                let length = (bytes - offset).min(IDMAC_BUFFER_BYTES) as u32;
-                write_descriptor_word(ring, index, 0, idmac_control(index, descriptors));
-                write_descriptor_word(ring, index, 1, length & IDMAC_DES1_BS1_MASK);
-                write_descriptor_word(ring, index, 2, self.bounce_pa + offset as u32);
-            }
-        }) };
+        unsafe {
+            self.descriptor_frame.ppn.with_bytes_mut(|ring| {
+                for index in 0..descriptors {
+                    let offset = index * IDMAC_BUFFER_BYTES;
+                    let length = (bytes - offset).min(IDMAC_BUFFER_BYTES) as u32;
+                    write_descriptor_word(ring, index, 0, idmac_control(index, descriptors));
+                    write_descriptor_word(ring, index, 1, length & IDMAC_DES1_BS1_MASK);
+                    write_descriptor_word(ring, index, 2, self.bounce_pa + offset as u32);
+                }
+            })
+        };
         Ok(())
     }
 
@@ -126,9 +139,11 @@ impl DmaResources {
             let count = (source.len() - copied).min(PAGE_SIZE);
             // SAFETY: [Category 13 — library unsafe contract] bounce frames
             // belong exclusively to this request and are filled before DMA.
-            unsafe { frame.ppn.with_bytes_mut(|page| {
-                page[..count].copy_from_slice(&source[copied..copied + count]);
-            }) };
+            unsafe {
+                frame.ppn.with_bytes_mut(|page| {
+                    page[..count].copy_from_slice(&source[copied..copied + count]);
+                })
+            };
             copied += count;
         }
         Ok(())
@@ -146,9 +161,11 @@ impl DmaResources {
             let count = (destination.len() - copied).min(PAGE_SIZE);
             // SAFETY: [Category 13 — library unsafe contract] completion has
             // quiesced the DMA request before callers copy from bounce frames.
-            unsafe { frame.ppn.with_bytes(|page| {
-                destination[copied..copied + count].copy_from_slice(&page[..count]);
-            }) };
+            unsafe {
+                frame.ppn.with_bytes(|page| {
+                    destination[copied..copied + count].copy_from_slice(&page[..count]);
+                })
+            };
             copied += count;
         }
         Ok(())
@@ -249,9 +266,15 @@ impl DwMshcHost {
         if self.dma.is_none() {
             return;
         }
-        self.write(CTRL, self.read(CTRL) & !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE) | CTRL_DMA_RESET);
+        self.write(
+            CTRL,
+            self.read(CTRL) & !(CTRL_USE_IDMAC | CTRL_DMA_ENABLE) | CTRL_DMA_RESET,
+        );
         let _ = self.wait_clear(CTRL, CTRL_DMA_RESET, 500, DwMshcError::CoreResetTimeout);
-        self.write(BMOD, self.read(BMOD) & !(BMOD_ENABLE | BMOD_FIXED_BURST) | BMOD_RESET);
+        self.write(
+            BMOD,
+            self.read(BMOD) & !(BMOD_ENABLE | BMOD_FIXED_BURST) | BMOD_RESET,
+        );
         let _ = self.wait_clear(BMOD, BMOD_RESET, 500, DwMshcError::CoreResetTimeout);
         self.write(IDSTS, IDSTS_ALL);
     }

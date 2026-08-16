@@ -27,7 +27,8 @@ fn uart_loopback_rx_interrupt() -> Result<(), &'static str> {
         crate::hal::arch::riscv::sbi::console_uart_set_loopback(false);
         return Err("UART THR write failed");
     }
-    let deadline = crate::hal::get_time() + LOOPBACK_TIMEOUT_MS;
+    let deadline = crate::hal::get_time()
+        + crate::timer::ns_to_ticks_ceil(LOOPBACK_TIMEOUT_MS as u64 * 1_000_000) as usize;
     let fired = crate::hal::with_local_interrupts_enabled(|| {
         while crate::hal::arch::riscv::sbi::console_rx_irq_count() <= before {
             if crate::hal::get_time() >= deadline {

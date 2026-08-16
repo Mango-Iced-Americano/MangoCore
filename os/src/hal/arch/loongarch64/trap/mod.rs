@@ -209,6 +209,24 @@ pub fn trap_handler() -> ! {
     let stval = get_bad_addr();
     let badi = get_bad_instruction();
 
+    // trap 全程计时起点：只覆盖 handler 处理区间（到 trap_return 首行闭合），
+    // 汇编 entry/restore 与调度安全点不计入，供 RV8/LA12 配对比较边界成本。
+    crate::task::perf::record_trap_enter(match cause {
+        Trap::Exception(Exception::Syscall) => crate::task::perf::TRAP_CAUSE_ECALL,
+        Trap::Exception(Exception::PagePrivilegeIllegal)
+        | Trap::Exception(Exception::PageInvalidFetch)
+        | Trap::Exception(Exception::PageInvalidStore)
+        | Trap::Exception(Exception::PageInvalidLoad)
+        | Trap::Exception(Exception::PageModifyFault)
+        | Trap::Exception(Exception::PageNonReadableFault)
+        | Trap::Exception(Exception::PageNonExecutableFault) => {
+            crate::task::perf::TRAP_CAUSE_PAGE_FAULT
+        }
+        Trap::Interrupt(Interrupt::Timer) => crate::task::perf::TRAP_CAUSE_TIMER,
+        Trap::Interrupt(Interrupt::IPI) => crate::task::perf::TRAP_CAUSE_IPI,
+        _ => crate::task::perf::TRAP_CAUSE_OTHER,
+    });
+
     if let Trap::Exception(Exception::Syscall) = cause {
         let _trap_start = crate::task::perf::perf_time_now();
         let task = current_trap_task();
@@ -287,22 +305,22 @@ pub fn trap_handler() -> ! {
             // 缺页修复与 LA64 software-dirty PTE 更新合并在同一 VM 锁
             // 持有期；helper 先解锁再完成远端 shootdown。
             let pf_result = loop {
-                let outcome = vm_ref.write(|vm| {
-                    match vm.do_page_fault(addr, access) {
-                        crate::mm::FaultOutcome::Completed(pa) => {
-                            if matches!(
-                                cause,
-                                Trap::Exception(Exception::PageModifyFault | Exception::PageInvalidStore)
-                            ) {
-                                if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
-                                    return crate::mm::FaultOutcome::Error(error);
-                                }
+                let outcome = vm_ref.write(|vm| match vm.do_page_fault(addr, access) {
+                    crate::mm::FaultOutcome::Completed(pa) => {
+                        if matches!(
+                            cause,
+                            Trap::Exception(
+                                Exception::PageModifyFault | Exception::PageInvalidStore
+                            )
+                        ) {
+                            if let Err(error) = vm.set_user_page_dirty(addr.floor()) {
+                                return crate::mm::FaultOutcome::Error(error);
                             }
-                            crate::mm::FaultOutcome::Completed(pa)
                         }
-                        crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
-                        crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
+                        crate::mm::FaultOutcome::Completed(pa)
                     }
+                    crate::mm::FaultOutcome::Retry(wait) => crate::mm::FaultOutcome::Retry(wait),
+                    crate::mm::FaultOutcome::Error(error) => crate::mm::FaultOutcome::Error(error),
                 });
                 match outcome {
                     crate::mm::FaultOutcome::Completed(_) => break Ok(()),
@@ -511,6 +529,9 @@ fn read_bp() {
 }
 #[no_mangle]
 pub fn trap_return() -> ! {
+    // 闭合本次 trap 的 handler 区间计时；必须在调度安全点之前，避免把
+    // 切换出去的等待时间计入 trap 成本。
+    crate::task::perf::record_trap_exit_ticks();
     // 从这里到 __restore 安装用户 EENTRY 之前，任何 timer/IPI 都必须进入
     // 内核 trap。尤其是 ASID rollover 的等待路径会临时开放本地中断。
     set_kernel_trap_entry();
@@ -551,14 +572,16 @@ pub fn trap_return() -> ! {
     // 页表根、ASID 和 CPU 驻留登记必须来自同一个 AddressSpace 快照；不能再从
     // TCB 单独读取 ASID，否则 CLONE_VM 线程会破坏共享 MM 的标签一致性。
     let user_vm = task.process.activate_user_vm();
+    debug_assert_eq!(
+        user_vm.asid_epoch, 0,
+        "LA64 context carried an RV ASID epoch"
+    );
     if user_vm.asid != 0 {
         crate::task::perf::record_tlb_activate();
     }
     // 安全点调度、信号处理和 ASID/MM 激活都属于 system time。只有在真正
     // ERTN 前才开启 user 计时，避免把任务离 CPU 的区间算进 utime。
-    let (user_us, system_us) = task
-        .acquire_inner_lock()
-        .update_process_times_enter_user();
+    let (user_us, system_us) = task.acquire_inner_lock().update_process_times_enter_user();
     task.process.account_cpu_time(user_us, system_us);
     let restore_va = __restore as usize;
     let user_trap_entry = strampoline as usize;
@@ -577,6 +600,7 @@ pub fn trap_return() -> ! {
             restore_va
         );
     }
+    crate::task::perf::record_user_trap_return(true);
     unsafe {
         // trap context、页表根、ASID 和用户 trap 入口是 `__restore` 的固定 ABI
         // 参数，必须直接绑定到 $a0..$a3。若先把多个 `in(reg)` 输入逐个 move，LLVM

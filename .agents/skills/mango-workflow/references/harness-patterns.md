@@ -498,6 +498,13 @@ diag=1
 - **教训**: signal frame 是 libc 可见 ABI，不能按内核内部 bitset 大小直觉拼结构；涉及 `ucontext_t`、`mcontext_t`、`sigset_t` 的偏移时，优先核对“总 ABI 保留区大小”，再判断寄存器数组内容是否需要重排。
 - **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`, `os/src/hal/arch/loongarch64/trap/context.rs`, `os/src/task/signal/mod.rs`, `os/src/syscall/process/signal.rs`
 
+## RISC-V signal mcontext 必须按最大 FP union 布局
+
+- **根因**: 内核内部只需保存 32 个 D 扩展浮点寄存器和 `fcsr`，但 Linux 用户 ABI 的 `__riscv_mc_fp_state` 是 union，大小由 16-byte 对齐的 Q 扩展成员决定。把紧凑内核 `FloatRegs` 直接嵌入 `mcontext_t` 会让后续布局缩短 8 bytes；QEMU 的 SIGILL handler 从 glibc 计算出的 offset 176 修改 PC，而 `rt_sigreturn` 从 offset 168 恢复，形成同一非法指令无限重试。
+- **修复**: 内核 trap 保存态继续保持紧凑；另定义 528-byte、16-byte aligned 的用户 FP state，在 signal frame 构造/恢复处逐字段转换。用 const assertions 固定 `MachineContext size=784/alignment=16`、`UserContext mcontext_offset=176/size=960`，避免未来字段调整静默破坏 ABI。
+- **验收**: 静态 `SA_SIGINFO` SIGILL 程序必须同时打印布局值与 `SIGILL_OK`；随后原版用户态 QEMU 必须越过 CPU probe、启动未修改的 ArceOS 并返回 0。只验证 `riscv_hwprobe` 成功不够，因为其他程序仍可能走 SIGILL fallback。
+- **相关文件**: `os/src/hal/arch/riscv/trap/context.rs`, `docs/Work_Log/evidence/2026-08-14/develop-eval-adapt-rv64-reuse-full.log`
+
 ## POSIX mqueue libc/syscall ABI
 
 - **根因**: POSIX API 要求用户传 `/name`，但 Linux syscall 层接收的是去掉前导 `/` 的裸 name；同时 `mq_timedsend/mq_timedreceive` 的 timeout 是 `CLOCK_REALTIME` 绝对时间，不能直接交给内核单调时间等待队列。`mq_notify(SIGEV_THREAD)` 也不是普通 signal，glibc/musl 会把 32 字节 cookie 和 netlink fd 交给内核，等待内核把 cookie 写回 netlink socket 后再触发用户 callback。
@@ -694,6 +701,13 @@ diag=1
 - **修复**: `tlb_invalidate_page()` 读取当前 ASID 并传给 `invtlb 0x5`；kernel page table 修改走单独的 global-page invalidate (`invtlb 0x6`)。
 - **教训**: “PTE 已改且 full TLB flush 能修复，但 page flush 不能修复”时，应优先检查页级 flush 的 ASID/global 操作数，而不是继续放大全局 flush。
 - **相关文件**: `os/src/hal/arch/loongarch64/tlb.rs`, `os/src/hal/arch/loongarch64/laflex.rs`
+
+## RV64 global PTE 的 VA→PA 含义必须跨所有 ASID 一致
+
+- **根因**: RISC-V TLB 中由 PTE `G` 位生成的 global entry 不受 `SATP.ASID` 区分。如果内核把低地址物理直映标为 global，而该 VA 又落在合法用户地址范围，用户页表即使把同一 VA 映射到另一物理页，也可能命中残留的内核恒等映射。表现为不同 syscall 的合法用户输出缓冲区随机 `EFAULT`，例如先修复 `getcwd` 后又在 `clock_gettime` 暴露，容易被误判为多个独立的 usercopy bug。
+- **修复**: 内核 identity mapping 与 `[USER_VA_BASE, USER_VA_END)` 相交时禁止设置 `G`，固定由内核 ASID 0 使用；仅高半区内核段、共享 trampoline 和完全不与用户 VA 相交的直映可以 global。最终页表激活前对 bootstrap global entry 做全局 flush。
+- **教训**: “多个无关 syscall 在长测中随机 EFAULT、单独 usercopy 检查均正确”时，应比较失败 VA 与内核低地址直映范围，并审计 PTE `G` 位。global 的判据不是“这张页表属于内核”，而是“该 VA→PA 在所有 ASID 下含义完全相同”。
+- **相关文件**: `os/src/mm/kernel_space.rs`, `os/src/hal/arch/riscv/tlb.rs`
 
 ## COW 源帧 helper 返回克隆 Arc 时 strong_count 基准要加一
 
@@ -1442,3 +1456,200 @@ fork 后父子进程共享 `Arc<File>`（通过 `FdTable::try_clone()` 克隆 Ar
   - **本地 4 核 TCG 双实例共享 CPU 时编译时间远超 2B，time 分必然为 0；要验 time 分需 8 核单实例。**
 - **教训**: 评测分数必须以官方 judge 脚本对完整串口日志的输出为准，不要按脚本注释或印象估算；验证 buildstorm time 分前先确认 CPU 核数满足 baseline 前提。
 - **相关文件**: `oscomp/testsuits-for-oskernel/judge/judge_cagent-glibc.py`, `judge_buildstorm-glibc.py`；`docs/Work_Log/2026-08-10.md`
+## 短并行波诊断必须拆分采样频率并做运行时 schema 握手
+
+- **现象**：宿主机或 guest 的真实并行波只有十几秒，统一 30 秒采样最多捕获一个点；任务已退出或阻塞后，累计 CPU/blocked 时间无法还原波峰为何收缩。更隐蔽的是源码已经增加字段，但 QEMU 仍可能启动旧内核，得到格式合法却缺字段的旧 schema 日志。
+- **做法**：scheduler/current/task identity 使用 5 秒轻快照；PageCache、MM、journal、block 和 VirtIO 使用 30 秒重快照。每任务同时保留 user/kernel/blocked/runnable-wait 累计时间、阻塞类别和阻塞 syscall。启动 monitor 前固定 expected schema，首个完整快照必须同时验证版本和关键字段；不匹配就只终止明确绑定 kernel/overlay/PID 的本轮 QEMU。
+- **判据**：以 workload begin marker 重置 pre-timed 状态；连续两个轻快照 active≥4，或单点 active≥6 且下一窗口平均忙核≥3.5，才算真实峰值。峰后至少保留 36 个 5 秒快照（3 分钟），目标 60 个（5 分钟）；15 分钟无峰值本身就是前置串行放大的证据。
+- **扰动边界**：不逐事件打印；精确等待域使用编译期诊断门控和任务原子字段，正式构建不执行 `current_task()` 克隆。原始日志、pcap、overlay 和镜像永不提交。
+- **进程归属门禁**：停止后台 QEMU 时不能只在 `/proc/<pid>/cmdline` 搜索 kernel/overlay token；launcher shell 的 cmdline 同样包含整条 QEMU 命令，先杀 shell 会遗留孤儿 QEMU。遍历进程树时还必须解析 `/proc/<pid>/exe`，只接受 basename 与目标 `qemu-system-*` 完全一致且 kernel/overlay 同时匹配的进程，再发送信号并复查该 PID 已退出。
+- **相关文件**：`user/src/bin/init.rs`、`os/src/fs/sysfs/files/diag.rs`、`os/src/task/task.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## MTTCG 下 mailbox pending 不等于 IPI payload 丢失
+
+- **现象**：SMP 压力下 shootdown 等待超时；首次 `send_ipi` 没有报错，目标 CPU 仍在线，超时快照中目标 CPU 的 mailbox reason bit 仍保持 pending，但对应 ack 未推进。
+- **判定**：如果 payload/sequence 已经发布、reason bit 仍在且发送 API 无错误，应优先判断为 QEMU MTTCG 对一次性硬件 doorbell 的延迟或合并，而不是覆盖 payload、丢失 request 或目标 CPU 停止。三类故障要用 pending reason、ack sequence、online/stopped mask 和 send error 联合区分。
+- **修复模式**：在原 payload 和 request sequence 保持不变期间，只向 `targets & !stopped & !acknowledged` 周期性重发幂等 doorbell；使用子系统独立且有界的超时预算。目标 handler 依据 mailbox bit 和 sequence 幂等执行，全部确认前不得复用 slot、回滚 generation 或提前释放待退休 frame。
+- **安全边界**：重试只能修复通知交付，不能掩盖真实 handler 卡死；超出预算仍需 fail-stop 并打印 missing/ack/pending 快照。不要通过不断改写 payload 或无限等待规避同步错误。
+- **相关文件**：`os/src/smp.rs`
+## BuildStorm 统计采集器必须与内核诊断特性做启动握手
+
+- **现象**: 启动参数包含 `buildstorm.stats=all`，但内核未编译 `perf_diag` 时，采集器仍周期性读取 `/sys/kernel/stats/*`，所有节点返回 `ENOENT`；QEMU 和 BuildStorm 仍可能继续运行，造成“看起来在采样、实际上没有任何计数器”的假诊断。
+- **根因**: 用户态采集器和内核特性是独立构建入口，命令行 profile 不能自动启用 Cargo 的 `perf_diag`；缺失 feature 时 sysfs 诊断目录不会注册。仅观察 `BUILDSTORM_*` 或 QEMU 退出码无法证明计数器有效。
+- **修复**: 诊断构建显式传入 `EXTRA_FEATURES=perf_diag`，启动后先读取 `/sys/kernel/stats/features` 或 schema 文件，确认 `perf_diag=1`、预期 schema 版本和 kernel/submodule SHA，再开始 workload 计时。若首个 stats 节点返回 `ENOENT`，采集器应一次性报告 `unavailable` 并停止周期读取，不能把该轮标记为有效计数器实验。
+- **教训**: 每次性能实验都要把“内核能力握手”作为 fail-closed 门禁；无诊断镜像可以用于 wall-time/功能测试，但不能用于 scheduler、PageCache、VirtIO 或 journal 归因。日志、镜像和构建产物仍保持工作区外或未跟踪，不纳入提交。
+- **相关文件**: `os/Cargo.toml` (`perf_diag`)、`os/src/fs/sysfs/files/mod.rs`、`os/src/fs/sysfs/files/diag.rs`、`user/src/bin/init.rs`、`os/make/rv64.mk`、`docs/Work_Log/2026-08-10.md`
+
+## ktest 文件存在不等于运行时已注册
+
+- **现象**: 新测试文件能随内核编译通过，但 TAP 总数不变、日志中没有测试名；容易把“代码被编译”误报成“ktest 已执行”。
+- **根因**: 项目可能同时保留新旧测试目录和注册入口，例如 `kernel_tests/page_cache/` 存在完整 `tests()`，而根 `all_tests()` 实际仍指向 `page_cache_sync.rs`。只修改未接入根测试表的模块不会改变运行时测试集合。
+- **修复**: 新增测试后同时检查根 `all_tests()` 的真实模块路径；运行后必须验证 TAP 计划数增加、精确测试名出现且结果为 `ok`。仅凭构建成功、QEMU 退出0或总结果PASS都不能声称新测试已覆盖。
+- **教训**: 测试验收采用“三联门禁”：源码注册路径 → TAP 计划数 → 日志精确测试名。发现重复/遗留测试树时，先接入当前权威入口，不因目录命名推断其已生效。
+- **相关文件**: `os/src/kernel_tests/mod.rs`、`os/src/kernel_tests/page_cache_sync.rs`、`os/src/kernel_tests/page_cache/`
+
+## BuildStorm 固定窗口与完成标记必须独立于字段布局和峰值状态
+
+- **现象**：guest 已输出 `BUILDSTORM_COMPILE mode=multi ok=true ...`，monitor 却没有按完成标记停止；用于单变量 A/B 的“900 秒窗口”还可能因峰值状态机提前结束或被峰后延长规则拖长。
+- **根因**：完成检测使用了要求字段相邻的字面子串 `BUILDSTORM_COMPILE ok=true`，插入 `mode=multi` 后静默失配；同一个软超时同时承担“无峰值定因”和“固定 wall-time A/B”两种不同语义。
+- **修复**：完成标记按行首和键值匹配（`^BUILDSTORM_COMPILE\b.*\bok=true\b`），不固定其他字段的位置；固定窗口另设从 `BUILDSTORM_BEGIN` 起算的 hard timeout，其优先级独立于峰值触发与峰后样本数。每个 A/B variant 仍须使用同一 kernel hash、全新 golden overlay、相同 CPU/内存/MTTCG，并在启动时核对被测运行时开关和 schema。
+- **验收**：用包含额外字段、失败字段和非行首噪声的 marker fixture 验证匹配器；真实首个 variant 必须记录精确的 `buildstorm_begin_seen`、`hard_timed_window_complete`、monitor/QEMU rc=0，之后才允许矩阵继续。
+- **相关文件**：`scripts/monitor_buildstorm_peak.py`、`build/mm-ab-buildstorm-20260811/run-matrix.sh`（运行证据，不提交）。
+## 高频架构屏障 A/B 应使用同一诊断镜像和事件计数，不能逐次包时钟
+
+- **问题**：`fence.i`、`ibar` 等每次 trap return 都可能执行，若在每次屏障前后读取硬件
+  时钟，计时探针本身会改变高频返回路径；分别编译 on/off 又会混入链接布局和 feature 结构税。
+- **做法**：只在诊断构建加入启动参数控制的运行时分支，A/B 复用完全相同的 kernel hash；
+  热路径仅累计“返回次数/实际屏障次数”，wall-time 使用固定窗口比较。两个 Relaxed 计数在
+  sysfs 中分别读取，运行中允许出现 1 个事件量级的快照撕裂，窗口末尾再核对最终覆盖关系。
+- **判定**：同时要求相同 golden 的全新 overlay、CPU/内存/MTTCG、正式开始点、crate 进度和
+  minibuild；短窗只用于排除数量级，未完成整轮且没有交替重复时不能声称最终吞吐收益。同步
+  等待类计数必须同时导出 backend、range、fanout、total/max ticks 和失败数；总 max 不能静态
+  归到调用次数最多的 backend，必须先补按 backend 的 total/max，再只对实际可疑 backend 做
+  histogram。max 达秒级时，total 的单对差异先按长尾噪声处理，不能归因给旁路屏障。
+- **相关文件**：`os/src/hal/arch/riscv/trap/mod.rs`、`os/src/task/perf.rs`、
+  `os/src/smp.rs`、`os/src/fs/sysfs/files/diag.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## 双架构串行编译要同时校验命令退出和构建进程静默
+
+- **现象**：外层 Docker/Make 命令的输出已经暂停或终端 wrapper 已返回，但 LTO `rustc`
+  仍在容器中运行。此时启动另一架构会违反共享工具链/生成状态的串行约束；在
+  编译期间继续改源码，也会让“编译通过”不再对应一个可确定的源码快照。
+- **门禁**：每个架构必须同时满足：原始 `make kernel` 进程明确退出且 rc=0；目标
+  容器中不再存在该命令对应的 `cargo`/`rustc`。之后才能启动下一架构。最终
+  验证必须在所有源码修改完成后重跑；修改期间产生的早期成功结果只能作为中间
+  smoke，不能列入最终验收。
+- **检查方式**：保留可轮询的 PTY/session，等到 `Finished ...` 与 make 退出；必要时再以
+  容器内精确命令行过滤确认没有对应构建子进程。不使用宽泛 `pgrep cargo`，避免把队友容器或
+  无关 host build 当成本轮进程。
+
+## 跨架构性能测试必须先校验用户态架构合同
+
+- **现象**：双架构 BuildStorm 都能完成，但日志中的 target 相同，原始墙钟差距被误当成内核架构性能差。
+- **根因**：`uname -m` 返回项目内部简称，官方脚本只识别 Linux ABI 名称；未知值又静默回退到某个默认 target。QEMU 核数、target 清洁状态或代码提交不同会进一步污染比较。
+- **修复**：内核返回标准 `riscv64`/`loongarch64`；测试入口对未知架构和残留 target fail-closed；正式启动入口按评分合同选择 RV64 8 核、LA64 12 核，并记录相同的内核、submodule、镜像与脚本哈希。
+- **教训**：跨架构性能数据先验证“架构名 → 编译 target → vCPU 数 → clean target → commit/hash”整条合同，再比较归一化得分。任何 fallback 或清理错误都使该轮数据无效。
+- **相关文件**：`os/src/syscall/process/ids.rs`、`user/src/bin/init.rs`、`user/src/bin/test_runner/groups/execute.rs`、`Makefile`、`os/make/arch/{rv64,la64}-settings.mk`
+
+## 正式 SMP 验收必须同时闭合宿主、构建和继承三层合同
+
+- **现象**：QEMU 命令显示 `-smp 8`，内核也启动了 8 个 hart，但 CAgent/BuildStorm
+  仍只使用一个宿主核；专用性能 profile 的多核测试正常，正式 `mode=run` 却退化为
+  单核。
+- **根因**：SMP 拓扑不是单一开关。至少有三层独立合同：宿主 runner 的 QEMU
+  `-smp/-m`，编译期 `MANGO_CORE_NUM`，以及 PID1 经 fork/exec 传给工作负载的
+  affinity。只修专用 profile 会掩盖 normal test-runner 链路仍继承 CPU0-only 初始
+  mask；仓库内兼容 judge 配置的 `qemu.smp=1` 还可能在启动前再次降级。
+- **修复模式**：保留内核 TCB/工作线程的 CPU0 安全默认值，由 normal PID1 在 AP
+  全部 online 后一次性放开用户态 affinity；正式 RV/LA 构建显式传递 8/12 核；judge
+  配置同时保留兼容默认和架构专属值。若 RV/LA 由两个线程共享同一个 Job 并发启动，
+  必须为每个线程提供复制后的架构配置视图，不能运行期改写共享 `qemu.smp` 形成竞态。
+- **验收**：不要只检查命令行。发烟必须走 normal PID1 → test-runner → chroot 工作负载
+  链路，并在 CAgent 与 BuildStorm 两个真实后代中分别读取 `nproc`（raw
+  `sched_getaffinity`）、在线 CPU 数和 `/proc/cpuinfo`。若 `/proc/[pid]/status` 的
+  `Cpus_allowed` 是占位实现，不得把它用于结论；最终同时保存 OpenSBI hart 数、内核
+  online mask 和两个后代的 `nproc`。
+- **相关文件**：`judge/config.json`、`os/Makefile`、`user/src/bin/init.rs`、
+  `scripts/test-canonical-build-graph.sh`。
+
+## 省略调度切换时必须保持运行时间计数连续
+
+- **现象**：优化 timer tick 后，任务在没有本地竞争者时继续原地运行，不再经过 schedule-out；基于 context switch 才结算的 `task_run_slice_ticks_total` 因而停止增长，使区间平均忙核错误地接近零。
+- **根因**：诊断计数器把“任务正在执行的时间”隐含绑定到“任务最终发生切换”。当优化刻意消除切换时，业务行为正确，但观测模型失效。
+- **修复**：在被安全省略的 tick 上，仅在诊断 feature 下把 `now - run_started_ticks` 累计到全局运行时间，并将该任务的 `run_started_ticks` 更新为 `now`；后续真实 schedule-out 只结算新的区间，避免重复计数。同步提升 schema，并要求 monitor 启动时 fail-closed 握手。
+- **教训**：任何消除 context switch、锁获取、I/O completion 或状态迁移的性能优化，都必须审计依赖该事件结算的计数器。先保证可观测量仍表示原概念，再做前后 A/B；不能把计数下降直接解释成工作量下降。
+- **相关文件**：`os/src/task/manager.rs`、`os/src/task/perf.rs`、`scripts/monitor_buildstorm_peak.py`
+
+## ASID rollover 后 software active 不能代替真实 SATP 安装
+
+- **现象**：ASID rollover 之后，原本应使用按页/按区间失效的并发 PTE 测试突然退化为全量用户 TLB flush；如果为了让测试恢复而直接把 rollover ack 记作 CPU 已观察新 epoch，则会重新打开旧 ASID 翻译漏刷窗口。
+- **根因**：rollover IPI ack 只证明旧 epoch 的 non-global 翻译已经失效，不证明 CPU 已经安装新 epoch 的 SATP。`AddressSpace::activate_on()` 只分配 MM context、推进 generation 并设置 software active bit，本身不执行 `csrw satp`。若测试或生产路径把 CPU 标成 active 却没有完成真实安装，MMU gather 看到 `CPU_ASID_EPOCH < mm_epoch` 时升级为 Full 是必要的安全降级。
+- **修复**：生产切换必须在同一个本地 IRQ-off 事务中完成 `activate_on → install_page_table → 必要的 full fence → 发布 CPU observed epoch`，并在写入新根前 pin 旧根；切离时先安装内核根，再 deactivate/drop。`install_page_table()` 用硬断言 fail-closed。需要模拟 active MM 的 ktest 使用 RAII guard 复用同一协议，退出路径无论成功与否都先恢复内核根。
+- **教训**：必须区分三个独立事实：shootdown 已 ack、software active mask 已置位、硬件已安装某 root/ASID/epoch。测试夹具不能只伪造其中一个来代表另外两个；per-CPU observed epoch 只能在实际安装和必要 fence 完成后发布，不能在 rollover 广播处批量推进。
+- **相关文件**：`os/src/hal/arch/riscv/sv39.rs`、`os/src/mm/{address_space,mmu_gather,tlb}.rs`、`os/src/task/processor.rs`、`os/src/kernel_tests/smp.rs`
+
+## 固件能力加速后端必须 fail-closed，并动态覆盖 fallback
+
+- **危险模式**：只看 boot hart、用 ISA 字符串子串匹配，或把父节点公共属性当作所有 CPU
+  的能力，就直接进入 CSR/MMIO 加速路径。异构、禁用节点、畸形属性或固件未委托权限时，
+  这种乐观探测会把性能优化变成非法指令或永不触发的中断。
+- **固定协议**：BSP 在 AP 发布和首次使用前枚举所有 enabled CPU；优先解析规范化能力
+  string-list，属性缺失时才回退 legacy 格式，严格按完整 token 匹配。任一 CPU 缺失、
+  畸形、不支持或枚举数与运行时拓扑不一致，都选择已知安全的固件 backend。选择一次发布，
+  热路径只读取不可变结果。
+- **验收**：同一 focused 测试至少跑两次：默认机器必须打印并使用加速 backend；通过 QEMU
+  CPU 参数显式关闭扩展后，必须打印并使用 fallback，且 timer/SMP 等相关用例两边都通过。
+  长测 A/B 若同时包含多个修复，只能报告合并包效果；没有中间 variant 时不得拆分贡献。
+- **相关文件**：`os/src/hal/arch/riscv/time.rs`、`os/src/hal/arch/riscv/sbi.rs`
+
+## 全局 shootdown 的 backend 归因后还要闭合语义原因、fanout 和延迟桶
+
+- **现象**：按最终 backend 拆分后，`kernel_full` 占据绝大多数同步等待且出现秒级 max；仅看
+  backend 会把所有 kernel-global 更新混在一起，无法判断是新映射发布、任务迁移，还是全 CPU
+  动态映射回收，也容易把少量极端等待误认为每次 full flush 都昂贵。
+- **做法**：在最靠近调用点的位置携带只用于诊断的语义原因，并对每个原因同时累计 calls、
+  remote targets、total/max ticks；全局与逐原因复用同一延迟桶。验收时要求“backend calls =
+  原因 calls 之和 = 全局 bucket calls 之和”，每个原因的 bucket 也必须闭合。目标为当前 CPU 的
+  本地同步要明确排除，避免混入远端协议。
+- **判据**：`targets/calls=1` 且 total 主要集中在少量长尾桶，说明瓶颈是单个目标 hart 的
+  ack/调度尾部，不是大 fanout；若 retire 原因的 fanout 接近 online CPU 数，才优先优化广播或
+  回收批量。一次 BuildStorm 样本中 283/283 次 kernel full 均为单目标 `task_publish`，其中仅
+  14 次超过 100 ms 却贡献 91.3% 的该路径等待，验证了该区分的必要性。
+- **安全边界**：原因标签本身不得改变同步协议。后续旁路只能针对已证明的 PTE 转换类别和硬件
+  能力门禁，例如全 CPU 都支持 Svvptc 时的严格 invalid→valid 发布；unmap、权限/PPN 变化和
+  mapping retire 必须保留失效。先做原因闭合，再设计单变量 bypass A/B。
+- **相关文件**：`os/src/smp.rs`、`os/src/task/manager.rs`、`os/src/task/run_queue.rs`、
+  `os/src/task/task.rs`、`os/src/fs/sysfs/files/diag.rs`
+
+## Svvptc 的最终收敛不能替代首次内核栈访问前的确定性刷新
+
+- **危险模式**：严格的 invalid→valid PTE 更新在 Svvptc 下最终会自动可见，但规范仍允许一次
+  gratuitous page fault。若新映射承载的是即将切入的内核栈，首次 stale-invalid 可能发生在
+  `__switch` 改写 SP 或 trap 入口压栈时；这时 fault handler 仍依赖当前内核栈，无法像用户缺页
+  那样安全重试。因此不能把“最终收敛”直接推广成新内核栈的 no-fence 发布。
+- **安全协议**：发布方在 PTE 写入之后、runqueue 可见之前，以 AcqRel 递增目标 CPU 的
+  `kernel_tlb_request`，但不等待远端 ack。目标取得任务后仍运行在 idle 栈上，以 Acquire 快照
+  request，执行本地 full flush，再用 Release 确认序号；只有这之后才允许 `__switch` 改写 SP。
+  多个请求可以由一次目标侧 flush 合并。目标就是当前 CPU 时直接本地刷新，不制造延迟请求。
+- **并发边界**：任务发布/迁移只依赖“该任务在切换前可见”，可以延迟到目标安全点；unmap、
+  权限/PPN 改写和 mapping retire 会释放或复用资源，必须继续发送全 CPU shootdown 并等待 ack。
+  request 必须先于 enqueue，flush 必须先于 ack，不能用 reschedule doorbell 本身表达完成关系。
+- **验收**：同镜像 A/B 同时导出 eager reason/calls/ticks 与 deferred request/flush/ticks；要求
+  `deferred requests >= local flushes`、migration 的本地-only 情况不混入延迟计数、两侧 workload
+  进度和正确性 marker 对齐。一次最终 RV8 300 秒 pair 中，275 个 publish request 合并为 250
+  次本地 flush（15.3 ms），远端同步等待从 17.47 CPU-s 降至 1.39 CPU-s，且 retire 仍同步。
+- **相关文件**：`os/src/smp.rs`、`os/src/task/processor.rs`、`os/src/task/manager.rs`、
+  `os/src/fs/sysfs/files/diag.rs`
+
+## 固定 listen 槽数小于并发连接数导致 connect 被拒
+
+- **现象**: 官方 CAgent 的 `simple_llm_server` 以 `listen(fd, 10)` 同时服务 10 个并发
+  `agent_lite` 客户端；不同轮次随机有 1-2 个 testcase `fail/reject`，失败用时仅数百 ms。
+- **根因**: 内核把 `listen(2)` 的 backlog 硬编码上限为 8（每个槽是一个独立 smoltcp
+  TcpSocket）；第 9/10 个并发 SYN 找不到空闲槽被拒，agent 首次 connect 即失败且无重试，
+  整个 testcase 直接失败（输出 `Connection failed to 127.0.0.1:8080`）。失败的是"哪些
+  testcase"取决于连接竞态，与具体命令（awk/df/echo）无关。
+- **修复**: 尊重用户 backlog（`sys_listen` 透传，`0` 按 1，上限 `MAX_LISTEN_BACKLOG=64`）；
+  不再使用固定 `BACKLOG_SIZE`。官方 10 并发场景从 8-9/10 恢复为 10/10（RV64/LA64 复测）。
+- **教训**: 官方并发压测的 listen 槽数不能硬编码为小常数；"哪些用例失败"随机漂移时先怀疑
+  共享容量瓶颈（listen 槽、fd 表、端口 registry），不要按失败用例的 shell 命令（awk 等）归因。
+- **相关文件**: `os/src/net/syscall/listen.rs`、`os/src/net/socket/inet/stream/{lifecycle,inner,mod}.rs`
+
+## 跨页用户缓冲区写被惰性缺页截断
+
+- **现象**: LA64 官方评测中 `[test-runner] ntpd unavailable; using fallback clock\n`（53 字节）
+  被截成 52 字节（或旧二进制布局下截成 36 字节），尾部的 `\n` 静默丢失，与下一条
+  `[initproc]` 日志合并成一行；`LOG=info` 显示 `write(64) -> 34`（返回 52/53）。
+- **根因**: 用户字符串恰好跨页，第二页从未被访问过（惰性缺页，PTE 未 present）。
+  `write_from_user`/`pwrite_from_user` 的 chunk 循环在非首个 chunk 遇到
+  `user_accessible_len == 0` 时直接返回已完成前缀，把惰性页误判为缓冲区终点；用户侧
+  `println!` 忽略短写返回值，截断变成静默丢字节。`user_accessible_len` 只查 PTE 不 fault，
+  "未 present" ≠ "不可访问"。
+- **修复**: `accessible == 0` 时不再立即返回前缀，而是按单页有界 fault-in 重试
+  （`accessible = want.min(PAGE_SIZE)`，与首个 chunk 一致）；真实不可访问区域由
+  faultable copy 的 fault 失败产生前缀，EFAULT/短写语义不变。
+- **教训**: 排查"一行日志尾部消失/两行合并"时先看 `LOG=info` 的 `write` 返回值是否等于
+  请求字节数，再看字符串在 ELF 中的页内偏移；短写消费者忽略返回值会把内核截断放大为
+  静默数据丢失。惰性缺页页与真不可访问页必须在 uaccess 层区分。
+- **相关文件**: `os/src/syscall/fs/common.rs`（`write_from_user`/`pwrite_from_user` 四个
+  chunk 循环）、`os/src/mm/uaccess.rs`

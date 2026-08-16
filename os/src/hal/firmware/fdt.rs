@@ -6,8 +6,8 @@
 use crate::hal::boot::BootProtocol;
 use crate::hal::firmware::{MAX_FDT_SNAPSHOT_SIZE, MAX_MEMORY_REGIONS};
 use crate::hal::platform::info::{
-    ConsoleInfo, DeviceInfo, DeviceKind, DeviceStatus, FirmwareKind, MmioRange, PlatformInfo,
-    PciHost, RawProperty, RawPropertyValidity, ResourceValidity,
+    ConsoleInfo, DeviceInfo, DeviceKind, DeviceStatus, FirmwareKind, MmioRange, PciHost,
+    PlatformInfo, RawProperty, RawPropertyValidity, ResourceValidity,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -157,7 +157,11 @@ pub fn parse_memory_regions(dtb_paddr: usize) -> bool {
         Some(end) => end & !0xFFF,
         None => return false,
     };
-    if !push_range(&mut buf.reserved, &mut buf.reserved_count, (dtb_start, dtb_end)) {
+    if !push_range(
+        &mut buf.reserved,
+        &mut buf.reserved_count,
+        (dtb_start, dtb_end),
+    ) {
         return false;
     }
 
@@ -243,7 +247,7 @@ fn count_cpus(fdt: &FallibleFdt<'_>, buffer: &mut crate::hal::firmware::MemoryRe
                 Ok(None) => true,
                 Ok(Some(property)) => {
                     let value = property.value.strip_suffix(b"\0").unwrap_or(property.value);
-                    value == b"okay"
+                    value == b"okay" || value == b"ok"
                 }
                 Err(_) => false,
             };
@@ -363,6 +367,9 @@ fn collect_root_memory_regions(
             let Some(end) = start.checked_add(region.len) else {
                 return false;
             };
+            if !direct_map_range_supported((start, end)) {
+                return false;
+            }
             if buffer.region_count == MAX_MEMORY_REGIONS {
                 return false;
             }
@@ -504,6 +511,20 @@ fn range_overlaps_memory(range: (usize, usize), memory: &[(usize, usize)]) -> bo
         .any(|memory_range| range.0 < memory_range.1 && memory_range.0 < range.1)
 }
 
+/// RV64's shared supervisor physmap has a deliberate 64 GiB physical limit.
+/// Reject unsupported firmware resources during pre-heap validation instead of
+/// reaching a late page-table/direct-map panic.  LA64 keeps its existing map.
+fn direct_map_range_supported(range: (usize, usize)) -> bool {
+    #[cfg(target_arch = "riscv64")]
+    {
+        range.0 < range.1 && range.1 <= crate::hal::config::MEMORY_HIGH_SIZE
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        range.0 < range.1
+    }
+}
+
 fn parse_node_resources(
     fdt: &FallibleFdt<'_>,
     buffer: &mut crate::hal::firmware::MemoryRegionBuf,
@@ -577,6 +598,9 @@ fn parse_node_resources(
                     let Some(page_range) = page_align_range(range.0, range.1) else {
                         return false;
                     };
+                    if !direct_map_range_supported(page_range) {
+                        return false;
+                    }
                     if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
                         && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, page_range)
                     {
@@ -585,15 +609,16 @@ fn parse_node_resources(
                 }
             }
         }
-        let is_pci_host = is_early_mmio_device && node
-            .property::<fdt::properties::Compatible<'_>>()
-            .ok()
-            .flatten()
-            .is_some_and(|compatible| {
-                compatible.all().any(|entry| {
-                    matches!(&*entry, "pci-host-ecam-generic" | "pci-host-cam-generic")
-                })
-            });
+        let is_pci_host = is_early_mmio_device
+            && node
+                .property::<fdt::properties::Compatible<'_>>()
+                .ok()
+                .flatten()
+                .is_some_and(|compatible| {
+                    compatible.all().any(|entry| {
+                        matches!(&*entry, "pci-host-ecam-generic" | "pci-host-cam-generic")
+                    })
+                });
         if is_pci_host {
             let Ok(properties) = node.properties() else {
                 return false;
@@ -640,11 +665,12 @@ fn parse_pci_mmio_ranges(
         let Some(page_range) = page_align_range(base, end) else {
             return false;
         };
-        // 与普通 MMIO 一致：与 RAM 重叠的 PCI 窗口不参与早期恒等映射。
-        if range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count]) {
-            continue;
+        if !direct_map_range_supported(page_range) {
+            return false;
         }
-        if !push_range(&mut buffer.mmio, &mut buffer.mmio_count, page_range) {
+        if !range_overlaps_memory(page_range, &buffer.regions[..buffer.region_count])
+            && !push_range(&mut buffer.mmio, &mut buffer.mmio_count, page_range)
+        {
             return false;
         }
     }
@@ -712,8 +738,13 @@ fn walk_nodes(fdt: &FallibleFdt<'_>, devices: &mut Vec<DeviceInfo>) {
                 let mut raw_property_validity = RawPropertyValidity::Valid;
                 for property in properties {
                     match property {
-                        Ok(property) if raw_properties.iter().all(|entry: &RawProperty| entry.name != property.name) => {
-                            raw_properties.push(RawProperty::new(property.name, property.value.to_vec()));
+                        Ok(property)
+                            if raw_properties
+                                .iter()
+                                .all(|entry: &RawProperty| entry.name != property.name) =>
+                        {
+                            raw_properties
+                                .push(RawProperty::new(property.name, property.value.to_vec()));
                         }
                         Ok(_) | Err(_) => {
                             raw_property_validity = RawPropertyValidity::Malformed;
@@ -801,18 +832,25 @@ fn classify_device(compatible: &[String]) -> DeviceKind {
 
 fn property_cstr<'a>(device: &'a DeviceInfo, property_name: &str) -> Option<&'a str> {
     let value = device.raw_property(property_name).ok()?;
-    let terminator = value.iter().position(|byte| *byte == 0).unwrap_or(value.len());
+    let terminator = value
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(value.len());
     core::str::from_utf8(&value[..terminator]).ok()
 }
 
 fn resolve_stdout_path(devices: &[DeviceInfo]) -> Option<String> {
-    let chosen = devices.iter().find(|device| device.node_path == "/chosen")?;
+    let chosen = devices
+        .iter()
+        .find(|device| device.node_path == "/chosen")?;
     let stdout = property_cstr(chosen, "stdout-path")?;
     let node_path = stdout.split(':').next()?;
     if node_path.starts_with('/') {
         return Some(String::from(node_path));
     }
-    let aliases = devices.iter().find(|device| device.node_path == "/aliases")?;
+    let aliases = devices
+        .iter()
+        .find(|device| device.node_path == "/aliases")?;
     property_cstr(aliases, node_path).map(String::from)
 }
 

@@ -46,8 +46,6 @@ __alltraps:
     # read user stack from sscratch and save it in TrapContext
     csrr t2, sscratch
     sd t2, 2*8(sp)
-    # load kernel_satp into t0
-    ld t0, 67*8(sp)
     # load trap_handler into t1
     ld t1, 68*8(sp)
     # x4/tp was saved above; replace the user's TLS pointer with this CPU's
@@ -55,27 +53,15 @@ __alltraps:
     ld tp, 70*8(sp)
     # move to kernel_sp
     ld sp, 69*8(sp)
-    # 先保存旧用户 SATP 的 ASID。非零 ASID 能把用户与固定的内核 ASID 0 隔离，
-    # 因此切根本身无需全刷；ASIDLEN=0 的兼容路径仍必须在每次切根后全刷。
-    csrr t2, satp
-    slli t2, t2, 4
-    srli t2, t2, 48
-    csrw satp, t0
-    bnez t2, .Lkernel_satp_ready
-    sfence.vma
-.Lkernel_satp_ready:
+    # Every user root shares the supervisor-only kernel subtrees.  Keep the
+    # current SATP across an ordinary trap; scheduler/exec paths install a
+    # different root in Rust before the old address space can be retired.
     # jump to trap_handler
     jr t1
 
 __restore:
-    # a0: 用户 TrapContext；a1: 已编码 MM-owned ASID 的用户 SATP。
-    # 从 SATP 自身提取 ASID，避免再增加一套容易错位的恢复参数 ABI。
-    slli t0, a1, 4
-    srli t0, t0, 48
-    csrw satp, a1
-    bnez t0, .Luser_satp_ready
-    sfence.vma
-.Luser_satp_ready:
+    # a0: 用户 TrapContext。目标 SATP 已由 switch_user_vm() 安装；同一
+    # MM 的普通 syscall/trap 因而不会写 SATP，也不会触发模拟器切根开销。
     csrw sscratch, a0
     mv sp, a0
     # now sp points to TrapContext in user space, start restoring based on it

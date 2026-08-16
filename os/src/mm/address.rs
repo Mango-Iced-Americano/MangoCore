@@ -9,6 +9,8 @@
 //! 有效、对齐且不会与其他可变引用别名。
 
 use crate::config::{MEMORY_HIGH_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
+#[cfg(target_arch = "riscv64")]
+use crate::config::MEMORY_HIGH_SIZE;
 use core::fmt::{self, Debug, Formatter};
 
 #[repr(C)]
@@ -218,8 +220,22 @@ impl VirtPageNum {
 impl PhysAddr {
     // 物理地址通过内核直映区访问，具体偏移由架构配置给出。
     #[inline(always)]
-    fn direct_map_addr(&self) -> usize {
-        self.0 | MEMORY_HIGH_BASE
+    pub(crate) fn direct_map_addr(&self) -> usize {
+        #[cfg(target_arch = "riscv64")]
+        {
+            assert!(
+                self.0 < MEMORY_HIGH_SIZE,
+                "RISC-V physical address {:#x} exceeds the shared physmap",
+                self.0
+            );
+            return MEMORY_HIGH_BASE
+                .checked_add(self.0)
+                .expect("RISC-V direct-map address overflow");
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            self.0 | MEMORY_HIGH_BASE
+        }
     }
 
     /// 返回该物理地址在内核直映区中的 raw byte pointer。

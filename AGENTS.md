@@ -171,6 +171,12 @@ Running owner 时在 per-task 请求槽锁内直接发布；排除 owner 时先�
 切回 idle，完成 `Running(source) -> Queued(target)` 后才发布 Applied；
 Blocking 窗口等待回到 Running 或进入 Blocked 后重试。请求槽锁不得跨 IPI、
 TLB ack、context switch 或其它等待点。
+双架构（RV64/LA64）的远端任务内核栈发布默认采用目标侧延迟确认：发布方在 runqueue 可见前递增目标
+`kernel_tlb_request`，目标取得任务后仍在 idle 栈上执行本地 full flush，确认 request 后才
+`__switch`。当前 CPU 目标仍立即刷新；kernel mapping retire 在双架构
+都必须保持全 CPU 同步等待。该协议不依赖 Svvptc 的 stale-invalid 最终收敛语义。
+LA64 曾在 12 核官方评测中因 eager ack 单请求 5 秒超时 panic（`task/manager.rs` publish），
+因此与 RV64 一样不再使用 eager ack；`perf_diag` 可用 `mango.la.kernel_task_sync=eager` 回退做 A/B。
 B39 把全局调度 deadline 拆为每 CPU 独立的 100 Hz 绝对 deadline。hard timer IRQ
 仍只发布 deferred 标志，真正调度只发生在既有安全点；CPU0 额外独占全局
 timer/timeout/timerfd/net poll，AP 只推进本地 quantum。AP 插入更早的全局 timer 时，
@@ -213,7 +219,11 @@ sockaddr 裸指针解引用，网络地址先复制为内核所有快照再解�
 `translated_byte_buffer` 及锁外物理页 slice：`UserBuffer`/`UserIoVec` 只保存 token 与
 逻辑 VA 区间，实际 copy 每页重新取得 VM 锁并验证 PTE。流式 I/O 返回已完成前缀，固定
 格式用 `read_exact`/`write_all`；pipe 在 ring 自旋锁内只能使用已预 fault 的 nofault copy。
-预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。develop Batch 6 又为
+预 fault 只用于 ABI 副作用排序，不代替真正 copy 时的再验证。`write_from_user`/`pwrite_from_user`
+的 chunk 循环不得把 `user_accessible_len == 0` 当作缓冲区终点：PTE 未 present 可能只是惰性缺页
+（如从未被访问的 .rodata 尾页），必须仍按单页有界 fault-in 重试，只有真实不可访问区域由
+fault 失败产生已完成前缀。曾有跨页 53 字节写被截成 52 字节、用户 println 忽略短写返回值导致
+换行丢失、两条日志并行的官方评测缺陷。develop Batch 6 又为
 read/pread 增加可写前缀构造：只在前缀为空时 fault-in 首页，后续不可写页截断本轮生产者
 消费长度；返回对象仍只保存 VA，实际 copy 继续逐页重验。B60 已让 SysV semaphore
 `GETALL/SETVAL/SETALL` 和 POSIX `mq_open(O_CREAT)` 采用“锁内验证 → 锁外 copy → 锁内
@@ -366,7 +376,10 @@ signalfd 的 open file 只保存共享 mask；阻塞 read/poll 的事件队列�
 RV64 从 `a1` 直接取得 FDT；LA64 从 `a2` 的 EFI system table 按 `EFI_FDT_GUID` 查找
 FDT，QEMU 缺失时失败，2K1000 缺失时允许静态板级回退。RV64 timer 频率来自 FDT
 `/cpus/timebase-frequency`，LA64 保持 CPUCFG 探测；两者不能用调度 `TICKS_PER_SEC`
-互相替代。MM 已以运行期固件 region 作为 QEMU 的内存拓扑来源，并让 2K1000 静态
+互相替代。RV64 由 BSP 在 AP 发布和首个 deadline 前检查所有 enabled CPU 的 FDT
+ISA extension；只有整机明确支持 Sstc 且 CPU 数匹配运行时拓扑时才直写 `stimecmp`，
+否则 fail-closed 回退 SBI TIME，backend 选定后不可变。MM 已以运行期固件 region
+作为 QEMU 的内存拓扑来源，并让 2K1000 静态
 fallback 填入同一接口；Driver 切换动态资源前仍须保留现有板级路径，避免半迁移状态。
 早期顺序固定为“冻结入口参数 → 架构 bootstrap → 固件资源发现 → 清 BSS”；LA64
 不得在建立 DMW、异常入口和页表寄存器基线前进入资源解析。

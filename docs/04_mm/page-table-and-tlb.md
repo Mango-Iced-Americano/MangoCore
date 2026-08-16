@@ -3,7 +3,7 @@ title: "页表抽象与 TLB 约束"
 category: mm
 status: stable
 author: MangoCore Team
-last_update: 2026-08-04
+last_update: 2026-08-14
 tags: [mm, pagetable, tlb, mmu-gather, sv39, loongarch64, smp, membarrier]
 ---
 
@@ -46,7 +46,6 @@ MM 上层只依赖 `PageTable` trait，因此 `AddressSpace<T: PageTable>`、`Vm
 | `set_ppn(vpn, ppn)` | 修改 PTE 指向的物理页 |
 | `set_pte_flags(vpn, flags)` | 修改 PTE flags |
 | `user_access_ok(vpn, access)` | 检查用户态读写权限 |
-| `take_frames()` | 移出页表自身持有的页表页，交给 TLB retirement 延迟释放 |
 
 trait 的存在把 VMA 管理、缺页策略和具体 PTE 编码解耦。
 
@@ -146,9 +145,20 @@ fn check_user_flags(flags: MapPermission) -> MmResult<()> {
 | 对象 | 生命周期与责任 |
 |------|----------------|
 | `AddressSpace` | 共享 MM 的外层对象；持有 VM 锁和长期 `TlbContext` |
-| `UserMapper` | 只在 VM 锁内短暂存在；执行 raw/no-flush PTE 写入并立即调用 `record_change()` |
+| `UserMapper` | 只在 VM 锁内短暂存在；执行 raw/no-flush PTE 写入并立即调用 `record_change()`（见下方 fresh-map 例外） |
 | `MmuGather` | 一次 `AddressSpace::write()` 内唯一的失效范围和退休 frame 所有者 |
 | `TlbFlush` | `seal()` 后带出 VM 锁；执行本地/远端失效，收齐 ack 后释放 frame |
+
+> **fresh-map 例外（production 默认能力门控）**：`UserMapper::map_page` 对严格
+> invalid→valid 的新映射不再 `record_change`，跳过本地/远端 TLB 失效。启用条件
+> 为整机 per-hart FDT 都明确报告 Svvptc（`platform_supports_svvptc()`，与 Sstc
+> 同一套解析），否则 fail-closed 保持既有 flush；`perf_diag` 构建可用
+> `mango.rv.fresh_map_flush=on/off` 覆盖做同镜像 A/B。依据：RISC-V 规范
+> invalid→valid 无需 fence；QEMU TCG 无负缓存；真硬件由 Svvptc 与
+> `do_page_fault` 的 spurious-fault 快路（PTE 已 valid 且权限满足 → 本地单页
+> 失效后直接完成）保证收敛。破坏性更新（unmap/PPN/权限/层级回收）与 kernel
+> mapping retire 一律保持同步失效。实验结论见 `docs/Work_Log/2026-08-15.md`
+> （production 完整 BuildStorm 1858s，较 2196s 基线 -15.39%）。
 
 调用链固定为：
 
@@ -202,7 +212,9 @@ fork 时父、子分别使用一个 `UserMapper`，修改记录落入各自 `Mmu
 地址空间失效。RV64 在启动时探测 `SATP.ASID` 容量，用户 MM 使用 versioned ASID；本地对
 区间内每页执行 `sfence.vma va, asid`，远端以物理 hart mask 调用 SBI RFENCE FID 2，
 同步完成整个 `[start, end)` 后才允许释放 frame。固件缺少 RFENCE 时明确改走固定 slot。
-有硬件 ASID 时，用户/内核 SATP 切换不再固定全刷；ASIDLEN=0 平台保留兼容全刷。
+RV64 的用户根复制 kernel root 256..510 的 supervisor-only 分支，普通 trap 因而保持
+当前 SATP；只有 MM/CPU idle 转换才写 SATP。有硬件 ASID 时，不同 MM 的真实切换也
+无需固定全刷；ASIDLEN=0 平台只在真实换根时保留兼容全刷。
 LA64 把同一 VM 锁内冻结的 ASID、起始 VPN 和页数发布到每发起 CPU 独占的原子槽，
 目标 CPU 从向下对齐的偶数 VPN 开始每两页执行一次 `invtlb 0x5`。软件 fixed slot 还携带
 同步等待期内保证存活的 MM generation：handler 必须先完成精准失效，再单调发布本 CPU
@@ -222,8 +234,11 @@ slot/IPI 精准区间，或 slot 被占用后的 range→full fallback。另累�
 诊断统计，只有最终同步返回错误才增加 TLB failure。全部计数属于 Relaxed best-effort
 快照，不参与 request/ack、generation、ASID 或 frame 退休同步，也不在 hard IRQ 中计时。
 
-B21 的共享内核页表协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
-释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。
+B21 的共享内核页表撤映射协议与这里独立：动态内核映射先清 PTE、保留 mapping frame，
+释放 `KERNEL_SPACE` 锁后执行全 CPU shootdown，收齐 ack 才释放 frame。RV64 新任务的
+invalid→valid 内核栈发布采用另一条严格受限的顺序：发布方先递增目标 request 再入队，
+目标在 idle 栈取得任务后、本地 full flush 完成前不得 `__switch` 到该栈；这不放宽任何
+撤映射、权限/PPN 修改或 frame/slot 回收的 shootdown 要求。
 
 ## 7. COW 中的页表变化
 
@@ -278,7 +293,7 @@ if crate::task::current_user_token() != token {
 
 这避免内核在缺页时错误地操作非当前进程地址空间。
 
-## 11. take_frames() 与页表页退休
+## 11. zombie 映射退休与页表根生命周期
 
 `AddressSpaceInner::release_for_zombie()` 会在外层 `AddressSpace::write()` 中调用：
 
@@ -286,15 +301,14 @@ if crate::task::current_user_token() != token {
 self.with_user_mapper(|vmas, mapper| vmas.unmap_all(mapper))
     .expect("zombie cleanup failed to clear a resident user PTE");
 self.locked_pages.clear();
-let page_table_frames = self.page_table.take_frames();
 self.mmu_gather.record_full_flush();
-self.mmu_gather.retire_frames(&self.page_table, page_table_frames);
 ```
 
-该路径先撤销所有 resident PTE，然后把页表根/中间页也移出所有权。
-叶子数据 frame 和页表 frame 由同一个 `MmuGather` 保留，因为远端硬件可能仍在
-page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待接口只需要 pid、
-退出码等元数据，不再需要地址空间。
+该路径只在 idle 栈已经安装其它页表根、`active_cpu_mask == 0` 且 VM 未共享时执行。
+它撤销 resident PTE，并由 `MmuGather` 保留叶子数据 frame 到 shootdown 完成。页表
+根和仍存的中间页继续由 `AddressSpace` 持有到最终 Arc drop：TLB ack 只能证明旧缓存
+被清除，不能阻止仍安装该 SATP 的 hart 在 ack 后重新 page walk，因此不能用一次 ack
+作为释放根页表的依据。
 
 ## 12. 架构相关注意点
 
@@ -305,23 +319,26 @@ page walk；外层解锁并收齐目标 CPU 的 ack 后才统一释放。等待�
 
 两种架构都把软件 epoch 和硬件 ASID 编码在每 MM 的 `asid_context` 中。RV64 的低
 16 位对应 `SATP.ASID`，BSP 通过 WARL 写全 1/读回探测 ASIDLEN；QEMU virt 实测提供
-65535 个用户编号。若硬件实现 ASIDLEN=0，分配器返回 ASID 0，trap 切根路径继续执行
-全量 `sfence.vma`，不把性能优化变成兼容性要求。LA64 的低 10 位对应
+65535 个用户编号。若硬件实现 ASIDLEN=0，分配器返回 ASID 0，只有调度/exec 的真实
+换根才执行全量 `sfence.vma`，普通 trap 仍保持当前根。LA64 的低 10 位对应
 `CSR.ASID[9:0]`，高位只供软件判断编号是否属于当前 epoch。同一 epoch 内的编号单调分配，
 MM 销毁不立即归还；耗尽时由一个 leader 先通过既有 user-TLB request/ack 清除全部 online
-CPU 的 non-global 项，收到全部 ack 后才推进 epoch 并允许编号复用。等待 rollover 的 CPU
-不持 VM 锁，并临时开放本地中断，因此仍能响应 leader 的 TLB IPI。
+CPU 的 non-global 项，收到全部 ack 后才推进 epoch 并允许编号复用。RV64 额外记录每 CPU
+真正安装过的 epoch；rollover IPI 本身不推进该值，因为 handler 返回旧根后仍可能重新填充。
+PTE writer 若发现某个 active CPU 落后于该 MM 的 epoch，会把精准失效提升为全刷。等待
+rollover 的 CPU 不持 VM 锁，并临时开放本地中断，因此仍能响应 leader 的 TLB IPI。
 
 用户返回路径调用 `ProcessControlBlock::activate_user_vm()`，一次取得同一个
-`AddressSpace` 的页表根和 ASID 快照。RV64 把 ASID 编入 SATP；trap 汇编从 SATP 自身
-提取编号，非零时不再在每次用户/内核切换固定全刷。LA64 `__restore` 只在页表根或 ASID
+`AddressSpace` 的页表根、ASID 和软件 epoch 快照。RV64 在 IRQ-off transaction 内由
+`switch_user_vm()` 安装该 SATP；普通 trap 的 `__alltraps/__restore` 不再写 SATP。LA64
+`__restore` 只在页表根或 ASID
 变化时成对写入 `CSR.PGDL/CSR.ASID`。两者的编号复用都发生在全 CPU flush/ack 后，而不是
 依赖每次 context switch 掩盖旧翻译。
 
-RV64 使用 ASID 隔离用户页表与内核页表时，global PTE 必须在所有 ASID 下保持同一 VA→PA
-含义。内核低地址恒等映射可能与用户 VA 范围重叠，不能设置 `G`；它们固定属于内核 ASID
-0。只有高半区内核段、共享 trampoline 和完全不与用户 VA 相交的恒等映射可以跨 ASID
-保留 global TLB 项。
+RV64 的 global PTE 必须在所有根下保持同一 VA→PA 含义。RAM/MMIO 统一放在 64 GiB
+supervisor-only 高半 physmap，内核代码、physmap、动态 program/stack 分支由所有用户根
+共享并设置 `G`。root 511 保持每进程私有，用于 trap context、signal trampoline 等；
+trampoline 在内核根和用户根中映射到同一物理页。
 
 上层文档统一称为 `tlb_invalidate` 或 `flush_tlb()`，不把架构指令混入通用 MM 逻辑。
 
@@ -336,7 +353,9 @@ B16 首次收口用户 PTE 写入，B22 完成 cached CPU/generation 激活侧�
 `record_change -> seal -> execute`，并完成锁外等待与 ack 前 frame 不复用；B24 接通
 RV64 单页 RFENCE；B25 完成 LA64 MM-owned ASID 与全 CPU flush-before-reuse epoch
 协议；B26 以每发起 CPU 固定 slot 完成 LA64 ASID+VPN 远端失效；B27 完成 RV64
-ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和条件式 trap 切根；B29 又验证了同一
+ASIDLEN 探测、MM-owned ASID、FID 2 精准页失效和最初的条件式 trap 切根；当前 RV64
+用户根已共享 supervisor-only 内核分支，SATP 只在真实 MM 调度切换时安装，普通 trap
+入口/恢复不再切根。B29 又验证了同一
 用户任务可在 `sched_yield` 安全点携带同一 MM 从 CPU0 迁移至 CPU1。B51 将历史
 cached CPU 集合替换为调度器维护的 active mask，并用零目标 generation 追赶闭合安全
 detach。B52 将 `FlushRange::Page` 泛化为最多 64 页的半开 `Range`，RV64 直接把
@@ -362,4 +381,5 @@ TLB 的 D 位；底层 `revoke_write()` 改为同步清 W/D 后双架构通过�
 | 用户指针明明在 VMA 内仍 EFAULT | fault-in 后 `user_access_ok()` 是否失败 |
 | MAP_SHARED 文件写不落到 page cache | 首次读映射是否错误保留 W，绕过 shared write fault |
 | unmap 后出现旧页数据或 UAF | 是否先撤销 PTE，再 `retire_frame()`，最后执行 `TlbFlush` |
-| zombie 释放后页表泄露 | `unmap_all()` 后是否将 `take_frames()` 结果交给同一轮 retirement |
+| zombie 仍占大量用户页 | 是否在 idle 栈清空 active mask 后调用 `release_zombie_mappings_if_inactive()` |
+| zombie root UAF | 是否错误地把 shootdown ack 当成“CPU 已换走 SATP 根”的证明 |

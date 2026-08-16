@@ -26,14 +26,27 @@ const RESET_STATUS_POLL_LIMIT: usize = 1_000_000;
 fn read_reg(base: usize, offset: usize) -> u32 {
     // SAFETY: Categories 6 and 11. The base and offset are 4-byte aligned
     // JH7110 register constants, so the volatile load is aligned and valid.
-    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
+    unsafe {
+        core::ptr::read_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+        )
+    }
 }
 
 #[inline(always)]
 fn write_reg(base: usize, offset: usize, value: u32) {
     // SAFETY: Categories 6 and 11. The base and offset are 4-byte aligned
     // JH7110 register constants, so the volatile store is aligned and valid.
-    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) }
+    unsafe {
+        core::ptr::write_volatile(
+            crate::mm::PhysAddr(base + offset)
+                .direct_map_ptr()
+                .cast::<u32>(),
+            value,
+        )
+    }
 }
 
 #[inline(always)]

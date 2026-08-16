@@ -3,7 +3,7 @@ title: "运行期服务 (Runtime Services)"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-04
+last_update: 2026-08-14
 tags: [architecture, runtime, trace, timer]
 ---
 
@@ -136,7 +136,7 @@ let should_poll_console = true;
 ## 4. 调度循环维护动作
 
 `task/processor.rs::run_tasks()` 把 CPU0 的全局维护与空闲循环次数解耦。CPU0
-本地 10ms scheduler tick 发布一个可合并的 `boot_housekeeping_pending`，idle 栈消费
+本地 20ms scheduler tick 发布一个可合并的 `boot_housekeeping_pending`，idle 栈消费
 该事件时执行：
 
 ```
@@ -220,7 +220,7 @@ zombie 计数、active MM ID、pending IPI、timer 和 TLB/barrier request/ack�
 | `SCHED_SWITCHES` | 上下文切换次数 |
 | `SCHED_STAGE_*_CALLS` | console、wake、net poll、reclaim、zombie、futex、fetch、idle 等阶段调用次数 |
 | `SCHED_STAGE_*_CYCLES_TOTAL/MAX` | 对应阶段耗时统计 |
-| `SCHED_TIMER_*` | timer trap、handler、program timer、SBI set timer 相关耗时 |
+| `SCHED_TIMER_*` | timer trap、handler 与 program timer 耗时；program 计数覆盖 Sstc/SBI 两种 backend，SBI set-timer 子计数只覆盖 fallback |
 
 `sched_rdcycle()` 在 rv64 使用 `rdcycle`，在 la64 使用 `rdtime.d`。
 
@@ -253,6 +253,10 @@ timer 能力分三层：
 | HAL time | `hal/arch/*/time.rs` | 读取硬件时间、获取频率、设置 timer delta |
 | 通用时间结构 | `os/src/timer.rs` | `TimeSpec`、`TimeVal`、时间单位转换 |
 | task timer | `os/src/task/manager.rs` | sleep、timeout、futex/wait queue timer、POSIX timer 基础 |
+
+RV64 的 HAL time 对上层隐藏 backend。BSP 在 AP 发布前检查所有 enabled CPU 的 FDT
+ISA extension；整机明确支持 Sstc 时直写 `stimecmp`，否则调用 SBI TIME。选择在启动后
+保持不变，因此 task timer 和 trap 代码始终使用同一个 `program_timer_delta()` 接口。
 
 trap 后端收到 timer interrupt 后进入 `task::timer_interrupt_handler()`。调度循环中的 `do_wake_expired()` 负责处理到期等待者，形成 timer interrupt 与调度循环的双入口保障。
 
