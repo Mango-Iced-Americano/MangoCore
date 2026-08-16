@@ -651,6 +651,8 @@ pub struct ProcessControlBlock {
     sid_hint: AtomicUsize,
     parent_pid_hint: AtomicUsize,
     user_token_hint: AtomicUsize,
+    /// 线程组 leader 的 exit_signal 快照；父进程 SIGCHLD 通知以它为准。
+    exit_signal_hint: AtomicUsize,
     /// Weak shared state retained by all pidfds for this process.
     ///
     /// The PCB never owns this state strongly: a pidfd keeps it alive across
@@ -908,6 +910,16 @@ pub fn is_writable_inode_busy(inode: &Arc<dyn vfs::IndexNode>) -> bool {
 }
 
 impl ProcessControlBlock {
+    /// 记录线程组 leader 的 exit_signal；非 leader 线程最后收尾时也用它。
+    pub(crate) fn set_exit_signal_hint(&self, signal: Signals) {
+        self.exit_signal_hint
+            .store(signal.bits() as usize, Ordering::Relaxed);
+    }
+
+    /// 读取进程级 exit_signal 快照。
+    pub(crate) fn exit_signal_hint(&self) -> Signals {
+        Signals::from_bits_truncate(self.exit_signal_hint.load(Ordering::Relaxed) as signal_type!())
+    }
     /// 一次性释放进程级 clone quota。幂等，重复调用无副作用。
     /// 应在 wait_child、auto-reap、orphan-zombie-reap 路径中尽早调用，
     /// 不依赖 PCB Drop 的延迟释放。
@@ -1439,6 +1451,7 @@ impl ProcessControlBlock {
             sid_hint: AtomicUsize::new(sid),
             parent_pid_hint: AtomicUsize::new(parent_pid_hint),
             user_token_hint: AtomicUsize::new(user_token),
+            exit_signal_hint: AtomicUsize::new(0),
             pidfd_state: Mutex::new(Weak::new()),
             inner: Mutex::new(ProcessInner {
                 exe,
@@ -2649,7 +2662,11 @@ impl ProcessControlBlock {
                 parent_process.child_exit_wait.lock().wake_all();
             } else {
                 parent_process.child_exit_wait.lock().wake_all();
-                let exit_signal = exit_task.exit_signal();
+                // 线程组退出时，最后完成进程级收尾的可能是非 leader sibling。
+                // 其 exit_signal 为空；Linux 仍按线程组 leader 的 exit_signal
+                // 通知父进程。否则父进程（例如 timeout(1)）会在子进程退出后
+                // 一直停在 rt_sigsuspend，拿不到 SIGCHLD。
+                let exit_signal = self.exit_signal_hint();
                 if !exit_signal.is_empty() {
                     if let Some(parent_task) = parent_process.any_live_thread() {
                         let mut parent_inner = parent_task.acquire_inner_lock();
