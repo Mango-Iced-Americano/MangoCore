@@ -3,8 +3,7 @@ title: "RISC-V 64 平台后端"
 category: architecture
 status: stable
 author: MangoCore Team
-last_update: 2026-08-15
-last_update: 2026-08-14
+last_update: 2026-08-16
 tags: [architecture, riscv64, hal]
 ---
 
@@ -39,6 +38,9 @@ os/src/hal/arch/riscv/
 ├── kern_stack.rs
 ├── linker.ld / linker-rvqemu.ld
 ├── plic.rs
+├── plic/
+│   ├── dispatch.rs
+│   └── mmio.rs
 ├── sbi.rs
 ├── sv39.rs
 ├── switch.rs
@@ -55,9 +57,10 @@ os/src/hal/arch/riscv/
 | `entry.asm` | 架构入口汇编，由 `main.rs` 在 `riscv` feature 下引入 |
 | `config.rs` | 地址空间、页大小、内核堆、内核栈、物理内存和平台常量 |
 | `kern_stack.rs` | 内核栈分配、trap context/user stack 地址计算 |
-| `plic.rs` | QEMU/实板 PLIC supervisor context 初始化、claim/complete 与外部 IRQ 分发 |
+| `plic.rs` | FDT supervisor context 拓扑发布、每 CPU local PLIC 初始化与 CPU0 默认设备路由 |
+| `plic/mmio.rs` | 已验证 context 的 PLIC MMIO、enable/threshold/claim/complete 与 I/O fence |
+| `plic/dispatch.rs` | handler table、指定 CPU source enable、当前 CPU claim/complete 与未知 IRQ 延迟报告 |
 | `sbi.rs` | OpenSBI 调用、console、timer、shutdown、本地中断保存恢复 |
-| `sbi.rs` | OpenSBI 调用、console、timer fallback、shutdown、本地中断保存恢复 |
 | `sv39.rs` | SV39 页表、PTE flag、TLB 刷新 |
 | `switch.S` | 任务上下文切换汇编 |
 | `time.rs` | 时间读取、时钟频率、Sstc/SBI backend 选择与 timer delta |
@@ -71,25 +74,30 @@ RISC-V 后端在 `mod.rs` 中定义：
 ```rust
 pub fn machine_init() {
     trap::init();
-    let plic_ready = plic::init_boot_cpu();
+    let plic_ready = plic::init_controller();
     trap::enable_ipi_interrupt();
     if plic_ready {
         trap::enable_external_interrupt();
+        if !plic::init_local_context() {
+            trap::disable_external_interrupt();
+        }
     }
     time::init_timer_backend();
     // 多核时一次性探测 SBI RFENCE；缺失则保留软件 IPI fallback。
     // 每个 CPU 的首个 timer deadline 由 timer_cpu_init() 设置。
 }
 
-pub fn bootstrap_init(cpu_id: usize) { /* AP 只初始化 IPI */ }
+pub fn bootstrap_init(cpu_id: usize) { /* AP 只初始化 IPI，不访问 PLIC MMIO */ }
 pub fn enable_local_timer_interrupt() { /* deadline 写入后开放 STIE */ }
 ```
 
 ### 3.1 `bootstrap_init()`
 
 rv64 的 `bootstrap_init()` 在 CPU0 上不重复做全局工作；AP 只安装本地 trap 并开放
-supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力由 CPU0 的全局
-初始化及后续 AP 启动阶段共同建立。
+supervisor software interrupt（SSIE）。AP 此时仍使用早期映射，不能访问经高半区
+direct map 的 PLIC MMIO。它必须在观察到 scheduler-ready、安装本 CPU 内核页表根并
+刷新本地 TLB 后，才初始化自己的 PLIC context 并开放 SEIE。页表根、完整 trap/timer
+和 RFENCE 能力由 CPU0 的全局初始化及后续 AP 启动阶段共同建立。
 
 ### 3.2 `machine_init()`
 
@@ -98,10 +106,10 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 | 调用 | 文件 | 行为 |
 |------|------|------|
 | `trap::init()` | `trap/mod.rs` | 调用 `set_kernel_trap_entry()`，设置 `stvec` 为 kernel trap |
-| `plic::init_boot_cpu()` | `plic.rs` | 从 FDT 选择 `sifive,plic-1.0.0`，清理 BSP supervisor context 的 enable/threshold，完成 MMIO fence 后发布 ready 状态 |
+| `plic::init_controller()` | `plic.rs` | 从 FDT 选择 PLIC，解析并清理所有已发布 S-mode context 的 enable/threshold，完成 MMIO fence 后 Release 发布 context 表 |
 | `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
-| `trap::enable_external_interrupt()` | `trap/mod.rs` | 仅在 PLIC 已就绪时打开 supervisor external interrupt（SEIE） |
-| `trap::enable_ipi_interrupt()` | `trap/mod.rs` | 为 CPU0 打开 supervisor software interrupt |
+| `trap::enable_external_interrupt()` | `trap/mod.rs` | 仅在 PLIC controller 已发布时打开 supervisor external interrupt（SEIE）；local context 失败时立即关闭 |
+| `plic::init_local_context()` | `plic.rs` | 仅将当前 logical CPU 的已发布 context threshold 设为 0，fence 后 Release 发布 local-ready |
 | `time::init_timer_backend()` | `time.rs` | 在 AP 发布和首个 deadline 前按全部 enabled CPU 的 FDT ISA 能力选择 Sstc；任何缺失、畸形或不一致都回退 SBI |
 | `sbi::init_rfence()` | `sbi.rs` | 多核时通过 BASE extension 探测 RFENCE 并缓存结果；启动日志明确选择 RFENCE 或 IPI fallback |
 | `sbi::init_ipi()` | `sbi.rs` | 多核时一次性探测 IPI extension 并缓存；`send_ipi` 运行期只读缓存，不再每次 doorbell 做 BASE probe |
@@ -111,8 +119,13 @@ supervisor software interrupt。页表根、完整 trap/timer 和 RFENCE 能力�
 `timer_cpu_init()` 写入首个绝对 deadline，再开放本地 timer interrupt，避免在 deadline
 尚未发布时收到无法归属的中断。
 
-PLIC 初始化、SSIE 和 SEIE 必须按此顺序执行。若 FDT 没有可用的 PLIC，系统保留既有
-software/timer interrupt 路径，但不开放 SEIE。
+`init_controller()` 将每个 FDT 描述的 S-mode context threshold 设为 `u32::MAX` 并清除
+enable words，因此 BSP 即使先置 SEIE 也不会在 `init_local_context()` 前 claim source。
+`interrupts-extended` 每个 entry 的 phandle 必须解析为 `riscv,cpu-intc`，再由父 CPU
+`reg` hart 映射为冻结的 sparse logical CPU；标准 supervisor external interrupt 9 优先，
+同一 hart 缺少 9 时才接受兼容值 11。属性或引用链畸形时仅发布旧 BSP context 公式的
+回退，不会猜测 AP context。若 FDT 没有可用的 PLIC，系统保留 software/timer interrupt
+路径，但不开放 SEIE。
 
 ## 4. Trap 后端
 
@@ -122,6 +135,11 @@ software/timer interrupt 路径，但不开放 SEIE。
 以避免单次 trap 被持续网卡流量占满。每个已声明 source 在 MMIO fence 后 complete；未知
 source 会被 mask，不能反复触发。硬 IRQ 路径只发布驱动的 deferred work，不直接 poll
 smoltcp、唤醒任务或切换调度器。
+
+claim/complete 始终通过当前 logical CPU 的 local-ready PLIC context；未完成 local
+初始化的 AP 不会进入该路径。`register_handler()` 仍固定向 logical CPU0 注册 source，
+所以 virtio-net 与 console 的 deferred consumer 保持 CPU0 路由；需要显式目标时才使用
+`register_handler_on()`。这不是网络数据面迁移或 all-core device IRQ 调度。
 
 CPU0 的既有 task/idle 安全点通过 `run_deferred_external_work()` 消费发布：virtio-net IRQ
 驱动网络 poll 与阻塞 I/O wakeup。该桥接保留 normal poll worker 的所有权，AP 不因外部

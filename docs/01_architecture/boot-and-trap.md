@@ -44,9 +44,10 @@ firmware / QEMU
         → CPU-local bootstrap
         → 切换到 logical CPU 独占的 idle stack
         → 发布 idle，再发布 online
-        → IPI-only idle loop 等待 scheduler-ready
-        → 安装本 CPU 的内核页表根并刷新本地 TLB
-        → AP 本地调度循环
+         → IPI-only idle loop 等待 scheduler-ready
+         → 安装本 CPU 的内核页表根并刷新本地 TLB
+         → RV64：初始化本 CPU PLIC context 后开放 SEIE
+         → AP 本地调度循环
 ```
 
 当前 Phase 1 已完成最小 AP 启动、独立 idle stack 和在线发布；Phase 2 已
@@ -154,6 +155,9 @@ online 只证明 CPU-local 启动完成，不等于可以访问调度器。B19 �
    `SCHEDULER_RELEASED`；
 2. AP 用 Acquire 观察该状态，在自己的恒等映射 idle stack 上安装 BSP 已构造的
    内核页表根；RV64 写本地 `satp`，LA64 写本地 `PGDH`，并完成本地 TLB 刷新；
+   RV64 随后才可经 direct map 初始化其 FDT 发布的 PLIC local context，并仅在成功后
+   开放 SEIE。AP 在此之前保留 bootstrap 阶段已开放的 SSIE；缺少 context 时维持 SEIE
+   关闭。
 3. AP 进入 `run_tasks()` 后以 Release 发布 `scheduler_entered`；
 4. CPU0 以 Acquire 等待全部 configured CPU 的 bit，再允许创建远程测试任务。
 

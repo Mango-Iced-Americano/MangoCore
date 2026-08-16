@@ -2447,6 +2447,15 @@ extern "C" fn secondary_idle_main(cpu_id: usize) -> ! {
             // text/data/idle stack；调度高虚拟地址 kernel stack 前必须安装
             // BSP 已构造完成的内核页表，并由 activate 完成本地 TLB 刷新。
             crate::mm::activate_kernel_page_table();
+            #[cfg(target_arch = "riscv64")]
+            {
+                // PLIC MMIO 经高半区 direct map 访问，必须等待本 CPU 安装
+                // kernel page table；此处仍在进入本地 scheduler 前，SSIE 已由
+                // bootstrap_init() 开启，SEIE 只对拥有 FDT context 的 AP 开放。
+                if crate::hal::arch::riscv::plic::init_local_context() {
+                    crate::hal::arch::riscv::trap::enable_external_interrupt();
+                }
+            }
             // 先建立未来 deadline，再开放本地 timer source。此后 AP 只处理
             // 自己的调度 tick，全局 timer callback 仍由 CPU0 独占。
             crate::task::timer_cpu_init();

@@ -12,6 +12,8 @@ use crate::hal::platform::info::{
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::{TryFrom, TryInto};
+#[cfg(target_arch = "riscv64")]
+use core::mem::size_of;
 use core::slice;
 
 use super::FDT_SNAPSHOT;
@@ -470,6 +472,146 @@ fn be_u64(bytes: &[u8], offset: usize) -> Option<u64> {
         .ok()
         .map(u64::from_be_bytes)
 }
+
+#[cfg(target_arch = "riscv64")]
+const RISCV_SUPERVISOR_EXTERNAL_INTERRUPT: u32 = 9;
+// 某些早期板级 DT 只暴露一条值为 11 的 supervisor context。标准 RISC-V
+// cpu-intc 编号仍优先使用 9；只有同一 hart 缺少 9 时才采用此兼容候选。
+#[cfg(target_arch = "riscv64")]
+const RISCV_LEGACY_SUPERVISOR_EXTERNAL_INTERRUPT: u32 = 11;
+
+#[cfg(target_arch = "riscv64")]
+fn device_property_u32(device: &DeviceInfo, name: &str) -> Option<u32> {
+    let value: &[u8; size_of::<u32>()] = device.raw_property(name).ok()?.try_into().ok()?;
+    Some(u32::from_be_bytes(*value))
+}
+
+#[cfg(target_arch = "riscv64")]
+fn device_phandle(device: &DeviceInfo) -> Option<u32> {
+    let standard = device_property_u32(device, "phandle");
+    let linux = device_property_u32(device, "linux,phandle");
+    match (standard, linux) {
+        (Some(standard), Some(linux)) if standard != linux => None,
+        (Some(phandle), _) | (_, Some(phandle)) => Some(phandle),
+        (None, None) => None,
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn cpu_hart_id(devices: &[DeviceInfo], cpu: &DeviceInfo) -> Option<usize> {
+    let parent_path = cpu.parent_path.as_deref()?;
+    let cpus = devices
+        .iter()
+        .find(|device| device.node_path == parent_path)?;
+    let address_cells = usize::try_from(device_property_u32(cpus, "#address-cells")?).ok()?;
+    if !matches!(address_cells, 1 | 2) {
+        return None;
+    }
+    let reg = cpu.raw_property("reg").ok()?;
+    let first = usize::try_from(be_u32(reg, 0)?).ok()?;
+    if address_cells == 1 {
+        return Some(first);
+    }
+    let second = usize::try_from(be_u32(reg, size_of::<u32>())?).ok()?;
+    first.checked_shl(32)?.checked_add(second)
+}
+
+/// 解析 PLIC `interrupts-extended` 所需的冻结拓扑输入。
+#[cfg(target_arch = "riscv64")]
+pub(crate) struct RiscvPlicContextTopology<'a> {
+    devices: &'a [DeviceInfo],
+    harts: &'a [usize],
+    boot_hart: usize,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl<'a> RiscvPlicContextTopology<'a> {
+    pub(crate) const fn new(
+        devices: &'a [DeviceInfo],
+        harts: &'a [usize],
+        boot_hart: usize,
+    ) -> Self {
+        Self {
+            devices,
+            harts,
+            boot_hart,
+        }
+    }
+
+    /// 从 PLIC `interrupts-extended` 解出逻辑 CPU 对应的 supervisor context。
+///
+/// PLIC context 的索引是属性中 `[phandle, irq]` entry 的位置，而不是 hart
+/// 编号的函数。phandle 先解析到 `riscv,cpu-intc`，再沿其父节点回到 CPU 的
+/// `reg` hart ID，最后复用冻结的稀疏 hart 拓扑换算为 MangoCore logical CPU。
+/// `None` 表示属性或引用关系畸形，调用者必须退回已验证的旧 BSP 公式。
+    pub(crate) fn supervisor_contexts(
+        self,
+        plic: &DeviceInfo,
+    ) -> Option<[Option<usize>; crate::smp::MAX_CPUS]> {
+        let interrupts_extended = plic.raw_property("interrupts-extended").ok()?;
+        if interrupts_extended.is_empty()
+            || interrupts_extended.len() % (2 * size_of::<u32>()) != 0
+        {
+            return None;
+        }
+        let mut canonical = [None; crate::smp::MAX_CPUS];
+        let mut legacy = [None; crate::smp::MAX_CPUS];
+
+        for (context, entry) in interrupts_extended
+            .chunks_exact(2 * size_of::<u32>())
+            .enumerate()
+        {
+            let phandle = be_u32(entry, 0)?;
+            let interrupt = be_u32(entry, size_of::<u32>())?;
+            let interrupt_controller = self
+                .devices
+                .iter()
+                .find(|device| device_phandle(device) == Some(phandle))?;
+            if !interrupt_controller
+                .compatible
+                .iter()
+                .any(|compatible| compatible == "riscv,cpu-intc")
+                || device_property_u32(interrupt_controller, "#interrupt-cells") != Some(1)
+            {
+                return None;
+            }
+            let parent_path = interrupt_controller.parent_path.as_deref()?;
+            let cpu = self
+                .devices
+                .iter()
+                .find(|device| device.node_path == parent_path)?;
+            let hart = cpu_hart_id(self.devices, cpu)?;
+            let logical = crate::smp::hardware_to_logical_id_list(
+                self.harts,
+                self.boot_hart,
+                hart,
+            )?;
+            if logical >= crate::smp::MAX_CPUS {
+                return None;
+            }
+
+            let target = match interrupt {
+                RISCV_SUPERVISOR_EXTERNAL_INTERRUPT => &mut canonical[logical],
+                RISCV_LEGACY_SUPERVISOR_EXTERNAL_INTERRUPT => &mut legacy[logical],
+                _ => continue,
+            };
+            if target.replace(context).is_some() {
+                return None;
+            }
+        }
+
+        let mut contexts = [None; crate::smp::MAX_CPUS];
+        let mut found = false;
+        for logical in 0..crate::smp::MAX_CPUS {
+            contexts[logical] = canonical[logical].or(legacy[logical]);
+            found |= contexts[logical].is_some();
+        }
+        found.then_some(contexts)
+    }
+}
+
+#[cfg(all(test, target_arch = "riscv64"))]
+mod plic_context_tests;
 
 fn parse_memreserve(blob: &[u8], buffer: &mut crate::hal::firmware::MemoryRegionBuf) -> bool {
     let Some(mut offset) = be_u32(blob, 16).map(|offset| offset as usize) else {

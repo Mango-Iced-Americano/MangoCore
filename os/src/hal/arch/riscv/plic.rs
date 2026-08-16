@@ -1,91 +1,60 @@
-//! Minimal supervisor-mode PLIC dispatch for the boot CPU.
+//! Supervisor-mode PLIC dispatch with one context per logical CPU.
 //!
 //! Device callbacks only acknowledge hardware and publish lightweight work for
 //! task context.  They must not acquire scheduler or network-stack locks.
 
+mod dispatch;
+mod mmio;
+
 use core::{
-    arch::asm,
-    cmp::max,
     mem::size_of,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use spin::Mutex;
 
-use crate::hal::platform::{self, DeviceInfo, DeviceKind, MmioRange};
-use crate::mm::PhysAddr;
+use crate::hal::platform::{self, DeviceInfo, DeviceKind};
 
-/// Maximum PLIC source ID accepted by the static callback table.
-///
-/// JH7110 advertises 136 sources and QEMU virt has considerably fewer.
-const MAX_IRQS: usize = 256;
-const PRIORITY_BASE: usize = 0x0000;
-const ENABLE_BASE: usize = 0x2000;
-const ENABLE_CONTEXT_STRIDE: usize = 0x80;
-const ENABLE_WORDS_PER_CONTEXT: usize = ENABLE_CONTEXT_STRIDE / size_of::<u32>();
-const CONTEXT_BASE: usize = 0x20_0000;
-const CONTEXT_STRIDE: usize = 0x1000;
-const CONTEXT_THRESHOLD: usize = 0;
-const CONTEXT_CLAIM_COMPLETE: usize = 4;
-const CLAIM_BUDGET: usize = 32;
+use mmio::{fence_io, required_register_size, Plic};
 
-/// Registered interrupt callback. Callbacks run with supervisor interrupts
-/// masked, so they must only perform bounded, lock-free acknowledgement work.
-pub type IrqHandler = fn();
+pub use dispatch::{handle_external_interrupt, register_handler_on, report_unhandled_irq, IrqHandler};
 
 static PLIC_BASE: AtomicUsize = AtomicUsize::new(0);
-static PLIC_CONTEXT: AtomicUsize = AtomicUsize::new(0);
-static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_IRQS]> = Mutex::new([None; MAX_IRQS]);
-/// `0` means no unknown source has been observed; `usize::MAX` means it has
-/// already been reported from task context.
-static FIRST_UNHANDLED_IRQ: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Clone, Copy)]
-struct Plic {
-    base: usize,
-    context: usize,
+struct PlicCpuContext {
+    /// FDT context index + 1; zero means this logical CPU has no S-mode PLIC context.
+    index_plus_one: AtomicUsize,
+    /// 本 CPU 已解除 threshold 后才允许 claim/complete，避免 AP 在本地 MMIO
+    /// 初始化完成前进入 external trap 路径。
+    initialized: AtomicBool,
 }
 
-impl Plic {
-    fn enable_word_address(self, word: usize) -> usize {
-        self.base + ENABLE_BASE + self.context * ENABLE_CONTEXT_STRIDE + word * size_of::<u32>()
-    }
-
-    fn enable_address(self, irq: usize) -> usize {
-        self.enable_word_address(irq / 32)
-    }
-
-    fn context_address(self, offset: usize) -> usize {
-        self.base + CONTEXT_BASE + self.context * CONTEXT_STRIDE + offset
-    }
-
-    fn priority_address(self, irq: usize) -> usize {
-        self.base + PRIORITY_BASE + irq * 4
-    }
-
-    fn claim(self) -> usize {
-        read_register(self.context_address(CONTEXT_CLAIM_COMPLETE)) as usize
-    }
-
-    fn complete(self, irq: usize) {
-        write_register(self.context_address(CONTEXT_CLAIM_COMPLETE), irq as u32);
-    }
-
-    fn mask_source_for_local_context(self, irq: usize) {
-        if irq >= ENABLE_WORDS_PER_CONTEXT * 32 {
-            return;
+impl PlicCpuContext {
+    const fn new() -> Self {
+        Self {
+            index_plus_one: AtomicUsize::new(0),
+            initialized: AtomicBool::new(false),
         }
-        let enable_address = self.enable_address(irq);
-        let enabled = read_register(enable_address);
-        write_register(enable_address, enabled & !(1u32 << (irq % 32)));
     }
 }
 
-fn configured_plic() -> Option<Plic> {
+static PLIC_CONTEXTS: [PlicCpuContext; crate::smp::MAX_CPUS] =
+    [const { PlicCpuContext::new() }; crate::smp::MAX_CPUS];
+
+fn plic_for_cpu(cpu_id: usize) -> Option<Plic> {
     let base = PLIC_BASE.load(Ordering::Acquire);
-    (base != 0).then(|| Plic {
-        base,
-        context: PLIC_CONTEXT.load(Ordering::Relaxed),
-    })
+    let context_plus_one = PLIC_CONTEXTS
+        .get(cpu_id)?
+        .index_plus_one
+        .load(Ordering::Acquire);
+    (base != 0 && context_plus_one != 0).then(|| Plic::new(base, context_plus_one - 1))
+}
+
+fn local_plic() -> Option<Plic> {
+    let cpu_id = crate::smp::cpu_id();
+    PLIC_CONTEXTS
+        .get(cpu_id)?
+        .initialized
+        .load(Ordering::Acquire)
+        .then(|| plic_for_cpu(cpu_id))?
 }
 
 fn supervisor_context() -> Option<usize> {
@@ -116,40 +85,55 @@ fn is_usable_interrupt_controller(device: &DeviceInfo) -> bool {
         && device.mmio_range(0).is_some()
 }
 
-fn select_plic_range() -> Option<MmioRange> {
+fn select_plic_device() -> Option<&'static DeviceInfo> {
     let devices = &platform::platform_info().devices;
     devices
         .iter()
         .find(|device| is_usable_interrupt_controller(device) && is_plic_compatible(device))
         .or_else(|| devices.iter().find(|device| is_usable_interrupt_controller(device)))
-        .and_then(|device| device.mmio_range(0))
 }
 
-fn required_register_size(context: usize) -> Option<usize> {
-    let priority_end = PRIORITY_BASE.checked_add(MAX_IRQS.checked_mul(size_of::<u32>())?)?;
-    let enable_end = ENABLE_BASE
-        .checked_add(context.checked_mul(ENABLE_CONTEXT_STRIDE)?)
-        .and_then(|offset| {
-            offset.checked_add(ENABLE_WORDS_PER_CONTEXT.checked_mul(size_of::<u32>())?)
-        })?;
-    let context_end = CONTEXT_BASE
-        .checked_add(context.checked_mul(CONTEXT_STRIDE)?)
-        .and_then(|offset| offset.checked_add(CONTEXT_CLAIM_COMPLETE + size_of::<u32>()))?;
-    Some(max(priority_end, max(enable_end, context_end)))
+fn fallback_contexts() -> Option<[Option<usize>; crate::smp::MAX_CPUS]> {
+    let mut contexts = [None; crate::smp::MAX_CPUS];
+    contexts[crate::smp::BOOT_CPU_ID] = Some(supervisor_context()?);
+    Some(contexts)
 }
 
-/// Discover, quiesce, and publish the boot CPU's supervisor PLIC context.
+fn publish_contexts(contexts: &[Option<usize>; crate::smp::MAX_CPUS]) {
+    for (cpu_id, context) in contexts.iter().enumerate() {
+        let state = &PLIC_CONTEXTS[cpu_id];
+        state.initialized.store(false, Ordering::Relaxed);
+        state.index_plus_one.store(
+            context.and_then(|context| context.checked_add(1)).unwrap_or(0),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+fn disable_context(plic: Plic) {
+    plic.disable();
+}
+
+/// Discover, quiesce, and publish every FDT-described supervisor PLIC context.
 ///
-/// Publication happens only after every register used by this L1 dispatcher has
-/// been checked against the FDT range and the inherited enable state is gone.
-pub fn init_boot_cpu() -> bool {
-    let Some(range) = select_plic_range() else {
+/// Publication happens only after every published context register has been
+/// checked against the FDT range and inherited enables are gone.
+pub fn init_controller() -> bool {
+    let Some(device) = select_plic_device() else {
         return false;
     };
-    let Some(context) = supervisor_context() else {
+    let Some(range) = device.mmio_range(0) else {
         return false;
     };
-    let Some(required_size) = required_register_size(context) else {
+    let (contexts, fallback) = match crate::hal::firmware::riscv_plic_supervisor_contexts(device)
+    {
+        Some(contexts) if contexts[crate::smp::BOOT_CPU_ID].is_some() => (contexts, false),
+        Some(_) | None => match fallback_contexts() {
+            Some(contexts) => (contexts, true),
+            None => return false,
+        },
+    };
+    let Some(required_size) = required_register_size(&contexts) else {
         return false;
     };
     if range.base % size_of::<u32>() != 0
@@ -159,128 +143,44 @@ pub fn init_boot_cpu() -> bool {
         return false;
     }
 
-    let plic = Plic {
-        base: range.base,
-        context,
-    };
-    // Keep all inherited sources blocked until the whole local enable bitmap
-    // has been cleared. Boot firmware may have left an unrelated level source
-    // asserted before its driver installs a callback.
-    write_register(plic.context_address(CONTEXT_THRESHOLD), u32::MAX);
-    for word in 0..ENABLE_WORDS_PER_CONTEXT {
-        write_register(plic.enable_word_address(word), 0);
+    for context in contexts.iter().flatten() {
+        disable_context(Plic::new(range.base, *context));
     }
-    write_register(plic.context_address(CONTEXT_THRESHOLD), 0);
     fence_io();
-    PLIC_CONTEXT.store(context, Ordering::Relaxed);
+    publish_contexts(&contexts);
     PLIC_BASE.store(range.base, Ordering::Release);
+    if fallback {
+        crate::println!(
+            "[plic] interrupts-extended unavailable; using boot-CPU fallback context"
+        );
+    } else if (1..crate::smp::configured_cpu_count())
+        .any(|cpu_id| contexts[cpu_id].is_none())
+    {
+        crate::println!("[plic] one or more APs lack an S-mode context; SEIE remains disabled there");
+    }
+    true
+}
+
+/// Enable the PLIC threshold for the current logical CPU only.
+pub fn init_local_context() -> bool {
+    let cpu_id = crate::smp::cpu_id();
+    let Some(plic) = plic_for_cpu(cpu_id) else {
+        return false;
+    };
+    plic.initialize_local();
+    fence_io();
+    PLIC_CONTEXTS[cpu_id]
+        .initialized
+        .store(true, Ordering::Release);
     true
 }
 
 /// Return the already-published boot CPU PLIC location for boot diagnostics.
 pub fn boot_cpu_context() -> Option<(usize, usize)> {
-    configured_plic().map(|plic| (plic.base, plic.context))
+    plic_for_cpu(crate::smp::BOOT_CPU_ID).map(|plic| (plic.base(), plic.context()))
 }
 
-/// Register and enable one PLIC source.
-///
-/// Interrupts are locally masked while mutating the handler table so an
-/// external interrupt can never spin on a task-context table lock.
+/// Register sources used by CPU0-only deferred consumers (network and console).
 pub fn register_handler(irq: usize, handler: IrqHandler) -> bool {
-    if irq == 0 || irq >= MAX_IRQS {
-        return false;
-    }
-    let Some(plic) = configured_plic() else {
-        return false;
-    };
-
-    let interrupts_enabled = super::sbi::local_irq_save();
-    IRQ_HANDLERS.lock()[irq] = Some(handler);
-    // A nonzero priority makes the source eligible; threshold remains zero.
-    write_register(plic.priority_address(irq), 1);
-    let enable_address = plic.enable_address(irq);
-    let enabled = read_register(enable_address);
-    write_register(enable_address, enabled | (1u32 << (irq % 32)));
-    super::sbi::local_irq_restore(interrupts_enabled);
-    true
-}
-
-/// Claim, dispatch, and complete a bounded batch of supervisor external interrupts.
-///
-/// This is deliberately limited to bounded MMIO and a pre-registered callback.
-/// In particular, it never polls smoltcp or logs through the serial console.
-pub fn handle_external_interrupt() {
-    let Some(plic) = configured_plic() else {
-        return;
-    };
-    for _ in 0..CLAIM_BUDGET {
-        let irq = plic.claim();
-        if irq == 0 {
-            break;
-        }
-
-        let handler = if irq < MAX_IRQS {
-            IRQ_HANDLERS.lock()[irq]
-        } else {
-            None
-        };
-        match handler {
-            Some(handler) => handler(),
-            None => {
-                // Disable unknown level sources before completion so they cannot
-                // continuously retrigger and starve the bounded hard-IRQ path.
-                plic.mask_source_for_local_context(irq);
-                record_unhandled_irq(irq);
-            }
-        }
-        fence_io();
-        plic.complete(irq);
-    }
-}
-
-/// Emit one deferred warning for the first unregistered source.
-///
-/// The scheduler invokes this outside interrupt context so serial logging cannot
-/// deadlock an interrupt handler.
-pub fn report_unhandled_irq() {
-    let pending = FIRST_UNHANDLED_IRQ.load(Ordering::Acquire);
-    if pending == 0 || pending == usize::MAX {
-        return;
-    }
-    if FIRST_UNHANDLED_IRQ
-        .compare_exchange(pending, usize::MAX, Ordering::AcqRel, Ordering::Relaxed)
-        .is_ok()
-    {
-        log::warn!("[plic] completed unregistered external irq {}", pending - 1);
-    }
-}
-
-fn record_unhandled_irq(irq: usize) {
-    let _ = FIRST_UNHANDLED_IRQ.compare_exchange(
-        0,
-        irq.saturating_add(1),
-        Ordering::Release,
-        Ordering::Relaxed,
-    );
-}
-
-#[inline(always)]
-fn fence_io() {
-    // SAFETY: [Category 13 — instruction contract] this emits only the
-    // architectural I/O ordering barrier; the checked PLIC MMIO sequence on
-    // either side owns all memory accesses.
-    unsafe { asm!("fence iorw, iorw", options(nostack)) }
-}
-
-#[inline(always)]
-fn read_register(address: usize) -> u32 {
-    // SAFETY: PLIC setup validates that all generated physical register
-    // addresses are aligned and covered by the supervisor MMIO map.
-    unsafe { core::ptr::read_volatile(PhysAddr(address).direct_map_ptr().cast::<u32>()) }
-}
-
-#[inline(always)]
-fn write_register(address: usize, value: u32) {
-    // SAFETY: same validated supervisor MMIO mapping as read_register.
-    unsafe { core::ptr::write_volatile(PhysAddr(address).direct_map_ptr().cast::<u32>(), value) }
+    register_handler_on(irq, handler, crate::smp::BOOT_CPU_ID)
 }

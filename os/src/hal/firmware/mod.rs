@@ -331,6 +331,21 @@ pub fn cpu_harts() -> &'static [usize] {
     &buffer.cpu_harts[..buffer.cpu_count]
 }
 
+/// 根据 FDT PLIC `interrupts-extended` 解析每个 logical CPU 的 supervisor
+/// context。平台快照和 hart 拓扑都已在 BSP 单线程阶段冻结，因此结果可直接
+/// 用于 PLIC 的 Release 发布前初始化。
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn riscv_plic_supervisor_contexts(
+    plic: &crate::hal::platform::DeviceInfo,
+) -> Option<[Option<usize>; crate::smp::MAX_CPUS]> {
+    fdt::RiscvPlicContextTopology::new(
+        &crate::hal::platform::platform_info().devices,
+        cpu_harts(),
+        crate::hal::boot::boot_info().hart_id,
+    )
+    .supervisor_contexts(plic)
+}
+
 /// Sum discovered usable RAM ranges for runtime accounting.
 pub fn usable_memory_size() -> usize {
     let mut total = 0usize;

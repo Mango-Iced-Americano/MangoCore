@@ -37,16 +37,21 @@ pub fn platform_supports_zicboz() -> bool {
 
 pub fn machine_init() {
     trap::init();
-    let plic_ready = plic::init_boot_cpu();
+    let plic_ready = plic::init_controller();
     trap::enable_ipi_interrupt();
     if plic_ready {
         trap::enable_external_interrupt();
-        if let Some((base, context)) = plic::boot_cpu_context() {
-            crate::println!(
-                "[plic] supervisor context ready (base={:#x}, context={})",
-                base,
-                context
-            );
+        if plic::init_local_context() {
+            if let Some((base, context)) = plic::boot_cpu_context() {
+                crate::println!(
+                    "[plic] supervisor context ready (base={:#x}, context={})",
+                    base,
+                    context
+                );
+            }
+        } else {
+            trap::disable_external_interrupt();
+            crate::println!("[plic] boot CPU context initialization failed; SEIE disabled");
         }
     }
     time::init_timer_backend();
@@ -171,8 +176,6 @@ pub fn remote_user_tlb_invalidate_range(
 
 pub fn bootstrap_init(cpu_id: usize) {
     if cpu_id != crate::smp::BOOT_CPU_ID {
-        // AP 先只开放 software interrupt；本地调度器建立首个 deadline 后
-        // 才单独加入 timer source，external interrupt 仍保持关闭。
         trap::init_ipi_only();
     }
 }

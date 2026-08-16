@@ -2,7 +2,7 @@
 
 > Document path: `docs/00_overview/AI-Usage-Report.md`  
 > Project: MangoCore  
-> Coverage: 2026-04-01 to 2026-08-14
+> Coverage: 2026-04-01 to 2026-08-16
 > Purpose: OS competition AI usage disclosure
 
 ## 1. 合规声明
@@ -115,6 +115,7 @@ MangoCore 项目在 2026 年 4 月至 2026 年 8 月开发期间使用了多种 
 | another_ext4 小 pwrite 写合并及回退 | 2026-07-30 | Oracle, Sisyphus, GPT-5.6-terra | 评估顺序子页写合并、dirty PageCache pin 与 PageCache radix 目录 | 实验代码已回退到 mutexed 页面目录和逐次 dirty-cache 保留；以 Docker 双架构构建、RV64 ktest、四格 lint、5 轮 QEMU 基准和双架构 LTP 记录最终状态，不将结果表述为吞吐提升 |
 | another_ext4 close 持久化语义 ktest | 2026-08-01 | Oracle, GPT-5.6-terra | close 不作为 durability barrier 的掉电重启、fsync/global-sync 与 clean-unmount 用例设计 | Oracle 约束可判定边界：close 后不观察 raw 介质；仅 fsync/sync/on_umount 后要求 raw remount；双架构 74/74 ktest 通过 |
 | VF2 稀疏 bootable-hart 与 LA64 AP pre-SIMD | 2026-08-14 | GPT-5.6-terra, Explore | FDT bootable-hart 映射、LA64 AP exception 16 根因定位、Docker/QEMU RED→GREEN 验证 | Explore 只读排除 mailbox ID 混用；人工复核后将 AP pre-SIMD 的自动向量化查找改为标量循环，LA64 CORE_NUM=2 ktest 与 RV64 regression 通过 |
+| RV64 per-CPU PLIC context | 2026-08-16 | GPT-5.6-terra, Oracle | FDT `interrupts-extended` context 拓扑、PLIC 初始化时序和 AP direct-map 边界审查 | Oracle 审查 L2 方案；人工采纳 FDT phandle→hart→logical CPU 映射、CPU0 默认网络 IRQ 路由与 AP 页表后 SEIE，完成 Docker QEMU、双架构构建和四格 lint 验证 |
 
 ## 4. 详细使用场景
 
