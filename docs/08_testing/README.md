@@ -23,6 +23,19 @@ tags: [testing, ktest, cargo-test, LTP, regression, tap]
 
 MangoCore 采用五层自底向上的测试体系，从纯逻辑单元测试到内核自检、再到用户态回归测试和官方集成测试，建立完整的 bug 扫描工具链。目标是把问题定位逐步下沉——能在 `cargo test` 解决的不拖到 QEMU，能在 L3 解决的不拖到 LTP。
 
+## 分层文档索引
+
+每层都有独立文档，按需深入阅读：
+
+| 层 | 文档 | 一句话定位 |
+|----|------|-----------|
+| L0 | [l0-static.md](l0-static.md) | 编译与静态检查，秒级 CI 第一道关卡 |
+| L1 | [l1-unit.md](l1-unit.md) | 纯逻辑单元测试，host 上跑 |
+| L2 | [l2-concurrency.md](l2-concurrency.md) | 属性测试 / 并发模型测试（实现中） |
+| L3 | [l3-ktest.md](l3-ktest.md) | 内核态 Self-Test，QEMU 内跑 |
+| L4 | [l4-regression.md](l4-regression.md) | 用户态回归测试，最小复现程序 |
+| L5 | [l5-integration.md](l5-integration.md) | 官方集成测试，最终验收 |
+
 ## 快速开始
 
 所有测试命令在 **Docker 容器内**执行（`make docker` 进入）：
@@ -94,9 +107,9 @@ L1: 纯逻辑单元测试
     cargo test -p mango-kernel-core
     → 无内核依赖，host 上运行。当前覆盖：7 个模块，147 个用例
 
-L2: 属性测试 / 模型测试 (规划中)
-    proptest 页缓存状态机  |  loom 并发 waitqueue
-    → 同 L1 机制，未来引入
+L2: 属性测试 / 并发模型测试 (已实现部分)
+    自研 SCT（DFS Explorer）并发 waitqueue  |  proptest 页缓存状态机（规划）
+    → 同 L1 机制，host 上系统化枚举交错、检查 invariant、重放 counterexample。详见 l2-concurrency.md
 
 L3: 内核态 self-test
     mango.mode=ktest  |  QEMU 内运行  |  TAP 输出
@@ -115,562 +128,31 @@ L5: 官方集成测试
 
 ## L0 — 编译与静态检查
 
-### 入口
+类型/格式/lint 检查，秒级 CI 第一道关卡。详见 [l0-static.md](l0-static.md)。
 
-```bash
-make check-fast
-```
+## L1 — 纯逻辑单元测试
 
-### 覆盖
-
-| 检查 | 命令 | 耗时 |
-|------|------|------|
-| 类型检查 | `cargo check` | ~15s |
-| 格式检查 | `cargo fmt --check` | ~2s |
-| Lint | `cargo clippy` | ~30s |
-
-编译器由根 `rust-toolchain.toml` 固定。根目录 `make all` 会派生 HOME 对应的 `RUSTUP_HOME` 和 `CARGO_HOME`，并在需要时执行 setup 和 preflight。直接 OS、用户态或架构目标只做 preflight，不自动安装 Rustup 工具链。
-
----
-
-## L1 — 纯逻辑单元测试 (`cargo test`)
-
-### 设计原则
-
-L1 和 L2 在逻辑上分层，但都走 `cargo test`。L1 测确定性逻辑（解析、算术、状态转换），L2 测随机性质（proptest）或并发模型（loom）。
-
-纯逻辑模块被提取到独立库 crate，在 host 上编译和测试。内核通过 path dependency 引用同一份源码，不维护两份副本。
-
-### 库 crate
-
-```
-libs/mango-kernel-core/
-├── Cargo.toml          # #![no_std] lib, host-testable
-└── src/
-    ├── lib.rs           # extern crate alloc; pub mod bootargs; ...
-    ├── bootargs.rs      # Cmdline, BootConfig, BootMode + #[cfg(test)]  (28 tests)
-    ├── time.rs          # TimeSpec, TimeVal, ItimerVal + #[cfg(test)]   (50 tests)
-    ├── page_cache.rs    # PageState, RAMask, ReadAhead + #[cfg(test)]   (25 tests)
-    ├── ring_buffer.rs   # Bounded VecDeque-backed ring buffer           (11 tests)
-    ├── path.rs          # Path normalization with '.'/'..' resolution   (12 tests)
-    ├── wait_result.rs   # WaitQueue result enum + errno encoding         (7 tests)
-    └── recycle_alloc.rs # Recyclable ID allocator (PID/TID)             (14 tests)
-```
-
-`lib.rs` 是标准 `#![no_std]` 库入口。测试时 Cargo 自动注入 `std` 和 test harness，源码中的 `extern crate alloc` 在 host 测试下正常工作。
-
-### 执行
-
-```bash
-cargo test -p mango-kernel-core
-```
-
-### 当前覆盖 (147 个用例)
-
-| 模块 | 文件 | 用例数 | 说明 |
-|------|------|--------|------|
-| bootargs | `bootargs.rs` | 28 | Cmdline 解析、BootMode、BootConfig、参数验证 |
-| time | `time.rs` | 50 | TimeSpec/TimeVal 算术、构造、比较、钳位 |
-| page_cache | `page_cache.rs` | 25 | PageState、RAState、segments/mask 操作 |
-| ring_buffer | `ring_buffer.rs` | 11 | 有界队列 push/pop/slice/shutdown 语义 |
-| **path** | `path.rs` | **12** | 路径分词、`.` `..` 标准化、连续斜线归一化 |
-| **wait_result** | `wait_result.rs` | **7** | Ready/Interrupted/TimedOut 与 errno 编码 |
-| **recycle_alloc** | `recycle_alloc.rs` | **14** | ID 分配/回收、fresh vs 回收优先、水位线行为 |
-
-### 添加新的 L1 测试
-
-1. 将纯逻辑模块移动到 `libs/mango-kernel-core/src/`
-2. 在 `lib.rs` 中 `pub mod my_module;`
-3. 在模块底部加 `#[cfg(test)] mod tests { ... }`
-4. 如模块被内核引用，在 `os/src/` 中创建 wrapper re-export
-
-判断标准：模块**零 arch 依赖**、**零全局状态**、**零 I/O** — 纯 `String → Struct` 转换、算法、状态机均可。
-
----
+无内核依赖的确定性逻辑，host 上跑，秒级反馈。详见 [l1-unit.md](l1-unit.md)。
 
 ## L2 — 属性测试 / 模型测试
 
-### 规划
-
-| 目标 | 工具 | 场景 |
-|------|------|------|
-| PageCache 状态机 | `proptest` | 随机操作序列验证 dirty/clean/evict 状态一致性 |
-| Dentry tree | `proptest` | 随机 lookup/create/unlink 验证树结构不变式 |
-| WaitQueue 并发 | `loom` | 多线程 wake/wait 交错验证无丢唤醒 |
-| Pipe buffer | `loom` | reader/writer 并发验证数据完整性和阻塞语义 |
-
-### 机制
-
-与 L1 相同，所有依赖加入 `libs/mango-kernel-core` 的 `[dev-dependencies]`，不影响内核编译。当前阶段接口已就绪，具体测试用例待后续迭代。
-
----
+自动生成操作序列、控制并发交错、检查 invariant、重放 counterexample。**实现中**，详见 [l2-concurrency.md](l2-concurrency.md)。
 
 ## L3 — 内核态 Self-Test
 
-### 设计
-
-L3 是测试体系的核心创新。测试代码**编译进内核**，但只在 `mango.mode=ktest` 时运行——内核完成全部子系统初始化后，不启动用户态 init，直接进入测试运行器，执行完毕后通过 HAL `shutdown()` 退出。
-
-### 启动流程
-
-```
-rust_main()
-  → bootstrap_init() → mem_clear() → console::log_init()
-  → trace::init() → mm::init()
-  → machine_init() → timer_cpu_init(CPU0) → bring_up_secondary_cpus()
-  → [fs init, net init, block probe, preload payloads]
-  → posix_lock::init()
-  → smp::release_secondary_schedulers()
-  → AP: activate kernel page table → timer_cpu_init(AP) → run_tasks()
-  → if mode == Ktest: spawn kernel test runner → per-CPU run_tasks() → shutdown()
-  → normal: add_initproc() → per-CPU run_tasks()
-```
-
-ktest 分支位于 `add_initproc()` 之前，因此不会创建 PID1；进入该分支前文件系统、网络、
-块设备和任务 registry 已初始化，scheduler-ready 已发布。runner 固定 CPU0，SMP focused
-测试可创建受控的 AP kernel-only 任务。B28 另有一个 hermetic 用户探针：CPU0 构造并
-发布到 CPU1，依次触发 getpid、yield 和非返回 exit，再由 CPU0 wait/reap。B29 将该用例
-升级为先发布 CPU0、在真实 yield 后迁移到 CPU1，并覆盖两个 CPU 的 MM shootdown；它不进入
-FS/net/driver，也不表示普通用户任务已开放多核调度。B30 又在同一探针内调用真实 getcpu：
-yield 前必须写出逻辑 CPU0，yield 返回后必须写出逻辑 CPU1。任一 syscall 错误、固定返回 0、
-未迁移或错误起跑都会转换为 exit(1)，因此不能只依赖 runner 观察的 `last_cpu` 间接判定。
-B31 不增加新的 TAP 名称，而是让现有三个生产路径用例同时验证
-`cpus_allowed`：`remote_kernel_tasks_run_on_target_cpus` 覆盖定向首次发布，
-`blocked_kernel_tasks_wake_on_last_cpu` 覆盖唤醒重新入队，
-`user_task_migrates_on_yield` 覆盖 CPU0/CPU1 mask 下的 owner 交接。
-B32 继续复用第 20 项，但 user probe 现在还在迁移前用正 ID、迁移后用 `pid=0`
-调用 raw `sched_getaffinity`；两次都必须返回 8 并写出 `0b11`，否则进程 exit(1)。
-probe 是单线程 leader，正 ID 同时等于 PID/TID，所以非 leader TID 的严格查找需要结合
-`ProcessManager::find_task(tid)` 源码审计，不能只靠 TAP 总数声称覆盖。
-B33 将该项改名为 `smp::user_task_reschedules_from_ipi`，并从 probe 中删除显式 yield。
-CPU1 helper 在首次 CPU0 getcpu 后向 CPU0 发送生产 RESCHEDULE；用例同时要求 CPU0
-安全点消费计数增长、同一 TCB 在 CPU1 返回用户态、getcpu 观察 0→1、两次 affinity
-仍为 `0b11`，以及 helper/user TCB 都完成回收。只看到 21/21 或 `last_cpu=1` 不足以
-证明远端 IPI 是切换原因。
-B34 再把该项改名为 `smp::user_task_reschedules_and_sets_affinity`。probe 到达 CPU1 后调用
-raw `sched_setaffinity(0, 8, bit0)`；syscall 返回后必须由 getcpu 直接观察到 CPU0，再由
-getaffinity 读到 bit0。三段断言分别拒绝“B33 IPI 未迁移”“只改 mask 未迁移”和“迁移但
-未持久发布 mask”的假阳性。CPU0 runner 的等待循环必须调用既有任务安全点，否则只开中断
-只能接收 need_resched、不能按照安全点抢占模型让出 CPU；全局 zombie 队列会被 idle drain，
-不得把“队列保持非空”当作任务已经退出的稳定条件。
-
-B35 新增当前列表第 13 项 `smp::blocked_affinity_redirects_wake`，总数变为 22。用例把 kernel-only
-任务先定向到 CPU1，经真实 Completion/WaitQueue 进入稳定 Blocked，并同时确认 CPU1 current
-与 runqueue 已释放；CPU0 再通过生产入口把 mask 改为 bit0，随后 Completion wake。任务必须在
-CPU0 恢复并退出，旧 CPU1 不得残留 owner。B34 的用户探针因此在当前列表顺延为第 21 项；
-B34 历史证据中的第 20 项编号保持原样。该用例动态覆盖 manager/wake 协议，远程 raw syscall
-的 TID 查找、权限和用户指针路径仍以 B34 用户 probe 与源码审计组合验收。
-
-B36 再插入第 14 项 `smp::queued_affinity_moves_between_runqueues`，总数变为 23。CPU1 holder
-开放中断以响应 kernel-stack TLB 同步，但不经过调度安全点；第二个任务因此稳定保持
-`Queued(1)`。用例先把 mask 扩为 bit0|bit1，证明 owner 仍合法时不会搬队；再收紧为 bit0，
-核对源/目标队列长度、mask、`Queued(0)` 和最终恰好一次 CPU0 执行。B34 用户 probe 顺延为
-第 22 项，terminal STOP 为第 23 项。该项直接调用生产 manager/runqueue 入口，尚未从用户态
-并发发起两个远程 TID syscall，也不覆盖远程 Running/Blocking 停止协议。
-
-B37 不增加 TAP 项，而是把 `spawn_ktest_task_on()` 的最终发布改走普通 `publish_task()`。
-第 11 项 `remote_kernel_tasks_run_on_target_cpus` 的每个 AP 单 bit mask 因而直接覆盖通用选择器，
-并继续要求任务只在声明 CPU 运行一次。启动期第 2 项同时证明无 current 的 ktest runner 仍
-显式进入 CPU0。该组合能反证固定 CPU0 发布和启动期空候选，但不代表默认 mask 已放宽。
-
-B38 插入第 15 项 `smp::running_affinity_waits_for_owner_handoff`，总数变为 24。CPU1 上的
-kernel-only 任务先验证“新 mask 仍包含 owner”只原地更新，再由 CPU0 发起排除 owner 的远程
-affinity 请求；远程写侧必须等待 CPU1 在生产安全点完成 `Running(1) -> Queued(0)`，之后
-任务只在 CPU0 恢复一次并退出。终态 STOP 顺延为第 24 项并通过，证明用例没有遗留 current、
-runqueue 或 pending 请求。该项覆盖单个请求者与稳定 Running owner；多写者竞争和
-`Blocking` 瞬态重试目前只做源码/锁序审计，不能由 24/24 外推为动态压力覆盖。
-
-B39 在原 timer 用例之后插入第 8 项 `smp::user_timer_preempts_on_secondary_cpu`，总数变为
-25。测试先用一个 CPU1 kernel holder 占住 current，再按 FIFO 顺序预排“无 syscall/yield 的
-用户忙循环”和同核 helper；远程入队 IPI 必须在 holder 退出后的 idle 安全点先被消费。用户
-任务进入 PLV3/U-mode 后，只有 CPU1 本地 timer 能让 helper 运行。helper 观察用户 TCB 已回到
-`Queued(1)` 后注入 SIGKILL，测试同时要求 CPU1 timer IRQ/deferred 计数增长、进程可 wait/reap、
-runqueue/current 清空和 TCB Weak 失效。超时清理才允许发送 RESCHEDULE IPI，因此清理路径不能
-制造成功假象。该项证明用户态安全点抢占，不表示任意内核指令位置可抢占。
-
-### 目录结构
-
-```
-os/src/kernel_tests/
-├── mod.rs            # 注册所有测试组，run_from_bootargs() 入口
-├── runner.rs         # TAP 输出、timeout/repeat/failfast
-├── waitqueue.rs      # WaitQueue 测试注册与基础队列用例
-├── waitqueue_blocking.rs  # 阻塞、deadline、多队列、陈旧 waiter
-├── waitqueue_wake.rs      # FIFO、wake_all、1000-cycle 压力
-├── waitqueue_interrupt.rs # 信号中断与 signal/wake race
-├── timer.rs          # tick_advances, time_spec_ops
-├── sched.rs          # current_task_exists, ready_queue_has_init
-├── smp.rs            # online/IPI/AP 调度、受控用户 trap/exit、TLB/ASID、STOP
-├── mm.rs             # alloc_free_one_page, alloc_contiguous_pages
-└── ext4.rs           # TestMemBlock + ext4 多实例挂载隔离
-```
-
-### 测试项结构
-
-```rust
-pub struct KernelTest {
-    pub name: &'static str,       // "waitqueue::wake_once"
-    pub func: fn() -> Result<(), &'static str>,
-    pub timeout_ms: usize,        // 0 = use global default
-    pub terminal: bool,           // true = 整个测试计划末尾只执行一次
-}
-```
-
-### Runner 行为
-
-| 特性 | 说明 |
-|------|------|
-| 测试选择 | 根据 `mango.test=waitqueue,sched` 过滤测试组；`all` 跑全部 |
-| repeat | `mango.test.repeat=N`，每个测试重复 N 次（抓偶发 bug） |
-| terminal | 普通测试全部 repeat 完成后执行一次；用于 STOP 等不可恢复测试 |
-| timeout | `mango.test.timeout_ms=N`，全局超时；测试可覆盖 |
-| failfast | `mango.test.failfast=1`，遇第一个失败即停 |
-| arch 诊断 | 输出 `# arch: riscv64` / `loongarch64` 用于 CI 区分 |
-
-**限制**：当前 timeout 是 advisory-only — 在测试函数返回后检查耗时，无法中断挂死测试。需要后续添加 watchdog timer 才可实现抢占式超时。
-
-永久停止 AP、关机或不可逆破坏全局状态的用例必须用
-`KernelTest::terminal(name, func)` 注册。runner 会先执行所有选中组的普通
-测试及其 repeat，最后才执行 terminal 集合；terminal 不参与 repeat。
-因此 `KTEST=all` 不会因 SMP STOP 提前破坏后续 MM/FS 测试，
-`KREPEAT>1` 也不会尝试再次唤醒已经停止的 AP。
-
-B22 的 SMP 组在 `KREPEAT=2` 时为 29 项：14 个普通用例各执行两轮，STOP terminal
-只执行一次。除既有 online/idle/IPI/timer/current owner 外，还必须看到两轮
-`configured_cpus_enter_scheduler`、`remote_kernel_tasks_run_on_target_cpus` 和
-`blocked_kernel_tasks_wake_on_last_cpu` 通过。后者让每个 AP 任务进入真实
-Completion/WaitQueue，CPU0 在确认所有任务均为 `Blocked` 且离开 current/runqueue 后
-一次批量 complete；恢复任务必须仍由原 AP 的 `Running(cpu)` current 唯一拥有并正常退出。
-
-`kernel_stack_reclaim_waits_for_shootdown` 每轮创建 129 个 CPU1 kernel task，强制越过
-128 项 stack mapping cache；它必须观察所有 AP 的 TLB ack、确认 TCB 强引用消失，并以
-第二轮任务验证回收 slot 的重新映射和执行。shootdown 等待会临时开中断，因此 ktest 在
-退出该用例前显式经过生产 timer 安全点，避免把已静默的 one-shot 泄漏给下一轮 timer 测试。
-
-`user_tlb_full_flush_reaches_online_cpus` 直接调用生产 `synchronize_user_tlb()`，要求
-每颗在线 AP 的独立 user-TLB ack sequence 增长。它验收 reason/mailbox、架构本地全用户
-失效入口和 ack 等待闭环；用例末尾同样经过 timer 安全点。该用例没有修改真实用户 PTE，
-因此不能用于声称 generation race、stale translation、ack 前 frame 不复用或用户迁移
-已经完成；frame retirement 由 B23 后续用例覆盖。
-
-B84 的 `remote_user_pte_updates_take_effect` 是 stale PPN 与 stale permission 的直接证据：
-CPU1 用户探针先持续 load 旧页，CPU0 依次通过生产 CoW 和正式
-`munmap + MAP_FIXED_NOREPLACE` 修改同一 VPN；用户 load 必须读到两个新 frame canary。
-随后探针先在旧 RW 权限下完成真实 store，CPU0 执行 `mprotect(RW -> R)` 并收齐远端 ack
-后才放行第二次 store；后者必须触发 SIGSEGV，且只读 frame 内容不变。timer 静默、
-full-user request 不增长和 handler observed 共同排除其它 trap 全刷造成的假通过。
-
-`concurrent_pte_updates_keep_shootdowns_separate` 不再直接伪造 range payload。每个在线 CPU
-激活同一个 MM，在各自的常驻匿名共享页上交替执行 8 轮生产 `mprotect`。所有 writer 在
-最后一轮提交完成前保持 active，且 barrier 等待时开放本地中断，因此每代锁外
-`TlbFlush` 都能和其它发起者交叉处理 IPI/ack。用例最终要求 active mask 为零、所有 CPU
-追上最后 generation、full-user request 不变；其后的用例继续通过才能排除残留状态污染。
-
-B86 没有为借用收口增加人工 hook：编译器负责拒绝从共享 `PageTable` 借用修改 PTE；运行期
-语义继续由 B84 的真实权限降级、B85 的并发生产 writer，以及完整 34 项 SMP focused 门禁
-覆盖。验证时必须保证 tracked diff 指纹冻结，避免把验证期间的注释或格式变化误算进结果。
-
-B87 同样不增加测试专用路径。双架构 normal build 负责证明所有旧直映 helper 调用已经清除；
-双架构 8 核完整 SMP ktest 负责覆盖任务创建、exec/clone、signal、用户 trap 往返和跨 CPU
-调度时的真实 trap context 读写。四项必须在同一冻结指纹上串行执行。
-
-B88 保留原有 8×u64 帧清零循环，仅把 raw pointer 建立收回 `FrameTracker::new()`；因此不为
-它增加人工清零测试。双架构完整 SMP ktest 会反复经过页表页、用户页、任务和内核栈的
-分配/回收，门禁同时要求 34/34、无 fatal marker 和测试前后源码指纹一致。
-
-B89 不增加 allocator 调试开关或临时计数；它改变的是锁临界区和 PPN 中间
-owner。验收固定为双架构 normal build，以及 RV64/LA64 `CORE_NUM=8`
-完整 SMP 34 项。除 TAP 通过外，必须检查 double free/重复回收/panic/timeout
-标记和冻结 diff 指纹；第 24 项的 RV64 StorePageFault/LA64 PageModifyFault 是
-`mprotect` 降权门禁的预期用户异常，不能误报为 allocator panic。
-
-B90 只删除全仓无读者的旧 `TIME_SOURCE` 注册表和它的 `MTime` 旁路，
-生产计时在修改前后均调用 HAL。该类不可达代码收口使用 T1：先全仓确认符号
-无调用，再串行完成双架构 normal build 和冻结 diff 检查。不因“时间”两字
-机械重跑刚在 B89 通过的双架构 8 核长测。
-
-### TAP 输出格式
-
-```
-TAP version 13
-# arch: riscv64
-# mode: ktest
-# repeat: 1
-# timeout_ms: 5000
-# failfast: false
-1..5
-ok 1 waitqueue::wake_before_wait_should_not_sleep
-ok 2 waitqueue::basic_queue_ops
-ok 3 timer::tick_advances
-ok 4 timer::time_spec_ops
-not ok 5 sched::ready_queue_has_init
-  ---
-  reason: no ready tasks after add_initproc()
-  elapsed_ms: 0
-  ...
-# results: 4 passed, 1 failed, 5 total
-# ktest: tests FAILED. shutting down.
-```
-
-TAP 兼容标准测试消费者。失败时 YAML block 包含 `reason` 和 `elapsed_ms`。
-
-### 当前测试清单 (19 个)
-
-| 测试 | 文件 | 说明 |
-|------|------|------|
-| `mm::alloc_free_one_page` | `mm.rs` | 分配单页 → 释放 → 验证 PPN 有效 |
-| `mm::alloc_contiguous_pages` | `mm.rs` | 分配 4 连续页 → 计数与连续性校验 → 释放 |
-| `mm::alloc_then_free_then_alloc` | `mm.rs` | 分配 8 页 → 释放 → 再分配 8 页（复用验证） |
-| `sched::current_task_exists` | `sched.rs` | 验证 `add_initproc()` 后 `task_manager_counts()` 返回 ready>0 |
-| `sched::ready_queue_has_init` | `sched.rs` | 验证 `add_initproc()` 后 `has_ready_task()` |
-| `sched::task_manager_counts` | `sched.rs` | 验证 ready/interruptible 计数在合理范围 |
-| `timer::tick_advances` | `timer.rs` | busy-wait 后时间严格递增 (`t1 > t0`) |
-| `timer::time_spec_ops` | `timer.rs` | TimeSpec 构造精度、进位加法、减法钳位、跨单位等价、偏序、is_zero |
-| `timer::now_monotonic` | `timer.rs` | 两次 `now()` 验证单调不倒退 |
-| `waitqueue::wake_before_wait_should_not_sleep` | `waitqueue.rs` | 条件已满足时 `wait_until` 立即返回正确值 |
-| `waitqueue::early_wake_cancels_block` | `waitqueue.rs` | waiter 已登记但尚未 Blocking 时，通知 token 可撤销阻塞 |
-| `waitqueue::condition_can_notify_same_queue` | `waitqueue.rs` | 登记后条件检查可可靠通知同一队列，无自锁或丢 wake |
-| `waitqueue::basic_queue_ops` | `waitqueue.rs` | 新建队列 → is_empty → compact_stale → is_empty |
-| `waitqueue::wake_all_on_empty` | `waitqueue.rs` | 空队列 `wake_all()` 返回 0 |
-| `waitqueue::wake_one` | `waitqueue.rs` | 真实调度下阻塞 waiter 被另一个内核任务唤醒 |
-| `waitqueue::basic_block_wake` / `no_spurious_wake_without_fallback` | `waitqueue_blocking.rs` | 条件驱动的阻塞/唤醒，以及无显式唤醒、信号或 deadline 时 200ms 内持续阻塞 |
-| `waitqueue::multi_queue_cleanup` / `deadline_timeout` / `stale_waiter_cleanup` | `waitqueue_blocking.rs` | 双队列清理、deadline 及失效 weak waiter |
-| `waitqueue::wake_one_fifo` / `wake_all_wakes_all` / `thousand_cycle_stress` | `waitqueue_wake.rs` | FIFO 单唤醒、广播和 1000 次无丢失/重复入队压力 |
-| `waitqueue::signal_interrupt` / `signal_wake_race` | `waitqueue_interrupt.rs` | 信号中断与 Ready 优先于同时到达信号的 race 语义 |
-| `ext4::memblk_read_write` | `ext4.rs` | `TestMemBlock` BlockDevice 读写正确性 |
-| `ext4::memblk_isolation` | `ext4.rs` | 两个独立 `TestMemBlock` 实例的数据不互泄露 |
-| `ext4::open_unformatted_returns_err` | `ext4.rs` | 未格式化设备上 `open_ext4rs` 返回错误（不 panic） |
-| `ext4::lw_path_isolation` | `ext4.rs` | lwext4 `lw_path()` 路径翻译的实例隔离语义 |
-
-**规划中**（需要内核线程 spawn API、更丰富的 ktest task 参数传递或格式化块设备）：
-- `sched::spawn_and_yield` — 创建线程 → yield → 验证运行
-- 按任务定向注入信号（当前信号测试使用唯一 interruptible ktest worker）
-- `timer::sleep_returns` — 真正阻塞等待 deadline
-- `fs::tmpfs_create_write_read_unlink` — VFS 基础路径
-- `pagecache::basic_insert_lookup_evict` — 页缓存操作
-
-### 执行
-
-```bash
-# 跑全部 L3 测试
-make rv64-ktest
-
-# 指定测试组
-make rv64-ktest KTEST=waitqueue
-
-# 压力测试（重复 1000 次抓偶发 bug）
-make rv64-ktest KTEST=waitqueue KREPEAT=1000
-
-# 打开 trace
-make rv64-ktest KTEST=sched KTRACE=waitqueue,sched
-
-# 跨架构对照
-make la64-ktest KTEST=all
-```
-
-Makefile 在编译时通过 `MANGO_CMDLINE` 环境变量注入 bootargs，内核通过 `option_env!("MANGO_CMDLINE")` 读取。Ktest 模式的 QEMU 启动不挂载磁盘镜像，仅需内核二进制。
-
-### 添加新的 L3 测试
-
-1. 在 `os/src/kernel_tests/` 下创建 `my_subsystem.rs`
-2. 实现 `pub fn tests() -> Vec<KernelTest>`
-3. 在 `mod.rs` 中注册：`#[path = "my_subsystem.rs"] mod kt_my;` 并在 `all_tests()` 中添加条目
-4. 确保测试函数 compute-bounded（不无限阻塞），失败路径返回 `Err("reason")`
-
----
-
-## Bootargs 机制
-
-### 格式
-
-```text
-mango.mode=normal|ktest|regression
-mango.test=all|waitqueue|sched|timer|mm|fs|pagecache|block|arch|basic
-mango.test.repeat=100
-mango.test.timeout_ms=5000
-mango.test.failfast=1
-mango.trace=waitqueue,sched,timer
-mango.init=/bin/sh
-mango.root=/dev/vda
-```
-
-解析规则：空格分隔、`key=value`、逗号列表值、无值 flag、无引号/转义。
-
-### 实现
-
-纯解析逻辑在 `libs/mango-kernel-core/src/bootargs.rs`（L1 可测）。内核侧 wrapper (`os/src/bootargs.rs`) 提供 `load()` 函数，当前通过编译期 `env!("MANGO_CMDLINE")` 获取命令行。后续 DTB `/chosen/bootargs` 或 EFI 支持后，运行时源优先，编译期常量作为 fallback。
-
-### HAL/Arch 分层
-
-| 层 | 职责 |
-|----|------|
-| HAL/arch | 提供事实：如何拿到 cmdline、shutdown、timer、console |
-| 通用内核 | 策略：解析 `mango.mode`、选择测试、控制 repeat/timeout/trace |
-
-同一串 `mango.mode=ktest mango.test=waitqueue` 在 rv64 和 la64 上语义一致。
-
----
+测试代码编译进内核，`mango.mode=ktest` 时在 QEMU 内运行，TAP 输出。详见 [l3-ktest.md](l3-ktest.md)。
 
 ## L4 — 用户态 Regression Test
 
-### 规范
-
-每遇到一个 LTP/lmbench/手写测试暴露的 bug，沉淀一个最小用户态复现程序，放入 `user/src/bin/regression/` 目录。运行入口：
-
-```bash
-make regression        # rv64 回归测试
-make rv64-regression   # 同上（显式架构）
-make la64-regression   # la64 架构
-```
-
-### 运行机制
-
-1. `make regression` → 编译所有用户程序（含 `regression` 二进制） → 构建文件系统镜像 → 构建内核 → 通过 `debugfs` 将 `regression_test.conf`（`mode=regression`）注入 rootfs → 启动 QEMU → 解析串口输出中的 `[L4 REGRESSION PASSED/FAILED]` 字样
-2. initproc 启动后读取 `/os_test.conf`，识别 `mode=regression`，跳过 `prepare_symlink` 等环境准备，直接 fork + exec `/regression`
-3. `/regression` 输出 TAP 格式结果（`ok N name` / `not ok N name`）、累加 pass/fail 计数，exit 0=全部通过 / 非零=有失败
-4. initproc 通过 `exit_code_from_waitpid_status()` 获取子进程退出码，打印 `[L4 REGRESSION PASSED]` 或 `[L4 REGRESSION FAILED]`，然后 `shutdown()`
-
-### 当前覆盖（7 个用例）
-
-| 用例 | 主要覆盖 |
-|------|----------|
-| `usercopy_pipe` | pipe 与用户内存复制边界 |
-| `mmap_edge_cases` | mmap 边界语义 |
-| `timer_realtime_jump` | realtime timer 与时钟跳变 |
-| `rename_long_name` | rename 长名称 |
-| `lwext4_truncate_hole` | ext4 稀疏文件截断 |
-| `signalfd` | 阻塞 read 唤醒、fork 继承 fd 后的 sighand 动态绑定 |
-| `clone_vm_second_slot` | CLONE_VM/vfork 的第二用户资源槽；破坏性探针固定最后执行 |
-
----
+每个 bug 沉淀一个最小用户态复现程序，initproc fork/exec 运行。详见 [l4-regression.md](l4-regression.md)。
 
 ## L5 — 官方集成测试
 
-### 测试组
+LTP / lmbench / iperf / libc-test / 比赛测例，最终验收和性能趋势观察。详见 [l5-integration.md](l5-integration.md)。
 
-由 `os_test.conf` 的 `mask` 字段控制（12-bit）：
+---
 
-| 位 | 掩码 | 测试组 | 用途 |
-|----|------|--------|------|
-| 0 | `0x001` | basic | 冒烟 |
-| 1 | `0x002` | busybox | 基础命令 |
-| 2 | `0x004` | lua | 脚本解释器 |
-| 3 | `0x008` | libctest | C 库测试 |
-| 4 | `0x010` | iozone | 文件 I/O 性能 |
-| 5 | `0x020` | unixbench | 系统基准 |
-| 6 | `0x040` | iperf | 网络吞吐 |
-| 7 | `0x080` | libcbench | C 库基准 |
-| 8 | `0x100` | lmbench | 微基准 |
-| 9 | `0x200` | netperf | 网络性能 |
-| 10 | `0x400` | cyclictest | 实时延迟 |
-| 11 | `0x800` | LTP | Linux 兼容性 |
-
-常用 mask：`0x001` (basic)、`0x003` (basic+busybox)、`0x800` (LTP)、`0xFFF` (全量)。
-
-### 执行
-
-```bash
-# 注入测试配置
-make -C os conf-inject CONF_ARCH=rv64 CONF_FILE=../os_test.conf
-
-# QEMU 运行
-cd os && make rv64-run
-
-# 全量自动化
-python3 scripts/run_full_test.py
-```
-
-### SMP 8 核初赛非回归门禁
-
-SMP 中改变普通用户任务执行路径的 T3 节点，以及 Phase/合并候选，必须在 Docker 内严格
-串行执行 RV64、LA64 的 normal `CORE_NUM=8` + `mask=0x003`。四组 START/END、脚本
-`exit_code=0`、`online_mask=0xff`、无 panic/timeout/source drift 是硬条件；judge 还必须
-识别 314 个计分点，且得分和精确失败集合相对人工接受基线不退化。
-
-当前 raw 参考为 RV64 312/314、LA64 305/314；semantic 最低分为 RV64 312/314、
-LA64 308/314。两者差异只来自执行规范中对官方 `test_pipe` 多 write 输出交错的严格块级
-归一化，raw judge 分数必须原样报告。不能只比较总分：同分但失败项换位也视为未通过；
-更好结果需稳定证据和人工确认后才向上 ratchet，任何失败都不能反向降低基线。纯文档/注释
-可复用同一代码快照的新鲜结果，局部 helper 按风险使用 focused test。完整触发条件、归一化
-前提、允许失败集合和证据边界见
-[SMP Agent 执行规范](../10_plan/smp-agent-execution-spec.md#82-双架构-8-核初赛非回归门禁)。
-
-B28/B29/B30/B31/B32/B33/B34/B35/B36/B37/B38/B39/B40 这类改变用户 trap CPU、current owner、用户可见 CPU 编号、
-affinity 查询或入队允许集的节点，先执行双架构初赛门禁，再在最终小范围收敛后重复
-双架构 SMP focused。B29/B30 验收必须在 TAP 中直接看到
-`smp::user_task_migrates_on_yield`，不能只依据 21/21 总数；还要区分首轮 RED 中的
-shootdown missing CPU 与发起 CPU。exit 是非返回 trap，日志/文档不得把它描述为第三次
-完整往返。B30 还要求 probe 自身检查 getcpu 的 `0 -> 1`，并通过被回收进程的 exit status
-传递结果；仅由内核测试线程读取 `last_cpu == 1` 不能证明 syscall 没有继续固定返回 0。
-B31 另外要求 TAP 中的第 11/12/20 项均明确 PASS；这三项是正向路径证据，
-不得写成“已穷举所有违规 placement”。最终判定还要结合三个 runqueue 入口的
-fail-stop 源码审计与冻结源码指纹。B32 还要求第 20 项进程 exit status 间接确认两次
-raw 返回值和 mask 自检；严格 TID 查找必须单独检查 syscall 没有使用 PID fallback helper。
-B33 起第 20 项名称变为 `smp::user_task_reschedules_from_ipi`；必须同时核对 helper 发送、
-CPU0 消费计数、probe 自身 getcpu/affinity/exit 和最终 Weak 回收。旧 B29—B32 证据中的
-历史测试名保持不变，不能倒写成当时已经完成 IPI 驱动安全点。
-B34 起第 20 项名称变为 `smp::user_task_reschedules_and_sets_affinity`；除 B33 证据外，还必须
-核对 setaffinity 后 getcpu=0、getaffinity=bit0、最终 `last_cpu=0`。远程 TID、短/长 mask
-错误路径和 Queued/Blocked 写侧未被该正向 probe 覆盖，必须在报告中保留边界。
-B35 插入新的第 13 项后，当前列表中的 B34 probe 顺延为第 21 项；验收必须同时看到旧
-`blocked_kernel_tasks_wake_on_last_cpu`、新 `blocked_affinity_redirects_wake`、B34 probe 与
-终态 STOP 全部 PASS。新用例证明稳定 Blocked 的 mask 会改变真实 wake 目标，但没有从用户态
-直接发起远程 TID syscall。
-B36 插入第 14 项后，B34 probe/STOP 分别顺延为第 22/23 项；验收必须看到
-`queued_affinity_moves_between_runqueues` 在双架构直接 PASS，并核对 holder 释放后源队列无残留、
-subject 只在 CPU0 执行一次。该证据只闭合稳定 Queued 写侧；B38 之前的 23/23 不能外推
-Running/Blocking 已支持。
-B37 保持 23 项；除第 2/11 项外，还必须核对双架构初赛中 fork/clone 与四组 busybox 的
-精确失败集合未扩大。负载计数是无锁放置提示，不能仅凭一次队列分布声称达到均衡。
-B38 插入第 15 项后，B34 probe/STOP 分别顺延为第 23/24 项；验收必须看到新项在双架构
-直接 PASS，并核对宽 mask 更新不切换 owner、窄 mask 请求返回前源 CPU 已释放 owner、任务最终
-只在 CPU0 恢复一次。当前动态证据没有并发两个远程写者，也没有确定性命中
-`Running -> Blocking` 的交界；这两项必须保留为后续压力测试边界。
-B39 插入第 8 项后总数为 25；验收必须在双架构 8 核 TAP 中直接看到
-`user_timer_preempts_on_secondary_cpu` PASS、`online_mask=0xff` 和终态 STOP PASS。只看到
-timer IRQ 计数增长不够，因为它不能证明用户 task 真正交出 current；只看到 helper 运行也
-不够，因为入队 IPI 必须在用户进入前被 holder/idle 路径排除为抢占来源。
-B40 在终态 STOP 前插入第 25 项 `smp::group_exit_stops_remote_sibling`，总数变为 26。
-双架构 8 核必须直接看到该项与第 26 项 STOP 都 PASS。新项验证 CPU1 Running sibling
-和稳定 Blocked sibling 都由 owner CPU 自行进入 Zombie、最后 live ack 完成进程收尾，
-并验证 group-exit 后的 late sibling 保持 `New` 且首次发布返回 `EAGAIN`。它不使用
-测试专用远端清理入口，也不声称确定性命中了 `Running -> Blocking` 的每一个指令级交错；
-该交界还必须结合 `sleep_interruptible()` 登记后复查的源码证明。
-B41 在 STOP 前加入 `smp::exec_stops_remote_sibling`，总数变为 27。它要求非 leader
-owner 等待 CPU1 sibling 在自己的安全点清理并发布 live ack，再安装新 MM；不得把远程摘队
-或代替 sibling 释放资源当作通过。B42 再加入
-`smp::exec_does_not_mutate_shared_resources`，总数变为 28，直接持有跨 PCB 共享对象，
-验证 exec 只修改当前 PCB 最终安装的 fd table/sighand/futex。
-B43 加入 `smp::exec_owner_becomes_group_leader`，总数变为 29。用例必须同时核对 owner
-接管稳定 PID、`gettid()==getpid()`、task registry 与 Per-CPU current TID 更新、旧 leader
-接管旧 TID handle，以及旧 leader 迟到 Drop 不会删除新 leader 的 PID 注册项。runner 在
-owner 切到 zombie idle 栈前必须显式释放 syscall 栈上的临时 `Arc`；否则 noreturn context
-switch 不会展开 Rust 栈，TCB 泄漏会造成假失败。
-B44 加入 `smp::membarrier_reaches_mm_cpus`，总数变为 30。用例从 syscall 分发入口检查
-QUERY、未注册 `EPERM` 和幂等注册；随后让同 PCB helper 在 CPU1 激活同一 MM，
-PRIVATE_EXPEDITED 必须只给该远端 request 增加一次并等待对应 ack。GLOBAL 必须给所有
-AP 各增加一次 request 并完成 ack。`KREPEAT=2` 时终态 STOP 只执行一次，所以总 TAP
-项为 59；helper 每轮必须恢复 Zombie 并回收，不能把上一轮残留当作下一轮 ack。
-B45 不增加 TAP 项：编译器负责验证 trap context 借用不能逃出 `task.inner`，现有 30 项
-focused 与初赛回归覆盖 syscall、signal、clone/exec 和双架构 trap-return 主路径。普通
-basic/busybox 不保证触发 LA64 `AddressNotAligned`，因此 30/30 不能被描述为已经覆盖
-整数/浮点未对齐模拟；后续若修改该模拟语义，应增加专门用户探针。
-B46 同样不增加临时 TAP：focused 30 项不直接触发 `rt_sigreturn`，因此验收选用双架构
-`CORE_NUM=8 mask=0x003`。normal PID1 安装 `SIGCHLD` handler，子进程回收会反复经过真实
-signal-frame 往返；RV64 保持 312/314，LA64 保持 308/314。该门禁证明正常 frame 主路径
-无回归，但没有故意破坏 frame 来动态覆盖每一个 SIGSEGV 拒绝分支。
-B47 继续复用该真实路径，不增加临时 TAP 或测试专用生产字段。双架构 8 核初赛仍为
-RV64 312/314、LA64 308/314，精确失败集合不变。PID1 的 SIGCHLD action 带
-`SA_RESTART`、不带 `SA_SIGINFO`，因此动态证据直接覆盖“非 `SA_SIGINFO` handler 也写
-完整 rt frame”的正常投递与返回；它不证明 `SA_SIGINFO`、`SA_ONSTACK`、
-`SA_NODEFER`、`SA_RESETHAND`、syscall restart 命中和错误分支分别被动态触发。
-B48 仍不增加临时 TAP 或测试专用字段。冻结源码上的双架构 8 核初赛为 RV64
-312/314、LA64 308/314，精确失败集合与 B47 一致。normal 启动和 libc signal 路径会
-经过常用 `rt_sigaction` 注册，因此能证明共享 disposition 的正常查询/替换路径没有
-回归；该矩阵没有专门构造输入输出指针别名、EFAULT、非法 `how`、altstack 校验错误或
-同一 signum 的并发替换，不能把源码锁序审查外推成这些边界均已动态覆盖。
-
-### Bug 下沉流程
+## Bug 下沉流程
 
 L5 发现 bug 后：先尝试写 L4 regression → 如涉及内核机制，进一步下沉为 L3 → 如根因在纯逻辑，提取 L1 用例。
 
@@ -729,7 +211,7 @@ make bugscan                         # unittest + L3 ktest
 | L3 timeout 是 advisory-only | 无法中断挂死测试 | Phase 2 添加 watchdog timer |
 | 缺少内核线程 spawn API | wake_once/wake_all/spawn_and_yield 暂缺 | Phase 2 实现 |
 | bootargs 仅编译期常量 | 真板子需要重新编译 | DTB/EFI 支持后改为运行时优先 |
-| L4 已实现，L2 未实现 | 暂无属性测试和模型测试 | Phase 3 |
+| L4 已实现，L2 已实现（WaitQueue ≤ 2026-08-17 工作包） | 属性测试和模型测试已部分落地（见 l2-concurrency.md） | 继续扩展 Pipe / Scheduler 模型 |
 
 ---
 

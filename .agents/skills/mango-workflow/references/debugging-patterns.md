@@ -83,6 +83,23 @@
 - **教训**: FDT 资源的“发现”和“可访问”是两个阶段的契约。任何在 post-heap discovery 后立即被驱动解引用的总线资源，都必须在内核页表建立前从 FDT 的全部资源属性（而非只 `reg`）获得映射。
 - **相关文件**: `os/src/hal/firmware/fdt.rs`、`os/src/hal/platform/info.rs`、`os/src/drivers/block/virtio_blk_pci.rs`
 
+### SMP/启动失败先分开「预存在环境问题」与「本批引入回归」
+
+- **现象**: 修改无关子系统后跑架构 ktest，LA64 在 `smp.rs:2536` panic
+  `secondary CPU online timeout: expected=0x3 online=0x1 missing=0x2`，AP 永不 online。
+- **根因**: 内核按 `runtime_cpu_count()`（FDT `/cpus` 动态探测）决定 `expected_online_mask()`；
+  若 `cpu_harts()` 为空则回退 `CONFIGURED_CPU_COUNT`（编译期 `MANGO_CORE_NUM`）。QEMU 启动的
+  `-smp cpus=$(CORE_NUM)` 与内核期望核数不一致（如 `CORE_NUM ?= 1` 只起 1 个 vCPU，而内核期望 2 核）
+  时，AP 永远不上线。这是构建/启动配置错配，与业务逻辑无关。
+- **区分方法（关键）**: 用**干净基线 A/B** 判定是否预存在——用 `git worktree add` 检出改动前的
+  `develop`，在容器内 `docker cp` 到 `/tmp/baseline`（避开父 workspace 嵌套），跑完全相同命令。
+  若基线与改动分支得到**字面完全一致**的 panic（相同 errno/行号/状态），即为预存在环境问题，
+  与本批改动无关；只有基线过/改动挂才是回归。
+- **教训**: 内核 CPU 数已是动态读取（FDT），但仍可能因「FDT 探测核数 vs QEMU `-smp` 实给核数」
+  错配而启动失败。这类失败发生在调度器/WaitQueue 任何代码运行之前的 AP bring-up，不能仅凭
+  「panic 出现在某文件」就归因给刚改的子系统。验证前先 `qemu-profile-dry-run` 确认 `-smp` 参数。
+- **相关文件**: `os/src/smp.rs`（`runtime_cpu_count`/`expected_online_mask`）、`os/src/hal/firmware/{mod.rs,fdt.rs}`（`count_cpus`）、`os/make/arch/la64-settings.mk`（`CORE_NUM ?= 1`）、`os/make/qemu-profiles.mk`
+
 ## 内存问题
 
 ### 物理地址异常（如 0xb0000000）
