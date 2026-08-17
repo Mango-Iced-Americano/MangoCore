@@ -373,6 +373,7 @@ fn commit_dhcp_event(ifindex: u32, event: DhcpLeaseEvent) {
                 .router
                 .lock()
                 .replace_dhcp_ipv4(ifindex, Some(cidr), router);
+            write_resolv_conf(&dns_servers);
             println!(
                 "[net] DHCP configured eth0={:?} gateway={:?} dns={:?}",
                 address, router, dns_servers
@@ -386,9 +387,39 @@ fn commit_dhcp_event(ifindex: u32, event: DhcpLeaseEvent) {
                 .router
                 .lock()
                 .replace_dhcp_ipv4(ifindex, None, None);
+            write_resolv_conf(&[]);
             println!("[net] DHCP lease lost on eth0; discovery restarted");
         }
     }
+}
+
+/// 把 DHCP 拿到的 DNS 服务器写入 /etc/resolv.conf（Linux dhclient 语义）。
+///
+/// 构建时硬编码的 resolv.conf 只适合单一环境（QEMU SLIRP 的 nameserver），
+/// 换到实板 / 其它 DHCP 后会拿到错误的 DNS。DHCP 配置正确后，用户态
+/// （如 inet_test 读取 resolv.conf）应使用本次租约分配的 resolver。
+fn write_resolv_conf(dns_servers: &[smoltcp::wire::Ipv4Address]) {
+    use crate::fs::vfs::file::{File, FileFlags};
+    use crate::fs::vfs::FileType;
+
+    // 重建完整内容（截断旧 lease 残留），保证只反映当前租约的 resolver。
+    let mut content = alloc::vec::Vec::with_capacity(dns_servers.len() * 22 + 4);
+    for dns in dns_servers {
+        let [a, b, c, d] = dns.0;
+        content.extend_from_slice(b"nameserver ");
+        content.extend_from_slice(alloc::format!("{}.{}.{}.{}\n", a, b, c, d).as_bytes());
+    }
+    if content.is_empty() {
+        content.extend_from_slice(b"# no DHCP nameserver\n");
+    }
+
+    let Ok(inode) = crate::fs::vfs_lookup_absolute("/etc/resolv.conf") else {
+        // initramfs 总是提供该文件；缺失时跳过写回。
+        return;
+    };
+    let file = File::new_without_open(inode, FileFlags::O_RDWR, FileType::File);
+    let _ = file.truncate_size(0);
+    let _ = file.write(&content);
 }
 
 impl<'a> NetDirectory<'a> {

@@ -5,7 +5,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::mmio::{
-    clean_dma_range, dma_barrier, read_reg, write_reg, DMA_CH0_RX_END, DMA_CH0_TX_END,
+    clean_dma_range, dma_barrier, GmacMmio, DMA_CH0_CUR_RX_DESC, DMA_CH0_RX_CONTROL,
+    DMA_CH0_RX_END, DMA_CH0_STATUS, DMA_CH0_TX_END, GMAC_CONFIG, GMAC_DEBUG, GMAC_RXQ_CTRL0,
+    MTL_RXQ0_OP_MODE,
 };
 use super::{dma_address, GmacJh7110Error};
 
@@ -37,6 +39,8 @@ struct DmaDesc {
 const _: () = assert!(core::mem::size_of::<DmaDesc>() == DESC_SIZE);
 const _: () = assert!(TX_DESC_OFFSET + TX_DESC_COUNT * DESC_SIZE <= PAGE_SIZE);
 
+// allow: SIZE_OK — DmaRings owns one coupled DMA descriptor lifecycle: allocation,
+// cache maintenance, producer/consumer ownership transfer, and hardware tails.
 pub(super) struct DmaRings {
     _descriptor_frame: Arc<FrameTracker>,
     descriptor_base: usize,
@@ -151,7 +155,7 @@ impl DmaRings {
         Ok(())
     }
 
-    pub(super) fn receive(&mut self, output: &mut [u8]) -> Option<usize> {
+    pub(super) fn receive(&mut self, regs: GmacMmio, output: &mut [u8]) -> Option<usize> {
         for _ in 0..RX_DESC_COUNT {
             let index = self.rx_index;
             let descriptor = self.rx_descriptor(index);
@@ -202,7 +206,7 @@ impl DmaRings {
             }
             clean_dma_range(self.rx_descriptor_address(index), DESC_SIZE);
             dma_barrier();
-            write_reg(DMA_CH0_RX_END, self.rx_descriptor_address(index) as u32);
+            regs.write(DMA_CH0_RX_END, self.rx_descriptor_address(index) as u32);
             if valid {
                 return Some(length);
             }
@@ -210,7 +214,7 @@ impl DmaRings {
         None
     }
 
-    pub(super) fn transmit(&mut self, input: &[u8]) -> Option<usize> {
+    pub(super) fn transmit(&mut self, regs: GmacMmio, input: &[u8]) -> Option<usize> {
         if input.is_empty() || input.len() > DMA_BUFFER_SIZE {
             return None;
         }
@@ -260,15 +264,15 @@ impl DmaRings {
         clean_dma_range(self.tx_descriptor_address(index), DESC_SIZE);
         dma_barrier();
         self.tx_index = (index + 1) % TX_DESC_COUNT;
-        write_reg(
+        regs.write(
             DMA_CH0_TX_END,
             self.tx_descriptor_address(self.tx_index) as u32,
         );
         Some(index)
     }
 
-    pub(super) fn ktest_probe(&mut self, frame: &[u8]) -> RingKtestResult {
-        let tx_index = self.transmit(frame);
+    pub(super) fn ktest_probe(&mut self, regs: GmacMmio, frame: &[u8]) -> RingKtestResult {
+        let tx_index = self.transmit(regs, frame);
         let tx_own_cleared = match tx_index {
             Some(index) => {
                 let start = get_time();
@@ -329,13 +333,13 @@ impl DmaRings {
         } else {
             (false, false)
         };
-        let rxq_ctrl0 = read_reg(0x00a0);
-        let mtl_rxq_op = read_reg(0x0d30);
-        let dma_rx_ctrl = read_reg(0x1108);
-        let dma_status = read_reg(0x1160);
-        let cur_rx_desc = read_reg(0x114c);
-        let mac_config = read_reg(0x0000);
-        let gmac_debug = read_reg(0x0114);
+        let rxq_ctrl0 = regs.read(GMAC_RXQ_CTRL0);
+        let mtl_rxq_op = regs.read(MTL_RXQ0_OP_MODE);
+        let dma_rx_ctrl = regs.read(DMA_CH0_RX_CONTROL);
+        let dma_status = regs.read(DMA_CH0_STATUS);
+        let cur_rx_desc = regs.read(DMA_CH0_CUR_RX_DESC);
+        let mac_config = regs.read(GMAC_CONFIG);
+        let gmac_debug = regs.read(GMAC_DEBUG);
 
         RingKtestResult {
             tx_submitted: tx_index.is_some(),

@@ -4,7 +4,7 @@ pub(super) use crate::hal::platform::jh7110_cache::{
     jh7110_dma_barrier as dma_barrier, jh7110_l2cc_flush_range as clean_dma_range,
 };
 
-pub(super) const GMAC0_BASE: usize = 0x1603_0000;
+pub(super) const JH7110_GMAC0_BASE: usize = 0x1603_0000;
 pub(super) const SYS_CRG_BASE: usize = 0x1302_0000;
 pub(super) const AON_CRG_BASE: usize = 0x1700_0000;
 pub(super) const AON_SYSCON_BASE: usize = 0x1701_0000;
@@ -36,7 +36,6 @@ pub(super) const DMA_CH0_RX_END: usize = 0x1128;
 pub(super) const DMA_CH0_TX_RING_LEN: usize = 0x112c;
 pub(super) const DMA_CH0_RX_RING_LEN: usize = 0x1130;
 pub(super) const DMA_CH0_INTR_ENA: usize = 0x1134;
-pub(super) const DMA_CH0_CUR_TX_DESC: usize = 0x1144;
 pub(super) const DMA_CH0_CUR_RX_DESC: usize = 0x114c;
 pub(super) const DMA_CH0_STATUS: usize = 0x1160;
 
@@ -54,8 +53,6 @@ pub(super) const AON_CRG_GMAC0_RX_INV: usize = 0x0020;
 pub(super) const AON_CRG_GMAC0_TX_INV: usize = 0x0018;
 pub(super) const AON_CRG_GMAC0_TX: usize = 0x0014;
 pub(super) const AON_CRG_RESET: usize = 0x0038;
-pub(super) const AON_CRG_RESET_GMAC0_AXI: u32 = 1 << 0;
-pub(super) const AON_CRG_RESET_GMAC0_AHB: u32 = 1 << 1;
 pub(super) const AON_SYSCON_GMAC0_PHY_INTF: usize = 0x000c;
 pub(super) const AON_SYSCON_GMAC0_PHY_INTF_MASK: u32 = 0b111 << 18;
 pub(super) const AON_SYSCON_GMAC0_PHY_INTF_RGMII: u32 = 0b001 << 18;
@@ -96,6 +93,30 @@ pub(super) const MAC_BE: u32 = 1 << 18;
 pub(super) const MAC_ACS: u32 = 1 << 20;
 pub(super) const MAC_ADDR_ENABLE: u32 = 1 << 31;
 
+#[derive(Clone, Copy)]
+pub(super) struct GmacMmio {
+    base: usize,
+}
+
+impl GmacMmio {
+    pub(super) fn new(base: usize) -> Result<Self, super::GmacJh7110Error> {
+        if base != JH7110_GMAC0_BASE {
+            return Err(super::GmacJh7110Error::UnsupportedInstance(base));
+        }
+        Ok(Self { base })
+    }
+
+    #[inline(always)]
+    pub(super) fn read(self, offset: usize) -> u32 {
+        read_mmio(self.base, offset)
+    }
+
+    #[inline(always)]
+    pub(super) fn write(self, offset: usize, value: u32) {
+        write_mmio(self.base, offset, value)
+    }
+}
+
 #[inline(always)]
 pub(super) fn read_mmio(base: usize, offset: usize) -> u32 {
     // SAFETY: Categories 6 and 11. Private call sites use documented, aligned
@@ -122,14 +143,4 @@ pub(super) fn write_mmio(base: usize, offset: usize, value: u32) {
             value,
         )
     }
-}
-
-#[inline(always)]
-pub(super) fn read_reg(offset: usize) -> u32 {
-    read_mmio(GMAC0_BASE, offset)
-}
-
-#[inline(always)]
-pub(super) fn write_reg(offset: usize, value: u32) {
-    write_mmio(GMAC0_BASE, offset, value)
 }

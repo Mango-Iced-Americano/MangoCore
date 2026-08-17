@@ -68,6 +68,9 @@ mod kt_block_publication;
 #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
 #[path = "gmac.rs"]
 mod kt_gmac;
+#[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+#[path = "gmac_probe.rs"]
+mod kt_gmac_probe;
 #[path = "ext4_another_lifetime.rs"]
 mod kt_ext4_another_lifetime;
 
@@ -105,6 +108,8 @@ pub fn all_tests() -> Vec<(&'static str, Vec<KernelTest>)> {
         ("fs_fat_smp", kt_fs_fat_smp::tests()),
         #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
         ("gmac", kt_gmac::tests()),
+        #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
+        ("gmac_probe", kt_gmac_probe::tests()),
         ("block_device", kt_block_device::tests()),
         ("block_publication", kt_block_publication::tests()),
         ("platform", platform::tests()),

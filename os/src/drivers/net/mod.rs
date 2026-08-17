@@ -1,7 +1,7 @@
 #[cfg(all(
     target_arch = "loongarch64",
     feature = "boot_la_uboot_dmw",
-    any(feature = "gmac_probe", feature = "gmac_2k1000")
+    feature = "gmac_2k1000"
 ))]
 pub mod gmac_2k1000;
 #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
@@ -32,27 +32,25 @@ lazy_static! {
 }
 
 pub fn init_net_device() {
-    #[cfg(all(target_arch = "riscv64", feature = "block_virt"))]
+    #[cfg(all(
+        target_arch = "riscv64",
+        any(feature = "block_virt", feature = "gmac_probe")
+    ))]
     {
         let platform_info = crate::hal::platform::platform_info();
         if !platform_info.devices.is_empty() {
             let device_manager =
                 crate::hal::device::DeviceManager::new(platform_info.devices.clone());
+            #[cfg(feature = "block_virt")]
             if let Some(net_device) = virtio_net::probe_net_from_device_manager(&device_manager) {
                 publish_net_device(net_device);
                 return;
             }
-        }
-    }
-
-    #[cfg(all(target_arch = "riscv64", feature = "gmac_probe"))]
-    {
-        match gmac_jh7110::GmacJh7110::new() {
-            Ok(net_device) => {
-                publish_net_device(Arc::new(net_device));
+            #[cfg(feature = "gmac_probe")]
+            if let Some(net_device) = gmac_jh7110::probe_gmac_from_device_manager(&device_manager) {
+                publish_net_device(net_device);
                 return;
             }
-            Err(error) => println!("[gmac-jh7110] initialization failed: {:?}", error),
         }
     }
 
@@ -69,13 +67,10 @@ pub fn init_net_device() {
     }
     #[cfg(all(
         any(feature = "block_virt", feature = "block_virt_pci"),
-        not(any(
-            all(
-                target_arch = "loongarch64",
-                feature = "boot_la_uboot_dmw",
-                feature = "gmac_2k1000"
-            ),
-            all(target_arch = "riscv64", feature = "gmac_probe")
+        not(all(
+            target_arch = "loongarch64",
+            feature = "boot_la_uboot_dmw",
+            feature = "gmac_2k1000"
         ))
     ))]
     {

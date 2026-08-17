@@ -95,7 +95,7 @@ riscv = []
 boot_la_qemu = ["oom_handler", "loongarch64"]
 boot_la_uboot_dmw = ["oom_handler", "loongarch64"]
 
-default = ["initramfs", "ext4_another_backend"]
+default = ["initramfs", "ext4_another_backend", "gmac_probe"]
 
 [profile.dev]
 # 优化级别

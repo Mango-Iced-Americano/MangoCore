@@ -1,6 +1,6 @@
 use crate::hal::{get_clock_freq, get_time};
 
-use super::mmio::{read_reg, write_reg, MDIO_ADDR, MDIO_DATA};
+use super::mmio::{GmacMmio, MDIO_ADDR, MDIO_DATA};
 use super::GmacJh7110Error;
 
 const PHY_ADDRESS: u8 = 0;
@@ -49,10 +49,10 @@ pub(super) struct Yt8531Diagnostics {
     pub(super) clock_gating: u16,
 }
 
-fn wait_idle() -> Result<(), GmacJh7110Error> {
+fn wait_idle(regs: GmacMmio) -> Result<(), GmacJh7110Error> {
     let start = get_time();
     let timeout = (get_clock_freq() / 10).max(1);
-    while read_reg(MDIO_ADDR) & MDIO_GBUSY != 0 {
+    while regs.read(MDIO_ADDR) & MDIO_GBUSY != 0 {
         if get_time().wrapping_sub(start) >= timeout {
             return Err(GmacJh7110Error::InvalidPhy(0));
         }
@@ -61,8 +61,8 @@ fn wait_idle() -> Result<(), GmacJh7110Error> {
     Ok(())
 }
 
-fn mdio_command(phy: u8, register: u8, operation: u32) -> u32 {
-    let inherited_clock = read_reg(MDIO_ADDR) & MDIO_CLK_CSR_MASK;
+fn mdio_command(regs: GmacMmio, phy: u8, register: u8, operation: u32) -> u32 {
+    let inherited_clock = regs.read(MDIO_ADDR) & MDIO_CLK_CSR_MASK;
     let clock = if inherited_clock == 0 {
         MDIO_CLK_CSR_150_250_MHZ
     } else {
@@ -75,59 +75,62 @@ fn mdio_command(phy: u8, register: u8, operation: u32) -> u32 {
         | MDIO_GBUSY
 }
 
-fn mdio_read(phy: u8, register: u8) -> Result<u16, GmacJh7110Error> {
-    wait_idle()?;
-    write_reg(MDIO_DATA, 0);
-    write_reg(MDIO_ADDR, mdio_command(phy, register, MDIO_GOC_READ));
-    wait_idle()?;
-    Ok(read_reg(MDIO_DATA) as u16)
+fn mdio_read(regs: GmacMmio, phy: u8, register: u8) -> Result<u16, GmacJh7110Error> {
+    wait_idle(regs)?;
+    regs.write(MDIO_DATA, 0);
+    regs.write(MDIO_ADDR, mdio_command(regs, phy, register, MDIO_GOC_READ));
+    wait_idle(regs)?;
+    Ok(regs.read(MDIO_DATA) as u16)
 }
 
-fn mdio_write(phy: u8, register: u8, value: u16) -> Result<(), GmacJh7110Error> {
-    wait_idle()?;
-    write_reg(MDIO_DATA, u32::from(value));
-    write_reg(MDIO_ADDR, mdio_command(phy, register, MDIO_GOC_WRITE));
-    wait_idle()
+fn mdio_write(
+    regs: GmacMmio,
+    phy: u8,
+    register: u8,
+    value: u16,
+) -> Result<(), GmacJh7110Error> {
+    wait_idle(regs)?;
+    regs.write(MDIO_DATA, u32::from(value));
+    regs.write(MDIO_ADDR, mdio_command(regs, phy, register, MDIO_GOC_WRITE));
+    wait_idle(regs)
 }
 
-fn ext_read(register: u16) -> Result<u16, GmacJh7110Error> {
-    mdio_write(PHY_ADDRESS, MII_EXT_ADDR, register)?;
-    mdio_read(PHY_ADDRESS, MII_EXT_DATA)
+fn ext_read(regs: GmacMmio, register: u16) -> Result<u16, GmacJh7110Error> {
+    mdio_write(regs, PHY_ADDRESS, MII_EXT_ADDR, register)?;
+    mdio_read(regs, PHY_ADDRESS, MII_EXT_DATA)
 }
 
-fn ext_write(register: u16, value: u16) -> Result<(), GmacJh7110Error> {
-    mdio_write(PHY_ADDRESS, MII_EXT_ADDR, register)?;
-    mdio_write(PHY_ADDRESS, MII_EXT_DATA, value)
+fn ext_write(regs: GmacMmio, register: u16, value: u16) -> Result<(), GmacJh7110Error> {
+    mdio_write(regs, PHY_ADDRESS, MII_EXT_ADDR, register)?;
+    mdio_write(regs, PHY_ADDRESS, MII_EXT_DATA, value)
 }
 
-pub(super) fn read_diagnostics(base: usize) -> Result<Yt8531Diagnostics, GmacJh7110Error> {
-    debug_assert_eq!(base, super::mmio::GMAC0_BASE);
+pub(super) fn read_diagnostics(regs: GmacMmio) -> Result<Yt8531Diagnostics, GmacJh7110Error> {
     Ok(Yt8531Diagnostics {
-        chip_config: ext_read(YT8531_CHIP_CONFIG)?,
-        pad_drive_strength: ext_read(YT8531_PAD_DRIVE_STRENGTH)?,
-        synce_config: ext_read(YT8531_SYNCE_CONFIG)?,
-        clock_gating: ext_read(YT8531_CLOCK_GATING)?,
+        chip_config: ext_read(regs, YT8531_CHIP_CONFIG)?,
+        pad_drive_strength: ext_read(regs, YT8531_PAD_DRIVE_STRENGTH)?,
+        synce_config: ext_read(regs, YT8531_SYNCE_CONFIG)?,
+        clock_gating: ext_read(regs, YT8531_CLOCK_GATING)?,
     })
 }
 
-pub(super) fn configure_yt8531(base: usize) -> Result<u32, GmacJh7110Error> {
-    debug_assert_eq!(base, super::mmio::GMAC0_BASE);
-    let phy_id = (u32::from(mdio_read(PHY_ADDRESS, MII_PHYSID1)?) << 16)
-        | u32::from(mdio_read(PHY_ADDRESS, MII_PHYSID2)?);
+pub(super) fn configure_yt8531(regs: GmacMmio) -> Result<u32, GmacJh7110Error> {
+    let phy_id = (u32::from(mdio_read(regs, PHY_ADDRESS, MII_PHYSID1)?) << 16)
+        | u32::from(mdio_read(regs, PHY_ADDRESS, MII_PHYSID2)?);
     if phy_id & YT8531_ID_MASK != YT8531_ID & YT8531_ID_MASK {
         return Err(GmacJh7110Error::InvalidPhy(phy_id));
     }
 
     // Step 1: Configure RGMII TX delays (0xA003): GE_TX=13, FE_TX=13.
     // These survive SW_RST, so set them before the reset.
-    let rgmii = ext_read(YT8531_RGMII_CONFIG1)?;
+    let rgmii = ext_read(regs, YT8531_RGMII_CONFIG1)?;
     let delays = (13u16) | (13u16 << 4);
-    ext_write(YT8531_RGMII_CONFIG1, (rgmii & !0x00ff) | delays)?;
+    ext_write(regs, YT8531_RGMII_CONFIG1, (rgmii & !0x00ff) | delays)?;
 
     // Step 2: Soft-reset the PHY. All extension register settings (except
     // 0xA003 delays) are cleared, so everything below MUST be re-applied.
-    let chip = ext_read(YT8531_CHIP_CONFIG)?;
-    ext_write(YT8531_CHIP_CONFIG, chip | (1 << 15))?;
+    let chip = ext_read(regs, YT8531_CHIP_CONFIG)?;
+    ext_write(regs, YT8531_CHIP_CONFIG, chip | (1 << 15))?;
     // MDIO may be unreliable while the PHY is resetting; use a fixed delay
     // instead of polling the extension register (as the Linux motorcomm
     // driver does by polling MII BMSR).
@@ -138,37 +141,36 @@ pub(super) fn configure_yt8531(base: usize) -> Result<u32, GmacJh7110Error> {
     }
 
     // Step 3: Enable RXC clock output (active-low: clear bit 12).
-    let cgr = ext_read(YT8531_CLOCK_GATING)?;
-    ext_write(YT8531_CLOCK_GATING, cgr & !(1 << 12))?;
+    let cgr = ext_read(regs, YT8531_CLOCK_GATING)?;
+    ext_write(regs, YT8531_CLOCK_GATING, cgr & !(1 << 12))?;
 
     // Step 4: Disable auto-sleep, keep PLL running.
-    let slp = ext_read(0x0027)?;
-    ext_write(0x0027, (slp & !(1 << 15)) | (1 << 14))?;
+    let slp = ext_read(regs, 0x0027)?;
+    ext_write(regs, 0x0027, (slp & !(1 << 15)) | (1 << 14))?;
 
     // Step 5: Set RGMII_SEL and RXC_DLY_EN on 0xA001.
-    let chip = ext_read(YT8531_CHIP_CONFIG)?;
-    ext_write(YT8531_CHIP_CONFIG, chip | (1 << 13) | (1 << 8))?;
+    let chip = ext_read(regs, YT8531_CHIP_CONFIG)?;
+    ext_write(regs, YT8531_CHIP_CONFIG, chip | (1 << 13) | (1 << 8))?;
 
     // Step 6: Configure SYNCE clock source to PLL_125M for RGMII.
-    let synce = ext_read(YT8531_SYNCE_CONFIG)?;
-    ext_write(YT8531_SYNCE_CONFIG, (synce & !0xeu16) | 0x10u16)?;
+    let synce = ext_read(regs, YT8531_SYNCE_CONFIG)?;
+    ext_write(regs, YT8531_SYNCE_CONFIG, (synce & !0xeu16) | 0x10u16)?;
 
-    let mut bmcr = mdio_read(PHY_ADDRESS, MII_BMCR)?;
+    let mut bmcr = mdio_read(regs, PHY_ADDRESS, MII_BMCR)?;
     bmcr &= !MII_BMCR_POWERDOWN;
     bmcr |= MII_BMCR_ANENABLE;
-    let _ = mdio_read(PHY_ADDRESS, MII_BMSR)?;
-    if mdio_read(PHY_ADDRESS, MII_BMSR)? & MII_BMSR_LINK_STATUS == 0 {
+    let _ = mdio_read(regs, PHY_ADDRESS, MII_BMSR)?;
+    if mdio_read(regs, PHY_ADDRESS, MII_BMSR)? & MII_BMSR_LINK_STATUS == 0 {
         bmcr |= MII_BMCR_ANRESTART;
     }
-    mdio_write(PHY_ADDRESS, MII_BMCR, bmcr)?;
+    mdio_write(regs, PHY_ADDRESS, MII_BMCR, bmcr)?;
     Ok(phy_id)
 }
 
-pub(super) fn read_link_state(base: usize) -> Result<LinkState, GmacJh7110Error> {
-    debug_assert_eq!(base, super::mmio::GMAC0_BASE);
-    let _ = mdio_read(PHY_ADDRESS, MII_BMSR)?;
-    let bmsr = mdio_read(PHY_ADDRESS, MII_BMSR)?;
-    let status = mdio_read(PHY_ADDRESS, MII_SPEC_STATUS)?;
+pub(super) fn read_link_state(regs: GmacMmio) -> Result<LinkState, GmacJh7110Error> {
+    let _ = mdio_read(regs, PHY_ADDRESS, MII_BMSR)?;
+    let bmsr = mdio_read(regs, PHY_ADDRESS, MII_BMSR)?;
+    let status = mdio_read(regs, PHY_ADDRESS, MII_SPEC_STATUS)?;
     let speed_mbps = match (status >> YT8531_SPEED_SHIFT) & 0b11 {
         0 => 10,
         1 => 100,
@@ -182,11 +184,11 @@ pub(super) fn read_link_state(base: usize) -> Result<LinkState, GmacJh7110Error>
     })
 }
 
-pub(super) fn wait_initial_link(base: usize) -> LinkState {
+pub(super) fn wait_initial_link(regs: GmacMmio) -> LinkState {
     let start = get_time();
     let timeout = get_clock_freq().saturating_mul(3);
     loop {
-        if let Ok(link) = read_link_state(base) {
+        if let Ok(link) = read_link_state(regs) {
             if link.up {
                 return link;
             }

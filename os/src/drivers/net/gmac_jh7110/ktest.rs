@@ -40,8 +40,9 @@ static GMAC_KTEST_RESULT: Mutex<Option<GmacKtestResult>> = Mutex::new(None);
 pub(super) fn run(driver: &GmacJh7110) {
     let mut inner = driver.inner.lock();
     let frame = arp_request(inner.mac);
-    let result = inner.rings.ktest_probe(&frame);
-    let phy_diagnostics = phy::read_diagnostics(inner.base).ok();
+    let regs = inner.regs;
+    let result = inner.rings.ktest_probe(regs, &frame);
+    let phy_diagnostics = phy::read_diagnostics(inner.regs).ok();
     let result = GmacKtestResult {
         tx_submitted: result.tx_submitted,
         tx_own_cleared: result.tx_own_cleared,
