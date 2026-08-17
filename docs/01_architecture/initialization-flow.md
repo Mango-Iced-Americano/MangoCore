@@ -36,7 +36,8 @@ timer 同时驱动全局 kernel timer；AP 的 timer 只负责本核调度抢占
 2. normal 模式挂载 x0 到 `/sdcard`、x1 的 ext4 P1 到 `/tools`；
 3. 将 `/sdcard/tmp` bind 到 `/tmp`，失败或无 x0 时以 tmpfs 兜底；
 4. `profile=buildstorm` 只挂载 x0 到 `/sdcard`，将 `/proc`、`/sys`、`/dev`、`/tmp` bind 入 `/sdcard` 后 chroot；该 profile 不挂载或 bind `/tools`，并优先执行 chroot 内的 `/glibc/buildstorm_testcode.sh`，再回退 `/sbin/init`、`/init`、`/bin/sh`；
-5. fork/exec test runner，并负责 SIGCHLD 回收、失败关机和 rescue shell。
+5. `profile=mainline root=/dev/sda3` 将 SATA P3 工具卷作为当前实板的持久根，校验根内 init/BusyBox，bind `/proc`、`/sys`、`/dev`、`/dev/shm`、`/run`、`/tmp` 后 chroot，并优先执行盘内 init，缺失时显式进入 `/bin/busybox sh -i`；P1 是官方测试载荷而非完整根，根不完整时回到 initramfs rescue；
+6. 其余 normal profile fork/exec test runner，并负责 SIGCHLD 回收、失败关机和 rescue shell。
 
 镜像角色固定为 x0=rootfs/sdcard、x1=tools（P1 ext4）+ scratch（P2 FAT32）。regression 与 ktest 为零盘 profile。
 

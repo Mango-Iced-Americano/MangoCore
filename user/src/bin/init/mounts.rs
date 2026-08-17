@@ -1,9 +1,10 @@
 use alloc::format;
-use user_lib::syscall::{sys_mkdirat, sys_mount};
+use user_lib::syscall::{sys_faccessat2, sys_mkdirat, sys_mount};
 use user_lib::{chmod, mount, println};
 
 const AT_FDCWD: isize = -100;
 const MS_BIND: usize = 4096;
+const X_OK: u32 = 1;
 
 pub(super) fn prepare_pseudo_fs_framework() {
     for path in [
@@ -65,6 +66,49 @@ fn try_bind_mount(source: &str, target: &str) -> bool {
         println!("[init] bind mount {} -> {}: skipped (errno={})", source, target, -ret);
         false
     }
+}
+
+/// Check that a mounted volume can serve as a userspace root.
+///
+/// The check deliberately requires an init entry point rather than merely
+/// `/bin` or `/etc`: a tools or scratch partition must never be promoted to
+/// the machine root by accident.
+pub(super) fn persistent_root_ready(root: &str) -> bool {
+    let root = root.trim_end_matches('\0');
+    [
+        "/sbin/init",
+        "/init",
+        "/initproc",
+        "/bin/busybox",
+        "/bin/sh",
+        "/bash",
+    ]
+        .iter()
+        .any(|suffix| {
+            let path = format!("{}{}\0", root, suffix);
+            sys_faccessat2(AT_FDCWD, &path, X_OK, 0) == 0
+        })
+}
+
+/// Bind the kernel-provided runtime filesystems into a persistent root.
+///
+/// The initramfs remains the early userspace transport, but after this
+/// function succeeds every path visible from the chrooted init is backed by
+/// the SATA root except the intentionally volatile runtime filesystems.
+pub(super) fn bind_persistent_root(root: &str) -> bool {
+    let root = root.trim_end_matches('\0');
+    for suffix in ["/proc", "/sys", "/dev", "/dev/shm", "/run", "/tmp"] {
+        let target = format!("{}{}\0", root, suffix);
+        let _ = sys_mkdirat(AT_FDCWD, &target, 0o755);
+    }
+
+    let mut mounted = true;
+    for suffix in ["/proc", "/sys", "/dev", "/dev/shm", "/run", "/tmp"] {
+        let source = format!("{}\0", suffix);
+        let target = format!("{}{}\0", root, suffix);
+        mounted &= try_bind_mount(&source, &target);
+    }
+    mounted
 }
 
 /// Bind persistent directories after the kernel has mounted its boot devices.

@@ -50,7 +50,7 @@ impl BlockDevice for DummyBlockDevice {
 }
 
 fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
-    let mut devices = Vec::new();
+    let mut devices: Vec<Arc<dyn BlockDevice>> = Vec::new();
     #[cfg(feature = "block_virt_pci")]
     devices.extend(virtio_blk_pci::probe_la64());
     #[cfg(any(
@@ -69,7 +69,13 @@ fn probe_block_devices() -> Vec<Arc<dyn BlockDevice>> {
         devices.extend(dw_mshc::probe_from_device_manager(&device_manager));
     }
     #[cfg(feature = "block_sata")]
-    devices.push(Arc::new(sata_blk::SataBlock::new()));
+    match sata_blk::SataBlock::probe() {
+        Ok(device) => devices.push(Arc::new(device)),
+        Err(error) => println!(
+            "[kernel] SATA unavailable: {:?}; keeping initramfs rescue root",
+            error
+        ),
+    }
     devices
 }
 

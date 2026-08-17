@@ -146,6 +146,31 @@ bootm 0x9000000098000000
 
 预期日志应包含 `/dev/sda1` Ext4、`/dev/sda2` Fat32、`/dev/sda3` Ext4，随后 P1 以 `RDONLY` 挂到 `/sdcard`、P3 以 `RDONLY` 挂到 `/tools`。
 
+### 主线持久根启动
+
+在完成上述分区只读验收后，使用主线镜像把 P3 作为默认用户态根：
+
+```bash
+make -C os la64-2k1000-mainline MODE=release
+python3 scripts/boot_2k1000_tftp.py \
+  --non-interactive \
+  --build-profile mainline \
+  --build-mode release
+```
+
+该镜像的内核命令行为 `root=/dev/sda3 profile=mainline`。实板审计确认 P1 是
+`glibc/musl/os_test.conf` 测试载荷，P3 才包含可执行的 `bin/sh` 与运行库。initramfs 仍用于早期
+启动和故障救援，但 PID1 会检查 `/sbin/init`、`/init`、`/initproc`、
+`/bin/busybox`、`/bin/sh` 或 `/bash`，再将运行时伪文件系统 bind 到 P3 并 chroot；
+init/initproc 均缺失时显式执行静态 `/bin/busybox sh -i`。因此主线用户态的 `/`、
+`/etc`、`/bin`、`/usr` 和 `/root` 均来自 SATA P3。`run`、`core-tests` 等测试镜像继续保留原有
+`/sdcard`/`/tools` 挂载合同，不与主线入口混用。
+
+2026-08-18 实板门禁已通过：P3 以可写 another_ext4 挂载，PID1 chroot 后进入 BusyBox；
+写入 `/MANGO_PERSIST_DEFAULT`、执行 `sync`、硬件 RESET 并重新 TFTP 启动后，标记
+`MANGO_P3_PERSIST_20260818_V1` 可原样读回。P4 的历史 `apk-root` 当前存在目录读取
+I/O error，未被自动提升为默认根。
+
 2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush、内核 P2 FAT32 文件探针和 staged 用户态 `/scratch` 冒烟测试均已通过；正式 `kernel-2k1000-run.ui` 仍保持全盘只读。
 
 ## 6. 内核 AHCI 写入探针

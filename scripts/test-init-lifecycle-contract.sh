@@ -17,19 +17,26 @@ require() {
     grep -Fq -- "$pattern" "$file" || fail "missing '$pattern' in $file"
 }
 
-for file in user/src/bin/initd.rs user/src/bin/test_runner.rs user/src/bin/init.rs; do
+for file in user/src/bin/init.rs user/src/bin/test_runner.rs; do
     [ -f "$file" ] || fail "missing lifecycle source $file"
 done
 
-require 'PID1' user/src/bin/initd.rs
-require 'getpid() != PID1' user/src/bin/initd.rs
-require 'SIGCHLD' user/src/bin/initd.rs
-require 'reap_orphans' user/src/bin/initd.rs
-require 'MANGO_RUNNER_FAILURE' user/src/bin/initd.rs
-require 'shutdown()' user/src/bin/initd.rs
-require '/tools/etc\0' user/src/bin/initd.rs
-require 'tools_ok' user/src/bin/initd.rs
-require 'MS_BIND' user/src/bin/initd.rs
+require 'PID1' user/src/bin/init.rs
+require 'getpid() != PID1' user/src/bin/init.rs
+require 'SIGCHLD' user/src/bin/init.rs
+require 'reap_orphans' user/src/bin/init.rs
+require 'MANGO_RUNNER_FAILURE' user/src/bin/init.rs
+require 'shutdown()' user/src/bin/init.rs
+require 'profile=mainline' user/src/bin/init.rs
+require 'PERSISTENT_ROOT_INITPROC' user/src/bin/init.rs
+require 'PERSISTENT_ROOT_SHELL' user/src/bin/init.rs
+require 'PERSISTENT_ROOT_BUSYBOX' user/src/bin/init.rs
+require 'mainline exec /bin/busybox sh -i' user/src/bin/init.rs
+require '/tools/etc\0' user/src/bin/init/mounts.rs
+require 'const X_OK: u32 = 1;' user/src/bin/init/mounts.rs
+require '"/initproc"' user/src/bin/init/mounts.rs
+require 'setup_persistent_mounts' user/src/bin/init/mounts.rs
+require 'MS_BIND' user/src/bin/init/mounts.rs
 require 'initramfs/common/etc' os/make/tools-disk.mk
 
 require '#[path = "test_runner/mod.rs"] mod runner;' user/src/bin/test_runner.rs
@@ -77,19 +84,19 @@ for dead in run_unix_standalone_tests run_ltp_network_tests run_ltp_signal_tests
     fi
 done
 
-for shim in user/src/bin/init.rs; do
-    require '/sbin/init\0' "$shim"
-    require 'exec(init' "$shim"
-    lines=$(wc -l < "$shim")
-    [ "$lines" -le 40 ] || fail "$shim is not a thin compatibility shim ($lines lines)"
-    if grep -Eq 'TEST_GROUPS|DEFAULT_LTP_EXCLUDE|run_selected_groups|prepare_symlink' "$shim"; then
-        fail "$shim contains runner policy: $shim"
-    fi
-done
-
-require 'INITD_SRC="$INIT_DIR/initd"' scripts/build_initramfs.sh
+require 'INITD_SRC="$INIT_DIR/init"' scripts/build_initramfs.sh
 require 'RUNNER_SRC="$INIT_DIR/test_runner"' scripts/build_initramfs.sh
 require '"$STAGE/sbin/init"' scripts/build_initramfs.sh
-require '"$STAGE/usr/libexec/mangocore/test-runner"' scripts/build_initramfs.sh
+require '"$STAGE/test-runner"' scripts/build_initramfs.sh
+
+# 2K1000 mainline must select a named persistent partition, keep the
+# crash-consistent Rust backend, and expose a real device flush barrier.  This
+# prevents a later merge from preserving the chroot code while silently
+# reverting the storage path to initramfs or a volatile write cache.
+require 'root=/dev/sda3' os/make/la64.mk
+require 'EXT4_BACKEND ?= another' os/make/ext4_backend.mk
+require 'fn supports_reliable_flush(&self) -> bool' os/src/drivers/block/sata_blk.rs
+require 'self.0.lock().flush()' os/src/drivers/block/sata_blk.rs
+require 'if !read_only && !block_device.supports_reliable_flush()' os/src/fs/ext4_another/fs.rs
 
 printf 'PASS: init lifecycle contract\n'

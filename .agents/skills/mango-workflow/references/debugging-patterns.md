@@ -1787,3 +1787,20 @@
   排查时两者都要验证。同一进程的两个 `println!` 顺序调用不可能真正交错——若它们看起来
   交错，优先怀疑短写丢换行，而不是 console 锁。
 - **相关文件**: `os/src/syscall/fs/common.rs`、`user/src/console.rs`
+
+## 板级驱动在大合并后失败时按“通用核心 / 板级适配器”分层追溯
+
+- **现象**：同一开发板历史提交已能识别设备，但合并后的内核在驱动构造处 panic；通用驱动
+  核心仍包含容量、flush、DMA 等能力，表面上看不出功能被删除。
+- **排查**：先用 `git log --all -- <adapter>` 找到最后一份实板证据，再分别比较通用核心和
+  OS 适配器。重点核对固定 BDF/BAR、MMIO cache alias、reset 后厂商寄存器恢复、DMA 连续性
+  与地址上限、设备命名和错误传播。不要因平台资源枚举为空就直接归因于 FDT；静态 fallback
+  平台可能本来就由板级适配器拥有这些资源。
+- **修复边界**：复用仍存在的通用实现，只恢复板级资源和 ownership 合同；probe 返回分阶段
+  错误并保留 rescue，避免 `Option::expect()` 抹去故障位置。可写文件系统还必须沿
+  `filesystem -> partition -> raw device` 验证可靠 flush，不能把“能读写”当成“能持久化”。
+- **验收**：板级目标构建只能证明 cfg/API 闭合；实板至少要看到 PCI identity、AHCI
+  IDENTIFY、目标分区挂载和 PID1 切根。宣称持久化前再执行写入、fsync、重启复读，并区分
+  默认后端与历史可选后端，避免追错分支实现。
+- **相关文件**：`os/src/drivers/block/sata_blk.rs`、`os/src/drivers/block/mod.rs`、
+  `os/src/fs/boot_block.rs`、`os/src/fs/ext4_backend.rs`

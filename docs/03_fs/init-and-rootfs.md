@@ -73,8 +73,8 @@ rust_main()
 1. 创建空 `RamFS` 作为根文件系统。
 2. 通过 `initramfs::unpack_embedded()` 解包编译时通过 `.incbin` 嵌入内核的 newc cpio 归档，将 init 程序、busybox 等注入 RamFS。
 3. 仅挂载 devfs，并注册 `/dev/tty` 以建立 PID1 的 fd 0/1/2；其余挂载点只是目录。
-4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。`boot_block` 会先验证驱动提供的 `BlockDeviceDescriptor`，再将所有原始块设备及其发现的 MBR 分区名称和主次设备号发布到 DevFS 和启动注册表。`root=` 优先于 `mango.root=`，仅选择挂载到 `/sdcard` 的卷：显式 `root=initramfs` 保留 initramfs，其他非空值按已注册的原始盘或 MBR 分区节点名解析（可带一个 `/dev/` 前缀）；未显式提供 root 选择器时才回退首个原始设备。内核不解析 `mango.tools=`，也不挂载 `/tools`；该挂载由 initramfs 用户态按需执行。磁盘名由驱动声明：virtio 为 `vd*`，MMC 为 `mmcblk*`，其他设备默认 `blk*`。
-5. `/sbin/init` 挂载 procfs、sysfs、`/run`、`/dev/shm`，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。`profile=buildstorm` 是例外：只挂载 x0，准备 `/proc`、`/sys`、`/dev`、`/tmp` 后 chroot `/sdcard`，不绑定 tools 盘。
+4. 调用 `register_boot_block_devices()`：`boot_block` 子模块探测 virtio 块设备、注册 `/dev/vda`、`/dev/vdb` 及 MBR 分区节点，不打开或挂载其文件系统。`boot_block` 会先验证驱动提供的 `BlockDeviceDescriptor`，再将所有原始块设备及其发现的 MBR 分区名称和主次设备号发布到 DevFS 和启动注册表。`root=` 优先于 `mango.root=`，仅选择挂载到 `/sdcard` 的卷：显式 `root=initramfs` 保留 initramfs，其他非空值按已注册的原始盘或 MBR 分区节点名解析（可带一个 `/dev/` 前缀）；未显式提供 root 选择器时才回退首个原始设备。内核不解析 `mango.tools=`，也不挂载 `/tools`；该挂载由 initramfs 用户态按需执行。磁盘名由驱动声明：virtio 为 `vd*`，SATA 为 `sd*`，MMC 为 `mmcblk*`，未声明的设备才使用 `blk*`。
+5. `/sbin/init` 挂载 procfs、sysfs、`/run`、`/dev/shm`，并在非 regression 模式下将 x0 挂载到 `/sdcard`、将 x1（优先 `/dev/vdb1`，回退 `/dev/vdb`）挂载到 `/tools`。`profile=buildstorm` 是例外：只挂载 x0，准备 `/proc`、`/sys`、`/dev`、`/tmp` 后 chroot `/sdcard`，不绑定 tools 盘；`profile=mainline` 是 SATA 板级主线：显式 `root=/dev/sda3` 后校验 `/sdcard` 为完整根，将运行时伪文件系统 bind 进 P3 并 chroot 执行持久根 init。当前实板 P1 仅含官方 `glibc/musl` 测试载荷，不能作为系统根。
 6. `/tmp` 优先 bind `/sdcard/tmp`；x0 或 bind 失败时挂载 tmpfs。块设备故障只打印 warning，不 panic。
 
 ext4 动态挂载通过 `fs::ext4_backend` 分派到 `another_ext4`（可持久化写入且要求可靠 flush）；
@@ -170,4 +170,5 @@ pub fn vfs_root() -> Arc<MountFS> {
 - **initramfs 中块设备延迟探测**：块设备探测需要连续物理页 DMA；initramfs 路径在网络初始化后发布所有原始盘和 MBR 分区（`register_boot_block_devices`），由驱动描述符定义节点；内核仅按 root 选择器或无选择器的首原始盘回退决定 `/sdcard`，不依赖 x0/x1 槽位。
 - **不可递归触发 VFS_ROOT**：initramfs 解包期间（`unpack_newc`）严禁调用 `vfs_root()`，必须使用传入的 `root` 参数，否则引发递归 lazy_static 初始化死锁。
 - **块设备故障不 panic**：显式 root 选择器解析不到设备、或设备上没有可挂载文件系统时，只打印 warning 并保留 initramfs；不会回退到另一块设备。这对调试和 CI 环境至关重要。
+- **主线根切换 fail-closed**：`profile=mainline` 只使用命令行明确指定的 P3，不会在分区间猜测或回退；P3 必须存在可执行的 `/sbin/init`、`/init`、`/initproc`、`/bin/busybox`、`/bin/sh` 或 `/bash` 之一，否则回到 initramfs rescue shell。当前实板以静态 BusyBox 作为 PID1 兜底。
 - **MountFS 包装统一入口**：无论底层是磁盘文件系统（ext4/FAT32）还是伪文件系统（ramfs），全部包装为 `MountFS`，使路径解析、子挂载管理、挂载传播通过统一的 MountFS 层处理。

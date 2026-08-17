@@ -2,12 +2,11 @@
 #![no_main]
 
 extern crate alloc;
-use alloc::format;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
-use user_lib::syscall::{sys_chroot, sys_mkdirat, sys_sched_setaffinity};
+use user_lib::syscall::{sys_chroot, sys_sched_setaffinity};
 use user_lib::{
-    chdir, close, exec, exit, fork, getpid, kill, mount, open, println, read, shutdown, sigaction,
+    chdir, close, exec, exit, fork, getpid, kill, open, println, read, shutdown, sigaction,
     sleep, sleep_blocking, waitpid, waitpid_wnohang, write, OpenFlags, SigAction, SIGCHLD, SIGINT,
     SIGKILL, SIGTERM,
 };
@@ -17,13 +16,17 @@ mod mounts;
 #[path = "init/vf2.rs"]
 
 const PID1: isize = 1;
-const MS_BIND: usize = 4096;
 const RUNNER: &str = "/test-runner\0";
 const RESCUE_SHELL: &str = "/rescue/sh\0";
 const BUILDSTORM_INIT: &str = "/sbin/init\0";
 const BUILDSTORM_FALLBACK_INIT: &str = "/init\0";
+const PERSISTENT_ROOT_INITPROC: &str = "/initproc\0";
+const PERSISTENT_ROOT_BUSYBOX: &str = "/bin/busybox\0";
+const BUSYBOX_SH: &str = "sh\0";
+const BUSYBOX_INTERACTIVE: &str = "-i\0";
 const BUILDSTORM_SCRIPT: &str = "/glibc/buildstorm_testcode.sh\0";
 const BUILDSTORM_SHELL: &str = "/bin/sh\0";
+const PERSISTENT_ROOT_SHELL: &str = "/bash\0";
 const BUILDSTORM_SHELL_C: &str = "-c\0";
 const BUILDSTORM_PRECLEAN: &str = concat!(
     r#"case "$(uname -m 2>/dev/null)" in
@@ -80,44 +83,10 @@ fn reap_orphans() {
     CHILD_EVENT.store(false, Ordering::Release);
 }
 
-fn try_bind_mount(source: &str, target: &str) -> bool {
-    let src = alloc::format!("{}\0", source);
-    let tgt = alloc::format!("{}\0", target);
-    let ret = mount(src.as_ptr(), tgt.as_ptr(), "\0".as_ptr(), MS_BIND, 0);
-    if ret == 0 {
-        println!("[init] bind mount {} -> {}", source, target);
-        true
-    } else {
-        println!(
-            "[init] bind mount {} -> {}: skipped (errno={})",
-            source, target, -ret
-        );
-        false
-    }
-}
-
-fn root_path(root: &str, suffix: &str) -> alloc::string::String {
-    format!("{}{}\0", root.trim_end_matches('\0'), suffix)
-}
-
 /// Prepare the BuildStorm chroot with only the host pseudo-filesystems.
 /// The official x0 tree must remain intact; `/tools` is deliberately absent.
 fn bind_buildstorm_pseudo_filesystems(root: &str) -> bool {
-    for suffix in ["/proc", "/sys", "/dev", "/tmp"] {
-        let target = root_path(root, suffix);
-        let _ = sys_mkdirat(-100, &target, 0o755);
-    }
-    let mut mounted = true;
-    for (source, suffix) in [
-        ("/proc", "/proc"),
-        ("/sys", "/sys"),
-        ("/dev", "/dev"),
-        ("/tmp", "/tmp"),
-    ] {
-        let target = root_path(root, suffix);
-        mounted &= try_bind_mount(source, &target);
-    }
-    mounted
+    mounts::bind_persistent_root(root)
 }
 
 fn enter_buildstorm_root() -> bool {
@@ -323,24 +292,51 @@ fn exec_buildstorm_init() -> ! {
     }
 }
 
-fn bind_tools_and_sdcard(tools_ok: bool, disk_ok: bool) {
-    // Tools disk: bind-mount key directories to root so writes persist across reboots.
-    if tools_ok {
-        for (src, dst) in [
-            ("/tools/bin", "/bin"),
-            ("/tools/sbin", "/sbin"),
-            ("/tools/lib", "/lib"),
-            ("/tools/usr", "/usr"),
-            ("/tools/root", "/root"),
-        ] {
-            try_bind_mount(src, dst);
-        }
+fn exec_persistent_root_init() -> ! {
+    let env = runner_environment("mainline");
+    // A persistent root owns the init lifecycle. Keep a shell fallback so a
+    // partially provisioned SATA root remains diagnosable over serial instead
+    // of silently losing PID1.
+    for path in [
+        BUILDSTORM_INIT,
+        BUILDSTORM_FALLBACK_INIT,
+        PERSISTENT_ROOT_INITPROC,
+    ] {
+        println!("[init] mainline exec {}", path.trim_end_matches('\0'));
+        let ret = exec(path, &[path.as_ptr(), core::ptr::null()], &env);
+        println!(
+            "[init] mainline exec {} failed: {}",
+            path.trim_end_matches('\0'),
+            ret
+        );
     }
-    // sdcard: bind-mount musl/glibc runtime directories.
-    if disk_ok {
-        for (src, dst) in [("/sdcard/musl", "/musl"), ("/sdcard/glibc", "/glibc")] {
-            try_bind_mount(src, dst);
-        }
+    // The board tools volume intentionally carries a static BusyBox alongside
+    // a richer bash.  Invoke the applet explicitly: executing busybox with
+    // argv[0]="/bin/busybox" only prints usage, while bash may depend on a
+    // partially provisioned profile/runtime and stall before becoming PID1's
+    // serial rescue shell.
+    println!("[init] mainline exec /bin/busybox sh -i");
+    let ret = exec(
+        PERSISTENT_ROOT_BUSYBOX,
+        &[
+            BUSYBOX_SH.as_ptr(),
+            BUSYBOX_INTERACTIVE.as_ptr(),
+            core::ptr::null(),
+        ],
+        &env,
+    );
+    println!("[init] mainline exec /bin/busybox failed: {}", ret);
+    for path in [BUILDSTORM_SHELL, PERSISTENT_ROOT_SHELL] {
+        println!("[init] mainline exec {}", path.trim_end_matches('\0'));
+        let ret = exec(path, &[path.as_ptr(), core::ptr::null()], &env);
+        println!(
+            "[init] mainline exec {} failed: {}",
+            path.trim_end_matches('\0'),
+            ret
+        );
+    }
+    loop {
+        sleep(1000);
     }
 }
 
@@ -370,6 +366,8 @@ fn boot_profile() -> &'static str {
     let cmdline = &cmdline[..size];
     if cmdline_contains(cmdline, b"mango.mode=regression") {
         "regression"
+    } else if cmdline_contains(cmdline, b"profile=mainline") {
+        "mainline"
     } else if cmdline_contains(cmdline, b"profile=buildstorm") {
         "buildstorm"
     } else if cmdline_contains(cmdline, b"profile=rescue") {
@@ -384,6 +382,7 @@ fn runner_environment(profile: &str) -> [*const u8; 8] {
         "regression" => "MANGO_BOOT_PROFILE=regression\0",
         "rescue" => "MANGO_BOOT_PROFILE=rescue\0",
         "buildstorm" => "MANGO_BOOT_PROFILE=buildstorm\0",
+        "mainline" => "MANGO_BOOT_PROFILE=mainline\0",
         _ => "MANGO_BOOT_PROFILE=normal\0",
     };
     [
@@ -462,6 +461,41 @@ fn main(_argc: usize, _argv: &[&str]) -> i32 {
             }
         }
         exec_buildstorm_init();
+    }
+    if profile == "rescue" {
+        // 2K1000 shell 镜像是 initramfs-only 的网络/串口调试入口。
+        // 不尝试挂载 SATA 的 /sdcard、/tools，避免把“没有持久盘”误报成
+        // 普通启动失败；/rescue/sh 由 PID1 直接托管为交互式 shell。
+        mounts::mount_tmpfs("/tmp\0");
+        rescue_forever();
+    }
+    if profile == "mainline" {
+        // The kernel mounted the explicit SATA root at /sdcard. Initramfs is
+        // only the early transport/bootstrap layer; hand the complete
+        // userspace lifecycle to that persistent root after importing the
+        // runtime mounts.
+        mounts::mount_tmpfs("/tmp\0");
+        if !mounts::persistent_root_ready("/sdcard") {
+            println!(
+                "[init] mainline root /sdcard has no executable init or shell; entering rescue"
+            );
+            rescue_forever();
+        }
+        if !mounts::bind_persistent_root("/sdcard") {
+            println!("[init] mainline persistent root bind setup failed; entering rescue");
+            rescue_forever();
+        }
+        if chdir("/\0") < 0 {
+            println!("[init] mainline pre-chroot chdir failed; entering rescue");
+            rescue_forever();
+        }
+        let ret = sys_chroot("/sdcard\0");
+        if ret < 0 || chdir("/\0") < 0 {
+            println!("[init] mainline chroot failed: {}; entering rescue", ret);
+            rescue_forever();
+        }
+        println!("[init] mainline persistent SATA root active");
+        exec_persistent_root_init();
     }
     if profile != "regression" {
         // mount_boot_block_devices() already owns x0 → /sdcard and x1 → /tools.
