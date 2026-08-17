@@ -37,6 +37,12 @@ unsafe extern "C" fn _start() -> ! {
             addi.d      $a1, $a2, 0
             # CPUID is CPU-local, so it can be read before any shared stack exists.
             csrrd       $a0, 0x20
+            # 覆盖开头用固件 a0（QEMU 恒为 1 的 EFI 标志，非 hart id）写入的
+            # RAW_HART_ID：Linux LoongArch 启动 ABI 中 a0 是 flags 而非 CPU 编号，
+            # 真正的 boot 核编号在 CSR 0x20。不覆盖会让 count_cpus 误把 FDT 之外
+            # 的 hart 计数为第 2 个逻辑核（la64 -smp 1 时 expected=0x3 挂起）。
+            la.global   $t0, {raw_hart_id}
+            st.d        $a0, $t0, 0
             # Reject an ID without a reserved slot before assigning or using $sp.
             li.d        $t0, {max_cpus}
             bgeu        $a0, $t0, 2f
