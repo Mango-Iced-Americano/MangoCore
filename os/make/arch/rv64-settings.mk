@@ -29,7 +29,6 @@ VALID_CORE_NUMS := 1 2 4 8
 # 用立即展开的声明完成校验，既在解析期 fail-closed，也保持 settings 模块
 # 只有声明、没有 target/recipe 的分层约束。
 CORE_NUM_VALIDATION := $(if $(filter $(CORE_NUM),$(VALID_CORE_NUMS)),,$(error CORE_NUM must be one of $(VALID_CORE_NUMS), got '$(CORE_NUM)'))
-export MANGO_CORE_NUM := $(CORE_NUM)
 LOG ?= off
 KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
 SDCARD_RV := $(IMAGE_ROLE_RV64_COMPETITION_X0)

@@ -1,7 +1,7 @@
 //! Build script for the os kernel crate.
 //!
 //! Declares Cargo fingerprint dependencies so that `cargo build`
-//! automatically recompiles when `MANGO_CMDLINE` or `MANGO_CORE_NUM`
+//! automatically recompiles when `MANGO_CMDLINE`
 //! changes, or when the embedded initramfs cpio is rebuilt.
 //!
 //! Without this, `option_env!("MANGO_CMDLINE")` in `bootargs.rs`
@@ -96,24 +96,8 @@ fn main() {
     // Re-run if MANGO_CMDLINE changes between builds
     println!("cargo:rerun-if-env-changed=MANGO_CMDLINE");
 
-    // CORE_NUM is a build-time topology contract. Tracking it here prevents
-    // Cargo from reusing a kernel compiled for a different QEMU CPU count.
-    println!("cargo:rerun-if-env-changed=MANGO_CORE_NUM");
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
         .expect("Cargo must provide the target architecture to the build script");
-    let core_num = std::env::var("MANGO_CORE_NUM").unwrap_or_else(|_| String::from("1"));
-    let core_num_valid = match target_arch.as_str() {
-        "riscv64" => matches!(core_num.as_str(), "1" | "2" | "4" | "8"),
-        "loongarch64" => matches!(core_num.as_str(), "1" | "2" | "4" | "8" | "12"),
-        _ => false,
-    };
-    assert!(
-        core_num_valid,
-        "MANGO_CORE_NUM={:?} is invalid for {}",
-        core_num,
-        target_arch
-    );
-    println!("cargo:rustc-env=MANGO_CORE_NUM={core_num}");
 
     // Forward the command line to rustc so option_env! picks it up
     let cmdline =

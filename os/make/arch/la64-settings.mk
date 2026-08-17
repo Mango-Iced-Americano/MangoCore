@@ -22,7 +22,6 @@ VALID_CORE_NUMS := 1 2 4 8 12
 # 用声明式立即展开校验保持 arch settings 无 target/recipe，同时让非法拓扑
 # 在启动 Cargo 或 QEMU 之前失败。
 CORE_NUM_VALIDATION := $(if $(filter $(CORE_NUM),$(VALID_CORE_NUMS)),,$(error CORE_NUM must be one of $(VALID_CORE_NUMS), got '$(CORE_NUM)'))
-export MANGO_CORE_NUM := $(CORE_NUM)
 LOG ?= off
 KERNEL_LA := $(PRODUCT_ROOT)/kernel/kernel-la
 SDCARD_LA := $(IMAGE_ROLE_LA64_COMPETITION_X0)

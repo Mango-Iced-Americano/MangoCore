@@ -490,21 +490,6 @@ static KERNEL_TLB_DEFERRED_TICKS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "perf_stats")]
 static KERNEL_TLB_DEFERRED_TICKS_MAX: AtomicUsize = AtomicUsize::new(0);
 
-const fn parse_configured_cpu_count(value: &[u8]) -> usize {
-    let mut count = 0;
-    let mut index = 0;
-    while index < value.len() {
-        count = count * 10 + (value[index] - b'0') as usize;
-        index += 1;
-    }
-    count
-}
-
-// build.rs 会拒绝架构构建合同之外的参数，因此这里可以无分支解析十进制值。
-// FDT `/cpus` 探测失败（如 LA64 静态板级）时作为运行时 CPU 数的兜底值。
-const CONFIGURED_CPU_COUNT: usize =
-    parse_configured_cpu_count(env!("MANGO_CORE_NUM").as_bytes());
-
 const AP_RELEASED: usize = 1;
 const ONLINE_TIMEOUT_SECONDS: usize = 5;
 const STOP_TIMEOUT_SECONDS: usize = 1;
@@ -786,14 +771,15 @@ static SCHEDULER_RELEASED: AtomicBool = AtomicBool::new(false);
 /// 运行时可用的逻辑 CPU 数量（Linux `nr_cpu_ids` 语义）。
 ///
 /// 以 FDT `/cpus` 冻结的可启动 hart 数为准（`PER_CPUS`、IdleStacks 等数组仍按
-/// `MAX_CPUS` 定界）。仅空 hart 列表才表示无 FDT 拓扑，可回退到编译期
-/// `CONFIGURED_CPU_COUNT`，保证至少 1 个 CPU，绝不返回 0。
+/// `MAX_CPUS` 定界）。仅空 hart 列表才表示无 FDT 拓扑（如个别无 EFI_FDT_GUID 的
+/// LA64 静态板级兜底），此时没有任何证据表明存在 AP，保守地只认 BSP 1 个核、
+/// 绝不为 0。
 ///
 /// 该值决定“启动几个 AP + 期望 online mask”，因此与 QEMU 的 `-smp N` 自动匹配：
 /// 同一镜像在不同核数的 QEMU 上都能启动，而不再依赖编译期 `MANGO_CORE_NUM`。
 pub fn runtime_cpu_count() -> usize {
     if crate::hal::firmware::cpu_harts().is_empty() {
-        CONFIGURED_CPU_COUNT
+        1
     } else {
         crate::hal::firmware::cpu_count()
     }
@@ -2310,7 +2296,7 @@ fn hardware_to_logical_id(hardware_id: usize, boot_hardware_id: usize) -> Option
     if !harts.is_empty() {
         return hardware_to_logical_id_list(harts, boot_hardware_id, hardware_id);
     }
-    if hardware_id >= CONFIGURED_CPU_COUNT {
+    if hardware_id >= MAX_CPUS {
         return None;
     }
     Some(if hardware_id == boot_hardware_id {
@@ -2327,7 +2313,7 @@ fn logical_to_hardware_id(logical_id: usize, boot_hardware_id: usize) -> Option<
     if !harts.is_empty() {
         return logical_to_hardware_id_list(harts, boot_hardware_id, logical_id);
     }
-    if logical_id >= CONFIGURED_CPU_COUNT {
+    if logical_id >= MAX_CPUS {
         return None;
     }
     Some(if logical_id == BOOT_CPU_ID {
