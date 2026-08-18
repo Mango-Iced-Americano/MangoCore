@@ -453,3 +453,75 @@ diag=1
 4 窗口）的四类关键指标不仅**没有任何窗口间渐进退化**（W0→W3 均稳定在噪声范围内），
 且绝对性能相比当年 bitmap guard 修复后数据全面提升约 1.7–2.5×。原报告的
 「free-list 线性扫描导致的渐进退化」场景在当前分配器上已不复存在。
+
+### 9.4 对照实验（2026-08-18）：最原始 free-list buddy 后端
+
+为回答「当前数据的提升是否主要来自 allocator，而非内核其它子系统的优化」，把全局堆
+分配器切换回**最原始的 free-list 线性扫描 buddy**（`buddy_system_allocator::Heap<32>`，
+无 bitmap guard、无 metadata、无 slab，`os/Cargo.toml` 新增 `legacy_buddy_heap` feature，
+`os/src/mm/heap_allocator_legacy.rs` 实现，`EXTRA_FEATURES=legacy_buddy_heap` 编译时
+生效），**内核其它部分与 9.2 完全一致**，用同一 workload（basic+busybox pre + 全量
+lmbench，4 窗口，rv64）复测。完整串口日志：
+`docs/Work_Log/evidence/2026-08-18/drift-lmbench-rv64-legacy-freelist.log`。
+
+**musl 对比（最原始 free-list vs metadata+slab，µs）：**
+
+| 测试项 | legacy W0→W3 | metadata W0→W3 | 说明 |
+|--------|--------------|----------------|------|
+| Simple open/close | 163→172（188/203 波动） | 118→126 | legacy 高约 40–70%，无单调退化但波动 |
+| **Process fork+exit** | 4,786→**6,909 (+44%)** | 4,140→4,112 | **退化复现** |
+| **Process fork+execve** | 5,147→**7,512 (+46%, 单调)** | 4,349→4,560 | **退化复现，逐窗口单调爬升** |
+| **Pipe latency** | 664→**930 (+40%, 单调)** | 630→613 | **退化复现，逐窗口单调爬升** |
+| Simple stat | 118→106 | 93→93 | 稳定（读取类免疫） |
+| Simple syscall (null) | 20→20 | 20→20 | 无差异 |
+| Simple read / write | 27–28 / 20 | 27–29 / 20 | 无差异 |
+
+**关键结论：**
+
+1. **allocator 是当前性能提升的主导贡献者**。同一份当前内核（其它子系统全部已优化），
+   仅把 allocator 换回最原始 free-list buddy，`fork+execve` 出现 +46% 的**逐窗口单调
+   退化**（5,147 → 7,512），`pipe latency` +40% 单调爬升，`fork+exit` +44% 后维持高稳态
+   ——复现了原报告描述的「创建新对象路径随 free-list 增长线性变慢」现象。
+2. **读取类操作不受影响**（null syscall / stat / read / write 两类后端下均平稳），与
+   原报告「纯读取免疫于堆碎片化」的结论一致。
+3. 因此，9.2 中 metadata+slab 的全面提升**主要归因于 allocator 优化本身**，不是「内核
+   其它优化」制造的表观差距；把 allocator 换回旧实现，提升立即消失并退回退化行为。
+
+**实验备注：** 实验中发现完整接入最原始 Heap 需要**干净的 derived 镜像**——先前多次
+`conf-inject`（每次 `e2fsck -fy` + debugfs）累积的盘 metadata 状态会导致 `vda`(ext4
+root) 挂载时报 `another_ext4 BRIDGE EIO`（盘本身 `e2fsck -n` 显示 clean），同一块盘
+连默认 metadata 内核也会挂载失败。**从 official 重新派生 + 一次性注入 conf 后挂载恢复**。
+教训：做 allocator/性能对照前必须重新生成干净 derived，避免盘面累积状态污染信号。
+`legacy_buddy_heap` feature 默认关闭，不改变主线的 MetadataHeap+slab 行为。
+
+### 9.5 完整逐窗口数据（画图用）
+
+下表给出 9.2 / 9.4 的**每个窗口独立数值**（µs），供趋势图直接使用。原始数据另存
+CSV：`docs/Work_Log/evidence/2026-08-18/perf-all-windows.csv`（列：backend, libc,
+window, metric, us）。
+
+**musl：**
+
+| metric \ backend | meta W0 | meta W1 | meta W2 | meta W3 | legacy W0 | legacy W1 | legacy W2 | legacy W3 |
+|------------------|-------|-------|-------|-------|---------|---------|---------|---------|
+| Simple open/close | 117.6 | 128.0 | 118.6 | 126.0 | 163.5 | 187.7 | 202.6 | 171.5 |
+| Process fork+exit | 4140 | 4170 | 4167 | 4112 | 4786 | 7056 | 6788 | 6909 |
+| Process fork+execve | 4349 | 4539 | 4501 | 4560 | 5147 | 7421 | 7425 | 7512 |
+| Pipe latency | 629.8 | 604.9 | 600.0 | 613.0 | 663.9 | 842.4 | 885.5 | 929.6 |
+| Simple stat | 92.7 | 105.6 | 93.8 | 93.2 | 118.2 | 116.6 | 140.3 | 106.0 |
+| Simple syscall | 20.1 | 19.8 | 19.9 | 19.9 | 19.5 | 19.5 | 19.6 | 19.6 |
+| Simple read | 27.3 | 27.2 | 27.2 | 29.2 | 27.3 | 27.4 | 27.4 | 27.5 |
+| Simple write | 20.4 | 20.3 | 20.5 | 22.4 | 20.0 | 20.1 | 20.1 | 20.3 |
+
+**glibc（同 workload 补充，legacy 退化更显著）：**
+
+| metric \ backend | meta W0 | meta W1 | meta W2 | meta W3 | legacy W0 | legacy W1 | legacy W2 | legacy W3 |
+|------------------|-------|-------|-------|-------|---------|---------|---------|---------|
+| Simple open/close | 116.0 | 127.8 | 122.8 | 116.1 | 117.9 | 158.3 | 205.1 | 245.6 |
+| Process fork+exit | 6183 | 6070 | 6217 | 6029 | 9493 | 11809 | 13337 | 12678 |
+| Process fork+execve | 6519 | 6507 | 6530 | 6608 | 9266 | 12445 | 13603 | 12891 |
+| Pipe latency | 594.8 | 584.9 | 593.3 | 593.5 | 685.9 | 749.6 | 775.7 | 820.5 |
+| Simple stat | 92.0 | 99.6 | 93.9 | 91.2 | 89.7 | 109.6 | 152.1 | 167.9 |
+| Simple syscall | 19.9 | 19.8 | 20.1 | 19.9 | 19.9 | 19.6 | 19.8 | 19.6 |
+| Simple read | 27.7 | 28.0 | 28.6 | 27.5 | 27.3 | 27.0 | 27.8 | 27.0 |
+| Simple write | 20.1 | 20.2 | 20.4 | 20.3 | 19.9 | 19.8 | 19.9 | 19.9 |
