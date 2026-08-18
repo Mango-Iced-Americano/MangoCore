@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +58,14 @@ P4_PARTITION = (4, P4_START_LBA, P4_SECTORS, 0x83)
 def uboot_crc(console: UBootConsole, length: int) -> int:
     output = console.command(f"crc32 {LOADADDR} 0x{length:x}", timeout=90)
     return int(require(r"==>\s*([0-9a-f]{8})", output, "U-Boot CRC missing").group(1), 16)
+
+
+def file_crc32(path: Path) -> int:
+    checksum = 0
+    with path.open("rb") as source:
+        while data := source.read(8 * 1024 * 1024):
+            checksum = zlib.crc32(data, checksum)
+    return checksum
 
 
 def partition_entry(mbr: bytes, number: int) -> tuple[int, int, int, int]:
@@ -189,6 +199,24 @@ def transfer(console: UBootConsole, image: Path, expected_crc: int, timeout: flo
     print(f"[p4] loaded {image.name}: bytes={transferred} crc32={actual_crc:08x}", flush=True)
 
 
+def publish_tftp_chunk(chunk: Path, tftp_root: Path) -> tuple[Path, bool]:
+    """Publish through a user-owned fixed slot when the TFTP root is root-owned."""
+    candidates = (tftp_root / chunk.name, tftp_root / "mango-cpython-p3.part-00")
+    for destination in candidates:
+        if destination.is_file() and os.access(destination, os.W_OK):
+            with chunk.open("rb") as source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output, 8 * 1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            if destination.stat().st_size != chunk.stat().st_size:
+                raise BootError(f"short pre-existing TFTP slot: {destination}")
+            if file_crc32(destination) != file_crc32(chunk):
+                raise BootError(f"pre-existing TFTP slot CRC mismatch: {destination}")
+            print(f"[host] refreshed existing TFTP slot: {destination}", flush=True)
+            return destination, False
+    return prepare_tftp_image(chunk, tftp_root), True
+
+
 def write_and_verify(
     console: UBootConsole,
     start_lba: int,
@@ -241,6 +269,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log", type=Path, default=Path("/private/tmp/mango-p4-write.log"))
     parser.add_argument("--no-host-config", dest="configure_host", action="store_false")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--replace-existing-p4", action="store_true")
     parser.add_argument("--confirm-p4-start", required=True)
     parser.add_argument("--confirm-p4-end", required=True)
     parser.add_argument("--confirm-disk-sectors", required=True)
@@ -289,7 +318,7 @@ def main() -> None:
         raise BootError("pyserial is required") from error
 
     ensure_interface(args.interface, args.host_ip, args.netmask, args.configure_host)
-    ensure_tftp_service(args.configure_host)
+    ensure_tftp_service(args.configure_host, args.tftp_root)
     serial_path = detect_serial(args.serial)
     release_matching_screen(serial_path, True)
     console = UBootConsole(serial, serial_path, args.log)
@@ -310,12 +339,16 @@ def main() -> None:
         info = console.command("scsi info", timeout=20)
         require(EXPECTED_MODEL, info, "unexpected SSD identity")
         validate_capacity(info)
-        validate_partition_table(console.command("scsi part 0", timeout=20), False)
+        validate_partition_table(
+            console.command("scsi part 0", timeout=20), args.replace_existing_p4
+        )
         console.command(f"scsi read {LOADADDR} 0x0 0x1", timeout=30)
         board_mbr_crc = uboot_crc(console, SECTOR_SIZE)
-        if board_mbr_crc != old_mbr_crc:
+        expected_board_mbr_crc = new_mbr_crc if args.replace_existing_p4 else old_mbr_crc
+        if board_mbr_crc != expected_board_mbr_crc:
             raise BootError(
-                f"MBR CRC mismatch: board={board_mbr_crc:08x} source={old_mbr_crc:08x}"
+                f"MBR CRC mismatch: board={board_mbr_crc:08x} "
+                f"expected={expected_board_mbr_crc:08x}"
             )
         print(
             f"[p4] preflight PASS: model={EXPECTED_MODEL} sectors={EXPECTED_DISK_SECTORS} "
@@ -335,7 +368,7 @@ def main() -> None:
             for index in range(CHUNK_COUNT):
                 chunk = temporary / f"mango-p4.part-{index:02d}"
                 expected_crc = make_chunk(image, index, chunk)
-                tftp_chunk = prepare_tftp_image(chunk, args.tftp_root)
+                tftp_chunk, remove_chunk = publish_tftp_chunk(chunk, args.tftp_root)
                 try:
                     transfer(console, tftp_chunk, expected_crc, args.tftp_timeout)
                     start_lba = P4_START_LBA + index * CHUNK_SECTORS
@@ -348,7 +381,35 @@ def main() -> None:
                         upper=P4_END_LBA,
                     )
                 finally:
-                    remove_tftp_copy(tftp_chunk, args.tftp_root)
+                    if remove_chunk:
+                        remove_tftp_copy(tftp_chunk, args.tftp_root)
+
+            if args.replace_existing_p4:
+                scsi = console.command("scsi reset", timeout=30)
+                require(EXPECTED_MODEL, scsi, "SSD missing after P4 replacement")
+                validate_partition_table(console.command("scsi part 0", timeout=20), True)
+                listing = console.command("ext4ls scsi 0:4 /", timeout=60)
+                require(r"MANGO_STATE\.txt", listing, "P4 marker missing")
+                require(r"apk-root", listing, "P4 apk-root missing")
+                loaded = console.command(
+                    f"ext4load scsi 0:4 {LOADADDR} {MARKER_PATH}", timeout=60
+                )
+                marker_bytes = int(
+                    require(r"(\d+)\s+bytes read", loaded, "P4 marker not loaded").group(1)
+                )
+                if marker_bytes != len(MARKER):
+                    raise BootError(
+                        f"P4 marker size mismatch: {marker_bytes} != {len(MARKER)}"
+                    )
+                marker_crc = uboot_crc(console, marker_bytes)
+                if marker_crc != zlib.crc32(MARKER):
+                    raise BootError("P4 replacement marker verification failed")
+                print(
+                    "[p4] PASS: existing P4 payload replaced; MBR preserved; "
+                    f"mbr_crc32={new_mbr_crc:08x}",
+                    flush=True,
+                )
+                return
 
             tftp_new_mbr = prepare_tftp_image(new_mbr_path, args.tftp_root)
             tftp_old_mbr = prepare_tftp_image(old_mbr_path, args.tftp_root)

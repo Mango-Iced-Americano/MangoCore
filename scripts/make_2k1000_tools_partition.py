@@ -32,6 +32,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tools-root", required=True, type=Path)
     parser.add_argument("--user-bin-dir", required=True, type=Path)
+    parser.add_argument("--kernel-image", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -42,6 +43,8 @@ def main() -> None:
         fail(f"tools root not found: {args.tools_root}")
     if not args.user_bin_dir.is_dir():
         fail(f"user binary directory not found: {args.user_bin_dir}")
+    if args.kernel_image is not None and not args.kernel_image.is_file():
+        fail(f"kernel image not found: {args.kernel_image}")
     if args.output.exists() and not args.force:
         fail(f"output already exists (use --force): {args.output}")
 
@@ -52,6 +55,7 @@ def main() -> None:
             args.user_bin_dir,
             BOARD_P3_MIB,
             Path(tmp_name),
+            args.kernel_image,
         )
         shutil.copyfile(payload, args.output)
 
@@ -72,6 +76,10 @@ def main() -> None:
         "target_sectors": sectors,
         "target_end_lba_exclusive": BOARD_P3_START_LBA + sectors,
         "chunk_mib": 256,
+        "local_boot_kernel": "/boot/kernel-A.ui" if args.kernel_image else None,
+        "local_boot_kernel_sha256": (
+            sha256_file(args.kernel_image) if args.kernel_image else None
+        ),
     }
     manifest_path = Path(f"{args.output}.json")
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")

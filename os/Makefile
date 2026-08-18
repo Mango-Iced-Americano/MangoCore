@@ -16,7 +16,7 @@ BUILD_TOOLS_DISK ?= 1
 # 本地需要时显式 make BUILD_ROOTFS=1 开启。
 BUILD_ROOTFS ?= 0
 
-.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint buildstorm ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell
+.PHONY: all $(ARCHS) clean prepare-cargo-config toolchain-preflight toolchain-setup env arch-build kernel user image run test check lint buildstorm ktest-build-only ktest-run validate-run publish-compatibility rv64-ktest la64-ktest rv64-ktest-build-only la64-ktest-build-only rv64-derived-run la64-derived-run la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-mainline la64-2k1000-apk-persist-shell
 .NOTPARALLEL:
 
 all: prepare-cargo-config
@@ -143,7 +143,7 @@ la64-derived-run: prepare-cargo-config
 la64-regression: prepare-cargo-config
 	make -f make/la64.mk regression-run MODE=${MODE} LOG=${LOG}
 
-la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-apk-persist-shell: prepare-cargo-config
+la64-2k1000-run-clean la64-2k1000-core-tests la64-2k1000-shell la64-2k1000-mainline la64-2k1000-apk-persist-shell: prepare-cargo-config
 	$(MAKE) ARCH=la64 PROFILE=normal -f make/la64.mk $@ MODE=$(MODE) PRODUCT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal" KERNEL_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/kernel" USER_OUTPUT_ROOT="$(BUILD_ROOT)/la64/$(MODE)/normal/user"
 
 comp: toolchain-preflight

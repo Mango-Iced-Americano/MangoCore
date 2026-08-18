@@ -1,0 +1,4 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export SHELL=/bin/sh
+export PS1='MangoCore:\w# '

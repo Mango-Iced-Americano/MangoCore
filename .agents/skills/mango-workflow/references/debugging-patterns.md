@@ -1804,3 +1804,17 @@
   默认后端与历史可选后端，避免追错分支实现。
 - **相关文件**：`os/src/drivers/block/sata_blk.rs`、`os/src/drivers/block/mod.rs`、
   `os/src/fs/boot_block.rs`、`os/src/fs/ext4_backend.rs`
+
+## 实板目录报 I/O error 时先区分介质读失败与 inode 元数据损坏
+
+- **现象**：SATA 原始块读取正常，ext4 根目录和同分区其他大目录也可遍历，但某个目录本身
+  `stat` 成功、列目录为空，访问其已知子项统一返回 `EIO`。
+- **排查**：先只读取得目标 inode 和 `i_block`，按 ext4 extent header 解码 magic、depth、
+  logical block、length 与 physical block；再直接读取候选物理块。若目录大小为一块却只有
+  从 logical block 1 开始、指向 physical block 0 的 uninitialized extent，而磁盘其他块读取
+  稳定，则根因是目录 inode 的 extent 元数据损坏，不是 AHCI/SSD 全局读失败。
+- **修复边界**：不要把损坏目录自动提升为 root，也不要在来源不明时手工猜 extent。先备份
+  仍可读的数据和目标分区原始块；默认根切换到经 `e2fsck`、文件合同和重启复读验证的独立
+  分区，再离线重建损坏卷。任何整分区重写都必须有精确 LBA 边界和可验证回滚点。
+- **相关文件**：`scripts/write_2k1000_p3.py`、`scripts/write_2k1000_p4.py`、
+  `docs/03_fs/2k1000-full-test-disk.md`

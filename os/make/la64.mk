@@ -148,7 +148,7 @@ la64-2k1000-shell:
 	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=virt MODE=$(MODE) LOG=off EXTRA_FEATURES="gmac_2k1000" KERNEL_CMDLINE="mango.mode=normal profile=rescue" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-shell.ui"
 
 la64-2k1000-mainline:
-	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off KERNEL_CMDLINE="mango.mode=normal profile=mainline root=/dev/sda3" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-mainline.ui"
+	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off EXTRA_FEATURES="gmac_2k1000 gmac_dhcp" KERNEL_CMDLINE="mango.mode=normal profile=mainline root=/dev/sda3" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-mainline.ui"
 
 la64-2k1000-apk-persist-shell:
 	@$(MAKE) ARCH=la64 PROFILE=normal -B -f $(firstword $(MAKEFILE_LIST)) uimage BOARD=2k1000 BLK_MODE=sata MODE=$(MODE) LOG=off APK_RUNTIME=1 EXTRA_FEATURES="sata_scratch_rw p4_persist_rw gmac_dhcp apk_persist_shell" KERNEL_UIMG="$(BOARD_2K1000_ARTIFACT_ROOT)/kernel-2k1000-persist-shell.ui"

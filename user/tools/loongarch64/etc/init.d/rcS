@@ -1,0 +1,11 @@
+#!/bin/busybox sh
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export SHELL=/bin/sh
+
+/bin/busybox mkdir -p /root /var/log /var/tmp
+/bin/busybox chmod 1777 /tmp /var/tmp /dev/shm 2>/dev/null || true
+/bin/busybox hostname -F /etc/hostname 2>/dev/null || true
+
+echo "[p3-init] MangoCore persistent root services ready"

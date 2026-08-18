@@ -4,7 +4,7 @@ module: "fs/init"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-08-07
+last_updated: 2026-08-18
 code_paths:
   - "os/src/fs/mod.rs"
   - "os/src/fs/boot_block.rs"
@@ -79,6 +79,22 @@ rust_main()
 
 ext4 动态挂载通过 `fs::ext4_backend` 分派到 `another_ext4`（可持久化写入且要求可靠 flush）；
 `ext4_lwext4_backend` 仅在显式 legacy feature 下编译，避免默认路径链接旧 C 后端。
+
+### 2.2 2K1000LA P3 持久根合同
+
+P3 镜像生成时必须提供真实的 PID1 合同，而不能只依赖 initramfs 的交互 shell：
+
+- `/sbin/init -> ../bin/busybox`；
+- `/etc/inittab` 先运行 `/etc/init.d/rcS`，再在控制台启动交互 shell；
+- `rcS` 只准备持久根内的基本目录、权限、hostname 和环境，不重复挂载已经由 MangoCore
+  PID1 绑定的 `/dev`、`/proc`、`/sys`、`/run`；
+- `/boot/kernel-A.ui` 是本地启动 A 槽，TFTP 镜像仍是可独立替换的调试路径；
+- P3 必须以 `^has_journal` 创建；当前 another_ext4 不执行 journal replay，不能把宿主
+  默认开启 journal 的 ext4 镜像直接用于掉电/硬复位后的持久根；
+- P3 写入前必须存在完整块级备份，写入后必须从 SSD 读回验证，再保存 U-Boot 环境。
+
+这种布局使“默认持久根”和“可快速录入新内核”互不冲突：正常启动读取 P3 A 槽，开发时在
+U-Boot 的 3 秒倒计时截停并执行 TFTP，测试通过后再生成并写入新的 P3 镜像。
 
 ## 3. VFS_ROOT lazy_static
 

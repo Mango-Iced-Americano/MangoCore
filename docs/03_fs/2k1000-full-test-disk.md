@@ -4,7 +4,7 @@ module: "fs/board-image"
 category: fs
 status: draft
 owner: MangoCore Team
-last_updated: 2026-07-14
+last_updated: 2026-08-18
 code_paths:
   - "scripts/make_2k1000_full_test_disk.py"
   - "scripts/make_2k1000_tools_partition.py"
@@ -13,6 +13,7 @@ code_paths:
   - "scripts/restore_2k1000_p2.py"
   - "scripts/write_2k1000_p3.py"
   - "scripts/write_2k1000_p4.py"
+  - "scripts/configure_2k1000_local_boot.py"
   - "os/src/fs/filesystem.rs"
   - "os/src/fs/mod.rs"
   - "os/src/main.rs"
@@ -66,7 +67,7 @@ related_docs:
 |------|----------|------|------|------|
 | P1 | `2048..8390655` | 4GiB | `0x83` ext4 | 官方 LA64 完整测试集，自动挂载 `/sdcard` |
 | P2 | `8390656..11012095` | 1280MiB | `0x0c` FAT32 | 保持 `/dev/vda2` 兼容；staged 镜像额外挂载为 `/scratch` |
-| P3 | `11012096..12584959` | 768MiB | `0x83` ext4 | MangoCore 工具，单盘时自动挂载 `/tools` |
+| P3 | `11012096..12584959` | 768MiB | `0x83` ext4 | MangoCore 持久根、工具和本地启动内核 |
 | P4 | `12584960..20973567` | 4GiB | `0x83` ext4 | staged 持久状态，身份校验后读写挂载 `/persist` |
 
 P1 来自干净的 `fs-img-dir/sdcard-la.img.xz`，注入当前 `os_test.conf`（`mode=run`、`mask=0xFFF`）。不要使用被 QEMU 写过的仓库根目录 `sdcard-la.img` 作为母盘，除非它重新通过只读 `e2fsck -f -n`。原始 6GiB 完整镜像的 MBR 仍只有 P1-P3；P4 由独立 staged 工具在验证真实 SSD 后创建，不要求重写已有三个分区。4GiB P4 结束后到 32GB SSD 末端继续保留未分配空间。
@@ -85,6 +86,44 @@ python3 scripts/make_2k1000_full_test_disk.py \
 ```
 
 脚本会构建 P3 工具 ext4、执行只读 `e2fsck`、写 MBR、复制 P1/P3 payload、格式化 P2 FAT32，并逐字节比较嵌入前后的 P1/P3，最后输出 `.layout.json`。
+
+只替换 P3 时使用独立生成器，并把已通过 `iminfo` 的主线 uImage 一并固化为 A 槽：
+
+```bash
+python3 scripts/make_2k1000_tools_partition.py \
+  --tools-root user/tools/loongarch64 \
+  --user-bin-dir user/target/loongarch64-unknown-linux-gnu/release \
+  --kernel-image build/la64/release/normal/board/2k1000/kernel-2k1000-mainline.ui \
+  --output build/la64/release/normal/board/2k1000/mango-mainline-root-p3.img \
+  --force
+```
+
+该 P3 是完整根文件系统：`/sbin/init` 指向静态 BusyBox，`/etc/inittab` 调用
+`/etc/init.d/rcS`，并包含 `/dev`、`/proc`、`/sys`、`/run`、`/tmp`、`/var` 等运行目录。
+`/boot/kernel-A.ui` 和 `/boot/kernel-A.sha256` 与根文件系统处于同一可回滚镜像中。
+P3 与 P4 一样显式使用 `^has_journal`：当前 another_ext4 不执行 journal replay，宿主默认
+开启 journal 的镜像虽然可能首轮启动成功，但硬复位后会停在 ext4 后端初始化阶段。
+
+日常更新本地启动内核可直接使用一键上板脚本的 `ssd-install` 模式。交互向导会要求
+P4 中已完成的 P3 备份 ID，并要求手工输入固定起点 `0xA80800`；非交互用法为：
+
+```bash
+python3 scripts/boot_2k1000_tftp.py \
+  --non-interactive \
+  --build-profile mainline \
+  --install-ssd-kernel \
+  --ssd-backup-id <UTC-id> \
+  --confirm-ssd-p3-start 0xA80800
+```
+
+该入口不是无保护的单文件覆盖：它先在 Docker 中把新 uImage 固化为 P3
+`/boot/kernel-A.ui`，校验 P3 清单及内核 SHA-256，再复用受限 P3 写入器检查 SSD 型号、
+MBR/分区边界和 P4 的完整 768 MiB 备份。三个 256 MiB 块均完成 TFTP CRC、SCSI 写入和
+SSD 读回 CRC 后，脚本还会从 SSD 重新加载 `kernel-A.ui`，核对长度、CRC、LoongArch
+架构和 uImage checksum。此流程会替换完整 P3，因此 P3 上现有的可写根数据会回到新镜像
+内容；需要保留的数据应先放入 P4 `/persist` 或从已验证备份恢复。U-Boot 本地启动环境尚未
+配置时，仍需执行 `scripts/configure_2k1000_local_boot.py`；已配置的板会在下次复位直接加载
+新的 A 槽内核，倒计时截停后的 TFTP 调试路径保持不变。
 
 ## 4. 写入 SSD
 
@@ -166,10 +205,27 @@ init/initproc 均缺失时显式执行静态 `/bin/busybox sh -i`。因此主线
 `/etc`、`/bin`、`/usr` 和 `/root` 均来自 SATA P3。`run`、`core-tests` 等测试镜像继续保留原有
 `/sdcard`/`/tools` 挂载合同，不与主线入口混用。
 
-2026-08-18 实板门禁已通过：P3 以可写 another_ext4 挂载，PID1 chroot 后进入 BusyBox；
-写入 `/MANGO_PERSIST_DEFAULT`、执行 `sync`、硬件 RESET 并重新 TFTP 启动后，标记
-`MANGO_P3_PERSIST_20260818_V1` 可原样读回。P4 的历史 `apk-root` 当前存在目录读取
-I/O error，未被自动提升为默认根。
+2026-08-18 实板门禁已通过：无 journal 的 P3 以可写 another_ext4 挂载，PID1 chroot 后
+执行 `/sbin/init`，`rcS` 和控制台 askfirst 正常；写入 `/root/persist-v2`、执行 `sync`、
+硬件 RESET 并从本地介质重新启动后，内容 `MANGO_NOJOURNAL_PERSIST_20260818` 及 SHA-256
+`193bc0922d3a50bf1cef5eab4baf065c8f85bc4625340f8edf9c3c6fe7b7be5a` 原样读回。
+
+### 本地介质自动启动与调试回退
+
+完成 P3 块级备份、写入和读回验证后，才允许保存 U-Boot 环境：
+
+```bash
+python3 scripts/configure_2k1000_local_boot.py \
+  --kernel-image build/la64/release/normal/board/2k1000/kernel-2k1000-mainline.ui \
+  --confirm-saveenv 2k1000-local-boot
+```
+
+脚本先核对 SSD 型号、MBR disk id、P3 起止、盘内 uImage 长度/CRC 和 `iminfo`，然后把
+本地 P3 设为第一启动项，TFTP 设为第二回退，并保留原 `bootcmd` 为第三回退。`bootdelay=3`
+保留人工截停窗口。因此日常断网可从 `/boot/kernel-A.ui` 启动；调试新内核时在倒计时按键，
+继续使用 `tftpboot`，无需改写 SSD。只有所有环境变量的暂存值回读一致后才执行 `saveenv`。
+本地与 TFTP 命令都先用 `mw.l ${loadaddr} 0 1` 清除旧 uImage magic；加载失败时后续
+`bootm` 会 fail closed，不能误启动内存中残留的上一版内核。
 
 2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush、内核 P2 FAT32 文件探针和 staged 用户态 `/scratch` 冒烟测试均已通过；正式 `kernel-2k1000-run.ui` 仍保持全盘只读。
 
@@ -414,6 +470,15 @@ make 2k1000-boot IMAGE=kernel-2k1000-apk-persist-tests.ui
 `PASS mode=install`，再次复位后输出 `PASS mode=reuse`，两轮均为 `RESULT=PASS`；
 P1-P3 边界及只读策略保持不变。
 
+已有四分区磁盘需要原位替换损坏 P4 时，使用 `scripts/write_2k1000_p4.py` 的
+`--replace-existing-p4` 模式。该模式要求当前四项分区和 MBR CRC32 `6538e5cb` 完全匹配，
+只覆盖 `0xC00800..0x1400800`，不写 MBR。2026-08-18 实板因旧 `apk-root` inode extent
+指向 physical block 0 而出现目录 I/O error；原始 SATA 块读稳定，判定为 ext4 元数据损坏，
+而非 SSD 介质故障。重建 4 GiB 无 journal P4 后，16 个 256 MiB 块的 TFTP/写入/读回 CRC
+全部通过，`apk-root`、`MANGO_STATE.txt` 可读；读写挂载写入 `REBUILD_OK`、sync、卸载并
+只读重挂后可读回 `MANGO_P4_REBUILT_20260818`。旧损坏卷的可读内容只保留为宿主上的
+部分取证归档，不应当作可恢复的完整备份。
+
 ### 7.6 P4 交互应用根
 
 交互阶段仍使用 P4，不新增分区。`apk_persist_shell` 在已验证的 `/persist` 上维护
@@ -439,7 +504,8 @@ make 2k1000-boot IMAGE=kernel-2k1000-persist-shell.ui
 的 HTTPS 请求。macOS Internet Sharing 的 DNS 代理不响应 Alpine curl 所用 c-ares，
 而公共 DNS、APK resolver 和既有 glibc resolver 路径正常；在该临时拓扑下可用 curl
 的 `--dns-servers` 显式选择可达 DNS，正式部署仍应消费现场 DHCP DNS，不能写死到内核。
-已同步写入 P4 的 curl 和标记尚待用最新 uImage 完成一次物理复位复核。
+2026-08-18 重建后的 P4 已完成只读目录遍历与读写持久化冒烟；历史应用树已被干净
+`apk-root` 替换，后续需要重新执行包安装/提交门禁，不能沿用旧卷的 committed 标记。
 
 该阶段不把 P4 挂载到 `/`，也没有引入 overlayfs。任何后续通用可写根方案仍需单独
 处理白化、rename、掉电一致性、空间回收和恢复门禁，不能通过放宽 P1/P3 写权限替代。

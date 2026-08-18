@@ -98,5 +98,19 @@ require 'EXT4_BACKEND ?= another' os/make/ext4_backend.mk
 require 'fn supports_reliable_flush(&self) -> bool' os/src/drivers/block/sata_blk.rs
 require 'self.0.lock().flush()' os/src/drivers/block/sata_blk.rs
 require 'if !read_only && !block_device.supports_reliable_flush()' os/src/fs/ext4_another/fs.rs
+require 'replace_symlink(staging / "sbin" / "init", "../bin/busybox")' scripts/make_2k1000_full_test_disk.py
+require '"^has_journal"' scripts/make_2k1000_full_test_disk.py
+require 'local_boot_kernel' scripts/make_2k1000_tools_partition.py
+require '::sysinit:/etc/init.d/rcS' user/tools/loongarch64/etc/inittab
+require '::askfirst:/bin/busybox sh -i' user/tools/loongarch64/etc/inittab
+require 'LOCAL_KERNEL = "/boot/kernel-A.ui"' scripts/configure_2k1000_local_boot.py
+require 'BOOTCMD = "run mango_local_boot; run mango_tftp_boot; run mango_bootcmd_legacy"' scripts/configure_2k1000_local_boot.py
+require '"mw.l ${loadaddr} 0 1;"' scripts/configure_2k1000_local_boot.py
+require 'console.command("setenv bootdelay 3")' scripts/configure_2k1000_local_boot.py
+require '"--install-ssd-kernel"' scripts/boot_2k1000_tftp.py
+require '"--ssd-backup-id"' scripts/boot_2k1000_tftp.py
+require '"--confirm-ssd-p3-start"' scripts/boot_2k1000_tftp.py
+require '"--verify-kernel"' scripts/write_2k1000_p3.py
+require 'P3 manifest kernel SHA-256 does not match --verify-kernel' scripts/write_2k1000_p3.py
 
 printf 'PASS: init lifecycle contract\n'

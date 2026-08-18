@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 
 
 SECTOR_SIZE = 512
@@ -77,6 +78,14 @@ def require_command(name: str) -> None:
         fail(f"required command not found: {name}")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(COPY_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def replace_symlink(path: Path, target: str) -> None:
     if path.is_symlink() or path.exists():
         path.unlink()
@@ -119,11 +128,28 @@ def build_tools_payload(
     user_bin_dir: Path,
     size_mib: int,
     temporary_dir: Path,
+    kernel_image: Optional[Path] = None,
 ) -> Path:
     staging = temporary_dir / "tools-root"
     shutil.copytree(tools_root, staging, symlinks=True)
 
-    for relative in ("bin", "sbin", "lib", "usr/bin", "usr/sbin", "etc", "tests"):
+    for relative in (
+        "bin",
+        "sbin",
+        "lib",
+        "usr/bin",
+        "usr/sbin",
+        "etc",
+        "tests",
+        "dev/shm",
+        "proc",
+        "root",
+        "run",
+        "sys",
+        "tmp",
+        "var/log",
+        "var/tmp",
+    ):
         (staging / relative).mkdir(parents=True, exist_ok=True)
 
     runtime_dir = staging / "tests" / "cpython"
@@ -158,6 +184,12 @@ def build_tools_payload(
     bash = staging / "bin" / "bash"
     if not busybox.is_file() or not bash.is_file():
         fail("tools root must contain bin/busybox and bin/bash")
+    init_script = staging / "etc" / "init.d" / "rcS"
+    inittab = staging / "etc" / "inittab"
+    if not init_script.is_file() or not inittab.is_file():
+        fail("tools root must contain etc/init.d/rcS and etc/inittab")
+    init_script.chmod(0o755)
+    replace_symlink(staging / "sbin" / "init", "../bin/busybox")
     for applet in BUSYBOX_APPLETS:
         replace_symlink(staging / "bin" / applet, "busybox")
     replace_symlink(staging / "bin" / "sh", "bash")
@@ -167,9 +199,24 @@ def build_tools_payload(
         for link_name in MUSL_LINKS:
             replace_symlink(staging / "lib" / link_name, "libc.so")
 
+    if kernel_image is not None:
+        if not kernel_image.is_file():
+            fail(f"local boot kernel not found: {kernel_image}")
+        with kernel_image.open("rb") as image:
+            if image.read(4) != b"\x27\x05\x19\x56":
+                fail(f"local boot kernel is not a legacy uImage: {kernel_image}")
+        boot_dir = staging / "boot"
+        boot_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(kernel_image, boot_dir / "kernel-A.ui")
+        (boot_dir / "kernel-A.sha256").write_text(
+            f"{sha256_file(kernel_image)}  kernel-A.ui\n",
+            encoding="ascii",
+        )
+
     (staging / "MANGO_TOOLS.txt").write_text(
-        "MangoCore 2K1000LA tools partition\n"
+        "MangoCore 2K1000LA persistent mainline root\n"
         "source=user/tools/loongarch64\n"
+        "init=/sbin/init -> /bin/busybox\n"
         f"tests={','.join(TOOLS_TESTS)}\n",
         encoding="ascii",
     )
@@ -188,6 +235,8 @@ def build_tools_payload(
             "4096",
             "-m",
             "0",
+            "-O",
+            "^has_journal",
             "-L",
             "MANGO_TOOLS",
             "-U",

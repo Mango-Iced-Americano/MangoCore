@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Safely replace only the CPython tools P3 partition through U-Boot."""
+"""Safely replace the 2K1000LA P3 root/tools partition through U-Boot."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,7 @@ from boot_2k1000_tftp import (
     release_matching_screen,
     require,
     sha256,
+    validate_uimage,
 )
 
 
@@ -31,6 +34,8 @@ SECTOR_SIZE = 512
 P3_START_LBA = 0xA80800
 P3_SECTORS = 0x180000
 P3_END_LBA = P3_START_LBA + P3_SECTORS
+P4_START_LBA = P3_END_LBA
+P4_SECTORS = 0x800000
 CHUNK_SECTORS = 0x80000
 CHUNK_BYTES = CHUNK_SECTORS * SECTOR_SIZE
 CHUNK_COUNT = P3_SECTORS // CHUNK_SECTORS
@@ -41,6 +46,7 @@ EXPECTED_PARTITIONS = (
     (1, 0x800, 0x800000, "83"),
     (2, 0x800800, 0x280000, "0c"),
     (3, P3_START_LBA, P3_SECTORS, "83"),
+    (4, P4_START_LBA, P4_SECTORS, "83"),
 )
 BACKUP_CHUNK_BYTES = 64 * 1024 * 1024
 BACKUP_CHUNK_COUNT = (P3_SECTORS * SECTOR_SIZE) // BACKUP_CHUNK_BYTES
@@ -54,13 +60,13 @@ def uboot_crc(console: UBootConsole, length: int) -> int:
 
 def expected_mbr_crc(disk_image: Path) -> int:
     with disk_image.open("rb") as source:
-        sector = source.read(SECTOR_SIZE)
+        sector = bytearray(source.read(SECTOR_SIZE))
     if len(sector) != SECTOR_SIZE or sector[510:512] != b"\x55\xaa":
         raise BootError(f"invalid source MBR: {disk_image}")
     disk_id = int.from_bytes(sector[440:444], "little")
     if disk_id != EXPECTED_DISK_ID:
         raise BootError(f"unexpected source disk id: {disk_id:#x}")
-    for number, start, sectors, part_type in EXPECTED_PARTITIONS:
+    for number, start, sectors, part_type in EXPECTED_PARTITIONS[:3]:
         entry = sector[446 + (number - 1) * 16 : 446 + number * 16]
         actual_type = entry[4]
         actual_start = int.from_bytes(entry[8:12], "little")
@@ -71,10 +77,21 @@ def expected_mbr_crc(disk_image: Path) -> int:
             int(part_type, 16),
         ):
             raise BootError(f"unsafe source partition {number} layout")
+    p4_offset = 446 + 3 * 16
+    if any(sector[p4_offset : p4_offset + 16]):
+        raise BootError("source MBR P4 entry is not empty")
+    sector[p4_offset] = 0
+    sector[p4_offset + 1 : p4_offset + 4] = b"\xfe\xff\xff"
+    sector[p4_offset + 4] = 0x83
+    sector[p4_offset + 5 : p4_offset + 8] = b"\xfe\xff\xff"
+    sector[p4_offset + 8 : p4_offset + 12] = P4_START_LBA.to_bytes(4, "little")
+    sector[p4_offset + 12 : p4_offset + 16] = P4_SECTORS.to_bytes(4, "little")
     return zlib.crc32(sector)
 
 
-def validate_manifest(image: Path, manifest_path: Path) -> None:
+def validate_manifest(
+    image: Path, manifest_path: Path, verify_kernel: Path | None = None
+) -> None:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="ascii"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -100,6 +117,15 @@ def validate_manifest(image: Path, manifest_path: Path) -> None:
         raise BootError(
             f"P3 image SHA-256 mismatch: {actual_sha} != {manifest.get('sha256')}"
         )
+    if verify_kernel is not None:
+        expected_kernel_sha = sha256(verify_kernel)
+        if manifest.get("local_boot_kernel") != "/boot/kernel-A.ui":
+            raise BootError("P3 manifest does not contain the local kernel A slot")
+        if manifest.get("local_boot_kernel_sha256") != expected_kernel_sha:
+            raise BootError(
+                "P3 manifest kernel SHA-256 does not match --verify-kernel: "
+                f"{manifest.get('local_boot_kernel_sha256')} != {expected_kernel_sha}"
+            )
     print(
         f"[p3] manifest verified: bytes={image.stat().st_size} sha256={actual_sha}",
         flush=True,
@@ -147,6 +173,23 @@ def transfer(console: UBootConsole, chunk: Path, expected_crc: int, timeout: flo
         f"[p3] loaded {chunk.name}: bytes={transferred} crc32={actual_crc:08x}",
         flush=True,
     )
+
+
+def publish_tftp_chunk(chunk: Path, tftp_root: Path) -> Path:
+    """Refresh a pre-existing user-owned TFTP slot without directory writes."""
+    destination = tftp_root / chunk.name
+    if destination.is_file() and os.access(destination, os.W_OK):
+        with chunk.open("rb") as source, destination.open("wb") as output:
+            shutil.copyfileobj(source, output, 8 * 1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        if destination.stat().st_size != chunk.stat().st_size:
+            raise BootError(f"short pre-existing TFTP slot: {destination}")
+        if crc32(destination) != crc32(chunk):
+            raise BootError(f"pre-existing TFTP slot CRC mismatch: {destination}")
+        print(f"[host] refreshed existing TFTP slot: {destination}", flush=True)
+        return destination
+    return prepare_tftp_image(chunk, tftp_root)
 
 
 def write_and_verify(console: UBootConsole, index: int, expected_crc: int) -> None:
@@ -198,6 +241,31 @@ def verify_installed_file(console: UBootConsole, source: Path) -> None:
         )
     print(
         f"[p3] installed {source.name} verified: bytes={loaded} crc32={actual_crc:08x}",
+        flush=True,
+    )
+
+
+def verify_installed_kernel(console: UBootConsole, source: Path) -> None:
+    output = console.command(
+        f"ext4load scsi 0:3 {LOADADDR} /boot/kernel-A.ui", timeout=90
+    )
+    loaded = int(
+        require(r"(\d+)\s+bytes read", output, "P3 kernel-A.ui not loaded").group(1)
+    )
+    if loaded != source.stat().st_size:
+        raise BootError(f"P3 kernel size mismatch: {loaded} != {source.stat().st_size}")
+    actual_crc = uboot_crc(console, loaded)
+    expected_crc = crc32(source)
+    if actual_crc != expected_crc:
+        raise BootError(
+            f"P3 kernel CRC mismatch: {actual_crc:08x} != {expected_crc:08x}"
+        )
+    image_info = console.command(f"iminfo {LOADADDR}", timeout=30)
+    require(r"LoongArch", image_info, "P3 kernel architecture mismatch")
+    require(r"Checksum\s+\.\.\.\s+OK", image_info, "P3 kernel checksum failed")
+    print(
+        f"[p3] installed /boot/kernel-A.ui verified: bytes={loaded} "
+        f"crc32={actual_crc:08x}",
         flush=True,
     )
 
@@ -254,6 +322,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("user/tools/cpython/L7_filesystem.py"),
     )
     parser.add_argument(
+        "--verify-kernel",
+        type=Path,
+        help="uImage expected at /boot/kernel-A.ui after the P3 replacement",
+    )
+    parser.add_argument(
         "--disk-image",
         type=Path,
         default=DEFAULT_TFTP_ROOT / "mango-2k1000la-full-test-mbr.img",
@@ -285,7 +358,7 @@ def main() -> None:
         raise BootError(
             f"confirmation mismatch: {confirmed_start:#x} != expected {P3_START_LBA:#x}"
         )
-    if not SAFE_BACKUP_ID.fullmatch(args.backup_id):
+    if not SAFE_BACKUP_ID.fullmatch(args.backup_id) or args.backup_id in {".", ".."}:
         raise BootError("--backup-id contains unsafe characters")
 
     image = args.image.expanduser().resolve()
@@ -295,11 +368,19 @@ def main() -> None:
         else Path(f"{image}.json")
     )
     verify_file = args.verify_file.expanduser().resolve()
+    verify_kernel = (
+        args.verify_kernel.expanduser().resolve() if args.verify_kernel else None
+    )
     disk_image = args.disk_image.expanduser().resolve()
-    for path in (image, manifest, verify_file, disk_image):
+    required_paths = [image, manifest, verify_file, disk_image]
+    if verify_kernel is not None:
+        required_paths.append(verify_kernel)
+    for path in required_paths:
         if not path.is_file():
             raise BootError(f"required file not found: {path}")
-    validate_manifest(image, manifest)
+    if verify_kernel is not None:
+        validate_uimage(verify_kernel)
+    validate_manifest(image, manifest, verify_kernel)
     source_mbr_crc = expected_mbr_crc(disk_image)
 
     try:
@@ -308,7 +389,7 @@ def main() -> None:
         raise BootError("pyserial is required") from error
 
     ensure_interface(args.interface, args.host_ip, args.netmask, args.configure_host)
-    ensure_tftp_service(args.configure_host)
+    ensure_tftp_service(args.configure_host, args.tftp_root)
     serial_path = detect_serial(args.serial)
     release_matching_screen(serial_path, True)
     console = UBootConsole(serial, serial_path, args.log)
@@ -347,7 +428,7 @@ def main() -> None:
             for index in range(CHUNK_COUNT):
                 chunk = Path(tmp_name) / f"mango-cpython-p3.part-{index:02d}"
                 chunk_crc = make_chunk(image, index, chunk)
-                tftp_chunk = prepare_tftp_image(chunk, args.tftp_root)
+                tftp_chunk = publish_tftp_chunk(chunk, args.tftp_root)
                 transfer(console, tftp_chunk, chunk_crc, args.tftp_timeout)
                 write_and_verify(console, index, chunk_crc)
 
@@ -357,6 +438,8 @@ def main() -> None:
         listing = console.command("ext4ls scsi 0:3 /tests/cpython", timeout=60)
         require(r"L7_filesystem\.py", listing, "updated CPython tests missing from P3")
         verify_installed_file(console, verify_file)
+        if verify_kernel is not None:
+            verify_installed_kernel(console, verify_kernel)
         print("[p3] PASS: P3 replaced and latest CPython L7 script verified", flush=True)
     finally:
         console.close()
