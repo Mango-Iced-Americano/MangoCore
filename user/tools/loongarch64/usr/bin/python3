@@ -1,0 +1,28 @@
+#!/bin/sh
+# P3 is the persistent root on 2K1000LA.  The CPython closure therefore lives
+# below /tests, not the historical /tools mount used by QEMU test images.
+set -eu
+
+CPYTHON_ROOT="${CPYTHON_ROOT:-/tests/cpython}"
+CPYTHON_LD="$CPYTHON_ROOT/lib/ld-musl-loongarch64.so.1"
+CPYTHON_PY="$CPYTHON_ROOT/usr/bin/python3"
+
+if [ ! -x "$CPYTHON_LD" ] || [ ! -x "$CPYTHON_PY" ]; then
+    echo "python3: CPython runtime is unavailable under $CPYTHON_ROOT" >&2
+    exit 127
+fi
+
+export CPYTHON_ROOT
+export PYTHONHOME="$CPYTHON_ROOT/usr"
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export SSL_CERT_FILE="${SSL_CERT_FILE:-$CPYTHON_ROOT/etc/ssl/certs/ca-certificates.crt}"
+export TMPDIR="${TMPDIR:-/tmp/python}"
+export PYTHONUSERBASE="${PYTHONUSERBASE:-/persist/python/user}"
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/persist/python/pycache}"
+
+/bin/busybox mkdir -p "$TMPDIR" "$PYTHONUSERBASE" "$PYTHONPYCACHEPREFIX" 2>/dev/null || true
+CPYTHON_LIBRARY_PATH="$CPYTHON_ROOT/usr/lib:$CPYTHON_ROOT/lib"
+export LD_LIBRARY_PATH="$CPYTHON_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$CPYTHON_LD" --library-path "$CPYTHON_LIBRARY_PATH" "$CPYTHON_PY" "$@"

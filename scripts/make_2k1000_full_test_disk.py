@@ -34,9 +34,13 @@ TOOLS_TESTS = ("inet_test", "fs_test", "unix_test")
 BUSYBOX_APPLETS = (
     "awk",
     "basename",
+    "blkid",
+    "blockdev",
     "cat",
     "chmod",
     "cp",
+    "dd",
+    "df",
     "dirname",
     "false",
     "grep",
@@ -44,14 +48,21 @@ BUSYBOX_APPLETS = (
     "ls",
     "mkdir",
     "mkfs.vfat",
+    "mount",
     "mv",
     "printf",
     "rm",
     "sed",
+    "sha256sum",
     "sleep",
+    "stat",
+    "sync",
     "test",
+    "tr",
     "true",
+    "umount",
     "uname",
+    "wc",
 )
 MUSL_LINKS = (
     "ld-musl-loongarch-lp64d.so.1",
@@ -161,18 +172,20 @@ def build_tools_payload(
         shutil.copytree(cpython_common, runtime_dir, dirs_exist_ok=True, symlinks=True)
         if not (runtime_dir / "usr" / "bin" / "python3").is_file():
             fail(f"incomplete CPython runtime: {source_runtime_dir}")
-        launcher = runtime_dir / "python3-wrapper.sh"
+        launcher = staging / "usr" / "bin" / "python3"
         if not launcher.is_file():
-            fail(f"missing CPython launcher: {launcher}")
+            fail("tools root must provide usr/bin/python3 launcher")
         launcher.chmod(0o755)
         replace_symlink(
-            staging / "usr" / "bin" / "python3",
-            "/tools/tests/cpython/python3-wrapper.sh",
-        )
-        replace_symlink(
             staging / "usr" / "bin" / "python",
-            "/tools/tests/cpython/python3-wrapper.sh",
+            "python3",
         )
+
+    for command in ("curl", "apk", "persist-shell", "mango-apk-bootstrap"):
+        launcher = staging / "usr" / "bin" / command
+        if not launcher.is_file():
+            fail(f"tools root must provide usr/bin/{command} launcher")
+        launcher.chmod(0o755)
 
     for test_name in TOOLS_TESTS:
         source = user_bin_dir / test_name

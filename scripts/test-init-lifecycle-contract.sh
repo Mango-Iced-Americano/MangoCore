@@ -100,17 +100,37 @@ require 'self.0.lock().flush()' os/src/drivers/block/sata_blk.rs
 require 'if !read_only && !block_device.supports_reliable_flush()' os/src/fs/ext4_another/fs.rs
 require 'replace_symlink(staging / "sbin" / "init", "../bin/busybox")' scripts/make_2k1000_full_test_disk.py
 require '"^has_journal"' scripts/make_2k1000_full_test_disk.py
+require 'tools root must provide usr/bin/python3 launcher' scripts/make_2k1000_full_test_disk.py
+require 'tools root must provide usr/bin/{command} launcher' scripts/make_2k1000_full_test_disk.py
 require 'local_boot_kernel' scripts/make_2k1000_tools_partition.py
 require '::sysinit:/etc/init.d/rcS' user/tools/loongarch64/etc/inittab
 require '::askfirst:/bin/busybox sh -i' user/tools/loongarch64/etc/inittab
+require 'CPYTHON_ROOT="${CPYTHON_ROOT:-/tests/cpython}"' user/tools/loongarch64/usr/bin/python3
+require 'CURL_ROOT=/curl-runtime' user/tools/loongarch64/usr/bin/curl
+require 'root=/persist/apk-root' user/tools/loongarch64/usr/bin/apk
+require 'mango-apk-bootstrap' user/tools/loongarch64/usr/bin/persist-shell
+require 'mount -t ext4 /dev/sda4 /persist' user/tools/loongarch64/etc/init.d/rcS
+require 'P4 package state mounted at /persist' user/tools/loongarch64/etc/init.d/rcS
 require 'LOCAL_KERNEL = "/boot/kernel-A.ui"' scripts/configure_2k1000_local_boot.py
 require 'BOOTCMD = "run mango_local_boot; run mango_tftp_boot; run mango_bootcmd_legacy"' scripts/configure_2k1000_local_boot.py
 require '"mw.l ${loadaddr} 0 1;"' scripts/configure_2k1000_local_boot.py
 require 'console.command("setenv bootdelay 3")' scripts/configure_2k1000_local_boot.py
 require '"--install-ssd-kernel"' scripts/boot_2k1000_tftp.py
+require '"--monitor-only"' scripts/boot_2k1000_tftp.py
+require 'no U-Boot command will be sent automatically' scripts/boot_2k1000_tftp.py
+require 'console.monitor_existing_boot()' scripts/boot_2k1000_tftp.py
 require '"--ssd-backup-id"' scripts/boot_2k1000_tftp.py
 require '"--confirm-ssd-p3-start"' scripts/boot_2k1000_tftp.py
 require '"--verify-kernel"' scripts/write_2k1000_p3.py
 require 'P3 manifest kernel SHA-256 does not match --verify-kernel' scripts/write_2k1000_p3.py
+require 'P3 must be mounted read-only at /tools, /sdcard, or /' scripts/board/backup_2k1000_p3.sh
+require '440|660' scripts/board/backup_2k1000_p3.sh
+require 'P3_BACKUP_SOURCE_READY' scripts/board/prepare_2k1000_p3_backup.sh
+require 'p3_backup_prepare_readonly_source' scripts/backup_2k1000_p3.py
+require 'ensure_interface("en8", args.host_ip, "255.255.255.0", True)' scripts/backup_2k1000_p3.py
+require '(args.run_dir / "raw").mkdir(exist_ok=True)' scripts/backup_2k1000_p3.py
+require 'persistent P3 image' scripts/backup_2k1000_p3.py
+require 'wrapped.encode("utf-8") + b' scripts/backup_2k1000_p3.py
+require 'P4 package state is mounted by P3 rcS' os/make/la64.mk
 
 printf 'PASS: init lifecycle contract\n'

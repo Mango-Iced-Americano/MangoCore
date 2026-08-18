@@ -1,0 +1,24 @@
+#!/bin/sh
+# Enter the installed Alpine userspace only after a valid P4 package root exists.
+set -eu
+
+root=/persist/apk-root
+if [ ! -f /persist/MANGO_STATE.txt ] || [ ! -x "$root/bin/sh" ]; then
+    echo "persist-shell: run mango-apk-bootstrap after P4 is mounted" >&2
+    exit 1
+fi
+
+for path in dev proc sys run tmp; do
+    /bin/busybox mkdir -p "$root/$path"
+done
+for path in dev proc sys run tmp; do
+    if ! /bin/busybox mount | /bin/busybox grep -q " $root/$path "; then
+        /bin/busybox mount --bind "/$path" "$root/$path" || true
+    fi
+done
+
+if [ -r /proc/net/resolv.conf ]; then
+    /bin/busybox cp /proc/net/resolv.conf "$root/etc/resolv.conf"
+    /bin/busybox chmod 0644 "$root/etc/resolv.conf"
+fi
+exec /bin/busybox chroot "$root" /bin/sh -l

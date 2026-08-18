@@ -1,0 +1,14 @@
+#!/bin/sh
+# curl is a glibc binary with a private, verified runtime closure in P3.
+set -eu
+
+CURL_ROOT=/curl-runtime
+CURL_LD="$CURL_ROOT/lib64/ld-linux-loongarch-lp64d.so.1"
+CURL_BIN="$CURL_ROOT/bin/curl"
+if [ ! -x "$CURL_LD" ] || [ ! -x "$CURL_BIN" ]; then
+    echo "curl: runtime is unavailable under $CURL_ROOT" >&2
+    exit 127
+fi
+
+export SSL_CERT_FILE="${SSL_CERT_FILE:-$CURL_ROOT/etc/ssl/certs/ca-certificates.crt}"
+exec "$CURL_LD" --library-path "$CURL_ROOT/lib64" "$CURL_BIN" "$@"

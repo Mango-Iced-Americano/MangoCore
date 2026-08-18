@@ -11,11 +11,14 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
+
+from boot_2k1000_tftp import ensure_interface
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_SCRIPT = ROOT / "scripts" / "board" / "backup_2k1000_p3.sh"
-HARNESS = ROOT / "scripts" / "kernel_perf.py"
+PREP_BOARD_SCRIPT = ROOT / "scripts" / "board" / "prepare_2k1000_p3_backup.sh"
 EXPECTED_P3_START = 0xA80800
 BACKUP_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -34,30 +37,59 @@ def http_server_command(directory: Path, host: str, port: int) -> list[str]:
 
 
 def run_board(args: argparse.Namespace, test: str, command: str, timeout: int) -> None:
-    invocation = [
-        sys.executable,
-        str(HARNESS),
-        "board",
-        "--run-dir",
-        str(args.run_dir),
-        "--serial",
-        args.serial,
-        "--baud",
-        str(args.baud),
-        "--test",
-        test,
-        "--build-mode",
-        args.build_mode,
-        "--cache-state",
-        "storage-backup",
-        "--timeout",
-        str(timeout),
-        "--command",
-        command,
-    ]
-    if args.quiet:
-        invocation.append("--quiet")
-    subprocess.run(invocation, cwd=ROOT, check=True)
+    """Run one bounded shell transaction on the board console.
+
+    The persistent P3 image's UART TTY accepts CR as the reliable line
+    terminator; the generic performance harness deliberately uses LF for
+    QEMU compatibility and therefore cannot drive this recovery shell.
+    """
+    try:
+        import serial
+    except ImportError as error:
+        raise SystemExit("pyserial is required") from error
+
+    nonce = uuid.uuid4().hex[:8]
+    end = f"__MANGO_BACKUP_{test}_RC="
+    wrapped = f"{command}; echo {end}$?"
+    if len(wrapped.encode("utf-8")) > 2048:
+        raise SystemExit(f"board command is too long: {test}")
+
+    log_path = args.run_dir / "raw" / f"{test}-{nonce}.log"
+    deadline = time.monotonic() + timeout
+    pending = b""
+    with serial.Serial(args.serial, args.baud, timeout=0.1, write_timeout=2) as port, log_path.open(
+        "wb"
+    ) as log:
+        port.dtr = False
+        port.rts = False
+        port.reset_input_buffer()
+        for byte in wrapped.encode("utf-8") + b"\r":
+            port.write(bytes((byte,)))
+            port.flush()
+            # 2K1000's current UART path can only sustain interactive-speed
+            # input while GMAC polling is live.  Faster input corrupts shell
+            # tokens and is never treated as a successful transaction.
+            time.sleep(0.2)
+        while time.monotonic() < deadline:
+            data = port.read(port.in_waiting or 1)
+            if not data:
+                continue
+            log.write(data)
+            log.flush()
+            pending += data
+            while b"\n" in pending:
+                raw, pending = pending.split(b"\n", 1)
+                line = raw.decode("utf-8", errors="replace").rstrip("\r")
+                if not args.quiet:
+                    print(line, flush=True)
+                match = re.search(re.escape(end) + r"(-?\d+)", line)
+                if match:
+                    rc = int(match.group(1))
+                    if rc:
+                        raise SystemExit(f"board command failed: {test} rc={rc}; log={log_path}")
+                    print(f"[board] {test}: PASS", flush=True)
+                    return
+    raise SystemExit(f"board command timed out: {test}; log={log_path}")
 
 
 def main() -> int:
@@ -92,12 +124,20 @@ def main() -> int:
         parser.error("--backup-id contains unsafe characters")
     if not args.run_dir.is_dir():
         parser.error(f"run directory does not exist: {args.run_dir}")
-    if not BOARD_SCRIPT.is_file():
-        parser.error(f"board backup script is missing: {BOARD_SCRIPT}")
+    # kernel_perf board records each serial transaction below raw/.
+    (args.run_dir / "raw").mkdir(exist_ok=True)
+    for script in (BOARD_SCRIPT, PREP_BOARD_SCRIPT):
+        if not script.is_file():
+            parser.error(f"board backup script is missing: {script}")
 
     script_sha = hashlib.sha256(BOARD_SCRIPT.read_bytes()).hexdigest()
     url = f"http://{args.host_ip}:{args.port}/{BOARD_SCRIPT.name}"
-    target = f"/scratch/{BOARD_SCRIPT.name}"
+    prep_url = f"http://{args.host_ip}:{args.port}/{PREP_BOARD_SCRIPT.name}"
+    target = f"/persist/.{BOARD_SCRIPT.name}"
+    prepare_target = "/tmp/mango-p3-backup-prepare.sh"
+    prepare = "/bin/busybox wget -O %s %s&&/bin/sh %s" % tuple(
+        map(shlex.quote, (prepare_target, prep_url, prepare_target))
+    )
     download = "/bin/busybox wget -O %s %s" % tuple(
         map(shlex.quote, (target, url))
     )
@@ -106,6 +146,11 @@ def main() -> int:
         shlex.quote(target),
     )
     phases = (
+        (
+            "p3_backup_prepare_readonly_source",
+            prepare,
+            120,
+        ),
         (
             "p3_backup_deploy",
             download,
@@ -135,6 +180,11 @@ def main() -> int:
             print(f"{name} timeout={timeout} command_bytes={len(command.encode())}")
             print(command)
         return 0
+
+    # The backup script is fetched over the board-only Ethernet link.  Keep
+    # this setup in the same guarded entrypoint as the serial operation so a
+    # stale developer LAN address cannot turn into a confusing HTTP failure.
+    ensure_interface("en8", args.host_ip, "255.255.255.0", True)
 
     server = subprocess.Popen(
         http_server_command(BOARD_SCRIPT.parent, args.host_ip, args.port),

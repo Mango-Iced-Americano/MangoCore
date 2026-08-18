@@ -802,6 +802,48 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
     print("\n=== MangoCore 2K1000LA 一键上板向导 ===")
     print("默认流程：编译镜像 → 配置网络 → 发布 TFTP → 检测串口 → U-Boot 校验。\n")
 
+    default_mode = (
+        "monitor"
+        if args.monitor_only
+        else "ssd-install"
+        if args.install_ssd_kernel
+        else "prepare"
+        if args.prepare_only
+        else "transfer"
+        if args.no_boot
+        else "boot"
+    )
+    mode = prompt_choice(
+        "执行模式",
+        [
+            ("boot", "传输并启动"),
+            ("monitor", "仅打开串口（SSD 自动启动，可交互）"),
+            ("transfer", "只传输并校验"),
+            ("prepare", "只准备主机"),
+            ("ssd-install", "备份门禁后写入 SSD A 槽"),
+        ],
+        default_mode,
+    )
+    args.monitor_only = mode == "monitor"
+    args.prepare_only = mode == "prepare"
+    args.no_boot = mode == "transfer"
+    args.install_ssd_kernel = mode == "ssd-install"
+
+    if args.monitor_only:
+        args.build_profile = None
+        args.image = None
+        args.serial = prompt_serial(args.serial)
+        args.takeover_screen = prompt_yes_no(
+            "若串口被 screen 占用，自动接管", args.takeover_screen
+        )
+        print("\n配置摘要：")
+        print("  编译/网络/TFTP：跳过")
+        print(f"  串口：{args.serial}")
+        print("  模式：monitor（不自动发命令，手工输入正常转发）")
+        if not prompt_yes_no("确认执行", True):
+            raise BootError("用户取消操作")
+        return args
+
     source_default = "build" if args.build_profile or args.image is None else "existing"
     source = prompt_choice(
         "镜像来源",
@@ -834,28 +876,6 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
     )
     args.serial = prompt_serial(args.serial)
 
-    default_mode = (
-        "ssd-install"
-        if args.install_ssd_kernel
-        else "prepare"
-        if args.prepare_only
-        else "transfer"
-        if args.no_boot
-        else "boot"
-    )
-    mode = prompt_choice(
-        "执行模式",
-        [
-            ("boot", "传输并启动"),
-            ("transfer", "只传输并校验"),
-            ("prepare", "只准备主机"),
-            ("ssd-install", "备份门禁后写入 SSD A 槽"),
-        ],
-        default_mode,
-    )
-    args.prepare_only = mode == "prepare"
-    args.no_boot = mode == "transfer"
-    args.install_ssd_kernel = mode == "ssd-install"
     if args.install_ssd_kernel:
         print("警告：该模式会重建并覆盖 SSD 的完整 768 MiB P3 根分区。")
         args.ssd_backup_id = prompt_text("P4 中已完成的 P3 备份 ID")
@@ -1075,6 +1095,20 @@ class UBootConsole:
             flush=True,
         )
 
+        self._stream_console()
+
+    def monitor_existing_boot(self) -> None:
+        print(
+            "[console] serial-only SSD boot monitor; press board RESET if needed; "
+            "no U-Boot command will be sent automatically; keyboard input is "
+            "forwarded; Ctrl-] q -> close monitor, "
+            "Ctrl-] ? -> help",
+            flush=True,
+        )
+        self._stream_console()
+
+    def _stream_console(self) -> None:
+
         try:
             stdin_fd: Optional[int] = sys.stdin.fileno()
         except (OSError, ValueError):
@@ -1182,6 +1216,17 @@ def boot(args, serial_module, tftp_image: Path, serial_path: str) -> None:
         console.close()
 
 
+def monitor_ssd_boot(args, serial_module, serial_path: str) -> None:
+    release_matching_screen(serial_path, args.takeover_screen)
+    console = UBootConsole(serial_module, serial_path, args.log, args.baud)
+    try:
+        console.monitor_existing_boot()
+    except KeyboardInterrupt:
+        print("\n[console] monitor closed; board continues running")
+    finally:
+        console.close()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1241,6 +1286,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-boot", action="store_true")
     parser.add_argument(
+        "--monitor-only",
+        action="store_true",
+        help=(
+            "only open the serial monitor for SSD autoboot; do not build, "
+            "configure networking/TFTP, or automatically send board commands; "
+            "manual keyboard input is forwarded"
+        ),
+    )
+    parser.add_argument(
         "--install-ssd-kernel",
         action="store_true",
         help=(
@@ -1287,8 +1341,34 @@ def main() -> None:
                 "pass --non-interactive with --image"
             )
         args = interactive_config(args)
-    elif args.image is None and args.build_profile is None:
+    elif not args.monitor_only and args.image is None and args.build_profile is None:
         raise BootError("--image or --build-profile is required with --non-interactive")
+
+    if args.monitor_only:
+        if any(
+            (
+                args.image is not None,
+                args.build_profile is not None,
+                args.prepare_only,
+                args.no_boot,
+                args.install_ssd_kernel,
+            )
+        ):
+            raise BootError(
+                "--monitor-only cannot be combined with image/build/prepare/transfer/install options"
+            )
+        if args.baud <= 0:
+            raise BootError("baud must be positive")
+        serial_path = detect_serial(args.serial)
+        print(f"[host] serial device: {serial_path}")
+        try:
+            import serial
+        except ImportError as error:
+            raise BootError(
+                "pyserial is required: python3 -m pip install --user pyserial"
+            ) from error
+        monitor_ssd_boot(args, serial, serial_path)
+        return
 
     validate_cli_inputs(args)
     args.tftp_root = validate_tftp_root(args.tftp_root)

@@ -8,4 +8,28 @@ export SHELL=/bin/sh
 /bin/busybox chmod 1777 /tmp /var/tmp /dev/shm 2>/dev/null || true
 /bin/busybox hostname -F /etc/hostname 2>/dev/null || true
 
+# P4 holds package state and user-installed software.  It is deliberately not
+# the boot root: a missing/corrupt package tree must not prevent P3 recovery.
+/bin/busybox mkdir -p /persist
+if /bin/busybox mount -t ext4 /dev/sda4 /persist 2>/dev/null; then
+    if /bin/busybox grep -q '^MangoCore 2K1000LA persistent state partition$' /persist/MANGO_STATE.txt 2>/dev/null; then
+        /bin/busybox mkdir -p /persist/apk-root/lib/apk/db /persist/apk-root/etc/apk/keys \
+            /persist/apk-root/var/cache/apk /persist/apk-state /persist/python/user \
+            /persist/python/pycache /persist/python/tmp
+        if [ ! -f /persist/apk-root/etc/apk/repositories ]; then
+            /bin/busybox cp /etc/apk/repositories /persist/apk-root/etc/apk/repositories
+        fi
+        if [ -d /etc/apk/keys ]; then
+            /bin/busybox cp -a /etc/apk/keys/. /persist/apk-root/etc/apk/keys/
+        fi
+        [ -e /persist/apk-root/etc/apk/world ] || : > /persist/apk-root/etc/apk/world
+        echo "[p3-init] P4 package state mounted at /persist"
+    else
+        echo "[p3-init] P4 marker mismatch; leaving /persist unavailable"
+        /bin/busybox umount /persist 2>/dev/null || true
+    fi
+else
+    echo "[p3-init] P4 unavailable; continuing with P3 rescue root"
+fi
+
 echo "[p3-init] MangoCore persistent root services ready"

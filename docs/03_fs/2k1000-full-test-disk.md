@@ -227,6 +227,44 @@ python3 scripts/configure_2k1000_local_boot.py \
 本地与 TFTP 命令都先用 `mw.l ${loadaddr} 0 1` 清除旧 uImage magic；加载失败时后续
 `bootm` 会 fail closed，不能误启动内存中残留的上一版内核。
 
+只观察 SSD 自动启动、不自动触碰网络或 U-Boot 时，使用向导中的
+`monitor（仅打开串口，可交互）`，或非交互命令：
+
+```bash
+python3 scripts/boot_2k1000_tftp.py \
+  --non-interactive \
+  --monitor-only \
+  --serial /dev/cu.wchusbserial1120
+```
+
+该模式不要求镜像参数，不编译、不配置网卡、不启动 TFTP，也不会自动发送回车、`c` 或
+U-Boot 命令；它只打开串口并记录/显示开发板已有输出。用户在 monitor 中的键盘输入仍会
+原样转发给开发板，便于系统启动后操作 shell。启动监听后按板上 RESET，即可观察
+U-Boot 倒计时、本地 P3 `/boot/kernel-A.ui` 加载和后续持久根启动全过程。
+
+### P3 用户态入口与 P4 APK 状态
+
+mainline P3 是根文件系统，故全局命令不能再引用 QEMU 双盘布局中的 `/tools`：
+
+- `/usr/bin/python3` 通过 `/tests/cpython` 下的私有 musl loader 启动 CPython；`python`
+  指向该 launcher；
+- `/usr/bin/curl` 通过 `/curl-runtime` 下的私有 glibc loader 启动 curl，并设置 CA bundle；
+- `/usr/bin/apk` 只管理 `/persist/apk-root`，P3 保持可启动的救援根；
+- `/usr/bin/mango-apk-bootstrap` 是首次联网显式执行的最小 Alpine 安装，不在 rcS 自动运行；
+- `/usr/bin/persist-shell` 在安装 `busybox`/`musl` 后进入 P4 Alpine chroot。
+
+P3 rcS 会尝试把 `/dev/sda4` 挂载到 `/persist`，并严格核验 `/persist/MANGO_STATE.txt`。
+挂载失败、标记不匹配或离线时只降级为 P3 shell；它不会阻止本地启动，也不会清空已有 APK
+数据库或 `world`。首次成功启动并获得网络后执行：
+
+```sh
+mango-apk-bootstrap
+persist-shell
+apk add curl python3
+```
+
+此后 P4 的 `/persist/apk-root` 保存软件包与数据库，P3 的 kernel A 槽更新不会覆盖它。
+
 2026-07-11 已在 `TS32GMTS400` 实体 SSD 上完成 25 块网络写入，全部 `12584960` 个 sector 均通过逐块读回 CRC；U-Boot 可读取三个分区，MangoCore 实板启动后成功完成上述三分区识别、只读挂载及 `/tools`、`/musl`、`/glibc` bind。原始 AHCI 写入/flush、内核 P2 FAT32 文件探针和 staged 用户态 `/scratch` 冒烟测试均已通过；正式 `kernel-2k1000-run.ui` 仍保持全盘只读。
 
 ## 6. 内核 AHCI 写入探针

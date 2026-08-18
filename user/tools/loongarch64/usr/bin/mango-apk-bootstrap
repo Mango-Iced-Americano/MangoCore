@@ -1,0 +1,6 @@
+#!/bin/sh
+# Explicitly provision the smallest usable Alpine root.  This is intentionally
+# not run from rcS: an offline boot must still reach the P3 rescue shell.
+set -eu
+
+exec /usr/bin/apk add busybox musl ca-certificates "$@"

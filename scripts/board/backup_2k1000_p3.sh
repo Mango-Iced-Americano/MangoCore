@@ -18,10 +18,15 @@ CHUNK_SECTORS=0x20000
 CHUNK_COUNT=12
 MIN_FREE_KIB=921600
 BACKUP_ROOT=/persist/backups
+BUSYBOX=/bin/busybox
 
 fail() {
     echo "P3_BACKUP_ERROR $*" >&2
     exit 1
+}
+
+bb() {
+    "$BUSYBOX" "$@"
 }
 
 backup_id=${1:-}
@@ -31,42 +36,42 @@ case "$backup_id" in
         ;;
 esac
 
-command -v blockdev >/dev/null 2>&1 || fail "blockdev is unavailable"
-command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is unavailable"
-command -v dd >/dev/null 2>&1 || fail "dd is unavailable"
-command -v blkid >/dev/null 2>&1 || fail "blkid is unavailable"
+[ -x "$BUSYBOX" ] || fail "BusyBox is unavailable at $BUSYBOX"
+for applet in blockdev sha256sum dd blkid stat df awk wc tr sync; do
+    "$BUSYBOX" "$applet" --help >/dev/null 2>&1 || fail "BusyBox applet is unavailable: $applet"
+done
 
-grep -Eq '^/tools[[:space:]]+/tools[[:space:]]+ext4[[:space:]]+ro([,[:space:]])' /proc/mounts \
-    || fail "/tools is not the read-only P3 mount"
-grep -Eq '^/persist[[:space:]]+/persist[[:space:]]+ext4[[:space:]]+rw([,[:space:]])' /proc/mounts \
+p3_mount=$(bb awk '($1 == "/dev/sda3" || ($1 == "/sdcard" && $2 == "/sdcard")) && ($2 == "/tools" || $2 == "/" || $2 == "/sdcard") && $3 == "ext4" && $4 ~ /(^|,)ro(,|$)/ { print $2; exit }' /proc/mounts)
+[ -n "$p3_mount" ] || fail "P3 must be mounted read-only at /tools, /sdcard, or /"
+bb grep -Eq '^[^[:space:]]+[[:space:]]+/persist[[:space:]]+ext4[[:space:]]+rw([,[:space:]])' /proc/mounts \
     || fail "/persist is not the read-write P4 mount"
 [ -r "$P3_DEVICE" ] || fail "$P3_DEVICE is not readable"
 [ -r "$P4_DEVICE" ] || fail "$P4_DEVICE is not readable"
-p3_mode=$(stat -c '%a' "$P3_DEVICE")
-p4_mode=$(stat -c '%a' "$P4_DEVICE")
-[ "$p3_mode" = "440" ] || fail "unexpected P3 device mode: $p3_mode"
-[ "$p4_mode" = "440" ] || fail "unexpected P4 device mode: $p4_mode"
+p3_mode=$(bb stat -c '%a' "$P3_DEVICE")
+p4_mode=$(bb stat -c '%a' "$P4_DEVICE")
+case "$p3_mode" in 440|660) ;; *) fail "unexpected P3 device mode: $p3_mode" ;; esac
+case "$p4_mode" in 440|660) ;; *) fail "unexpected P4 device mode: $p4_mode" ;; esac
 
-actual_bytes=$(blockdev --getsize64 "$P3_DEVICE")
+actual_bytes=$(bb blockdev --getsize64 "$P3_DEVICE")
 [ "$actual_bytes" = "$P3_BYTES" ] \
     || fail "unexpected P3 size: $actual_bytes (expected $P3_BYTES)"
-p4_bytes=$(blockdev --getsize64 "$P4_DEVICE")
+p4_bytes=$(bb blockdev --getsize64 "$P4_DEVICE")
 [ "$p4_bytes" = "$P4_BYTES" ] \
     || fail "unexpected P4 size: $p4_bytes (expected $P4_BYTES)"
 
-p4_blkid=$(blkid "$P4_DEVICE")
+p4_blkid=$(bb blkid "$P4_DEVICE")
 case "$p4_blkid" in *' TYPE="ext4"'*) ;; *) fail "P4 ext4 type is missing" ;; esac
 case "$p4_blkid" in *" UUID=\"$P4_UUID\""*) ;; *) fail "P4 UUID mismatch" ;; esac
 case "$p4_blkid" in *" LABEL=\"$P4_LABEL\""*) ;; *) fail "P4 label mismatch" ;; esac
-free_kib=$(df -Pk /persist | awk 'NR == 2 { print $4 }')
+free_kib=$(bb df -Pk /persist | bb awk 'NR == 2 { print $4 }')
 case "$free_kib" in ""|*[!0-9]*) fail "cannot determine P4 free space" ;; esac
 [ "$free_kib" -ge "$MIN_FREE_KIB" ] \
     || fail "insufficient P4 space: ${free_kib} KiB free, need ${MIN_FREE_KIB} KiB"
 
-mkdir -p "$BACKUP_ROOT"
+bb mkdir -p "$BACKUP_ROOT"
 backup_dir="$BACKUP_ROOT/$backup_id"
 [ ! -e "$backup_dir" ] || fail "destination already exists: $backup_dir"
-mkdir "$backup_dir"
+bb mkdir "$backup_dir"
 
 manifest_tmp="$backup_dir/MANIFEST.txt.tmp"
 manifest="$backup_dir/MANIFEST.txt"
@@ -91,36 +96,36 @@ while [ "$i" -lt "$CHUNK_COUNT" ]; do
     start_lba=$((11012096 + i * 131072))
 
     echo "P3_BACKUP_CHUNK_BEGIN index=$index start_lba=$start_lba"
-    dd if="$P3_DEVICE" of="$path" bs=1048576 skip="$skip_mib" count="$CHUNK_MIB" \
+    bb dd if="$P3_DEVICE" of="$path" bs=1048576 skip="$skip_mib" count="$CHUNK_MIB" \
         2> "$backup_dir/p3-${index}.dd.log"
-    copied_bytes=$(wc -c < "$path" | tr -d '[:space:]')
+    copied_bytes=$(bb wc -c < "$path" | bb tr -d '[:space:]')
     [ "$copied_bytes" = "$CHUNK_BYTES" ] \
         || fail "short backup chunk $index: $copied_bytes bytes"
 
-    destination_sha=$(sha256sum "$path" | awk '{ print $1 }')
-    source_sha=$(dd if="$P3_DEVICE" bs=1048576 skip="$skip_mib" count="$CHUNK_MIB" \
-        2>/dev/null | sha256sum | awk '{ print $1 }')
+    destination_sha=$(bb sha256sum "$path" | bb awk '{ print $1 }')
+    source_sha=$(bb dd if="$P3_DEVICE" bs=1048576 skip="$skip_mib" count="$CHUNK_MIB" \
+        2>/dev/null | bb sha256sum | bb awk '{ print $1 }')
     [ "$source_sha" = "$destination_sha" ] \
         || fail "readback SHA-256 mismatch for chunk $index"
 
     printf 'chunk=%s start_lba=%s sectors=%s bytes=%s sha256=%s file=%s\n' \
         "$index" "$start_lba" 131072 "$CHUNK_BYTES" "$destination_sha" "$file" \
         >> "$manifest_tmp"
-    sync
+    bb sync
     echo "P3_BACKUP_CHUNK_OK index=$index bytes=$copied_bytes sha256=$destination_sha"
     i=$((i + 1))
 done
 
-mv "$manifest_tmp" "$manifest"
-manifest_sha=$(sha256sum "$manifest" | awk '{ print $1 }')
+bb mv "$manifest_tmp" "$manifest"
+manifest_sha=$(bb sha256sum "$manifest" | bb awk '{ print $1 }')
 {
     echo "backup_id=$backup_id"
     echo "manifest_sha256=$manifest_sha"
     echo "source_bytes=$P3_BYTES"
     echo "chunk_count=$CHUNK_COUNT"
 } > "$backup_dir/COMPLETE.tmp"
-sync
-mv "$backup_dir/COMPLETE.tmp" "$backup_dir/COMPLETE"
-sync
+bb sync
+bb mv "$backup_dir/COMPLETE.tmp" "$backup_dir/COMPLETE"
+bb sync
 
 echo "P3_BACKUP_COMPLETE id=$backup_id dir=$backup_dir manifest_sha256=$manifest_sha"

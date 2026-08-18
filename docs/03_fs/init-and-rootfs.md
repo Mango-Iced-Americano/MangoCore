@@ -91,6 +91,10 @@ P3 镜像生成时必须提供真实的 PID1 合同，而不能只依赖 initram
 - `/boot/kernel-A.ui` 是本地启动 A 槽，TFTP 镜像仍是可独立替换的调试路径；
 - P3 必须以 `^has_journal` 创建；当前 another_ext4 不执行 journal replay，不能把宿主
   默认开启 journal 的 ext4 镜像直接用于掉电/硬复位后的持久根；
+- P3 的 `/usr/bin/python3`、`python` 与 `curl` 是根感知 launcher：CPython 运行时在
+  `/tests/cpython`，curl 的 glibc closure 在 `/curl-runtime`，不得再引用旧的 `/tools` 挂载；
+- rcS 尝试把固定 P4 `/dev/sda4` 挂载到 `/persist`，核验 `MANGO_STATE.txt` 后只初始化
+  缺失的 APK 目录、仓库与 keys；不会在启动期联网装包或重写已有 `world`；
 - P3 写入前必须存在完整块级备份，写入后必须从 SSD 读回验证，再保存 U-Boot 环境。
 
 这种布局使“默认持久根”和“可快速录入新内核”互不冲突：正常启动读取 P3 A 槽，开发时在

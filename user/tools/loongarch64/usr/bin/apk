@@ -1,0 +1,23 @@
+#!/bin/sh
+# Keep package state in P4 while P3 remains the bootable rescue root.
+set -eu
+
+root=/persist/apk-root
+apk=/bin/apk.static
+
+if [ ! -f /persist/MANGO_STATE.txt ]; then
+    echo "apk: P4 is not mounted; wait for rcS or check /dev/sda4" >&2
+    exit 1
+fi
+if [ ! -x "$apk" ]; then
+    echo "apk: missing static package manager $apk" >&2
+    exit 127
+fi
+
+exec "$apk" \
+    --root "$root" \
+    --cache-dir "$root/var/cache/apk" \
+    --keys-dir "$root/etc/apk/keys" \
+    --repositories-file "$root/etc/apk/repositories" \
+    --initdb \
+    "$@"
