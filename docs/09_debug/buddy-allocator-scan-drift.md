@@ -3,11 +3,18 @@ title: "堆分配器 buddy merge 线性扫描导致的渐进性能退化"
 category: debug
 status: verified
 author: MangoCore Team
-last_update: 2026-07-18
-tags: [buddy-allocator, heap, free-list, bitmap, drift, performance, lmbench, O(n)-scan]
+last_update: 2026-08-18
+tags: [buddy-allocator, heap, free-list, bitmap, metadata-heap, slab, drift, performance, lmbench, O(n)-scan]
 ---
 
 # 堆分配器 buddy merge 线性扫描导致的渐进性能退化
+
+> **⚠️ 现状更新（2026-08-18）**：本文档描述的是**历史实现（free-list bitmap guard 版
+> `buddy_system_allocator`）** 的调试过程与修复。当前内核已改用更贴近 Linux 的
+> **metadata buddy + slab 分配器**（`dependency/buddy_system_allocator` 的
+> `MetadataHeap`，`os/Cargo.toml` 启用 `metadata_heap` feature），线性扫描
+> `for block in free_list.iter_mut()` 已不存在，**bitmap guard 方案已成为历史、不再适用**。
+> 现有实现下的复测数据见文末「9. 现状复核（2026-08-18）：metadata buddy + slab」。
 
 ## 1. 问题现象
 
@@ -382,3 +389,67 @@ scripts/analyze_drift.py                           # 自动分析脚本
 | W1 | 60,273,820 | 3,569 | 16,889× |
 | W2 | 41,122,853 | 4,986 | 8,248× |
 | W3 | 70,421,086 | 386 | **182,438×** |
+
+## 9. 现状复核（2026-08-18）：metadata buddy + slab
+
+### 9.1 当前分配器与复测方式
+
+当前内核堆分配器已迁移为 `buddy_system_allocator` crate 的 **`MetadataHeap`**
+（`os/src/mm/heap_allocator.rs`，`os/Cargo.toml` 启用 `metadata_heap` feature），
+采用更贴近 Linux 的 metadata buddy 结构 + slab 缓存，不再保留 free-list 上的 O(n)
+线性扫描，`bitmap guard` 方案（第 4 章）已随旧实现一并移除。
+
+**复测 workload 与原报告保持一致**（`user/src/bin/test_runner/instrumentation/drift.rs`）：
+
+```
+mode=drift_window
+drift_windows=4
+drift_pre_mask=0x003      # basic + busybox pre-workload
+drift_measure=full        # cd /musl && sh lmbench_testcode.sh
+drift_libc=musl           # 与原报告 /musl 对齐
+diag=1
+```
+
+复测时发现 `test_runner/config/parse.rs` 只解析了 `drift_pre_mask`，未解析
+`drift_windows` / `drift_measure`（始终用默认 6 / null），已补上两行解析，drift 全量
+测量能力恢复正常。复测运行：`rv64-derived-comp`，`CONF_BLK_MODE=virt` 注入
+`os_test.conf` 到 `build/development/rv64/sdcard-rv-derived.img`，QEMU 串口日志归档于
+`docs/Work_Log/evidence/2026-08-18/drift-lmbench-rv64-8window.log`。
+
+### 9.2 复测数据（rv64，basic+busybox pre-workload，全量 lmbench，4 窗口）
+
+**musl（与原报告 `/musl` 直接对齐）：**
+
+| 测试项 (µs) | W0 | W1 | W2 | W3 | W0→W3 趋势 |
+|-------------|-----|-----|-----|-----|-----------|
+| Simple open/close | 117.62 | 127.95 | 118.61 | 125.98 | ±噪声，无单调退化 |
+| Process fork+exit | 4,140 | 4,170 | 4,167 | 4,111 | **基本持平 / 略降** |
+| Simple syscall (null) | 20.05 | 19.82 | 19.94 | 19.92 | 无退化 |
+| Simple stat | 92.71 | 105.64 | 93.78 | 93.20 | ±噪声，无单调退化 |
+| Simple read | 27.29 | 27.21 | 27.22 | 29.25 | 无退化 |
+| Simple write | 20.38 | 20.34 | 20.46 | 22.43 | 无退化 |
+| Pipe latency | 629.84 | 604.94 | 599.99 | 612.95 | 无退化 |
+| Process fork+execve | 4,349 | 4,538 | 4,501 | 4,559 | 无退化 |
+
+**glibc（同 workload 补充采集）：**
+
+| 测试项 (µs) | W0 | W1 | W2 | W3 |
+|-------------|-----|-----|-----|-----|
+| Simple open/close | 115.98 | 127.84 | 122.85 | 116.07 |
+| Process fork+exit | 6,183 | 6,070 | 6,217 | 6,029 |
+| Simple syscall (null) | 19.89 | 19.84 | 20.12 | 19.94 |
+| Simple stat | 92.03 | 99.58 | 93.94 | 91.16 |
+
+### 9.3 与原报告（bitmap guard 版修复后）对比
+
+| 测试项 (µs) | 原报告修复后 W0→W3 | metadata buddy+slab W0→W3 | 结论 |
+|-------------|--------------------|--------------------------|------|
+| Simple open/close | 263→265 | 117.6→126.0 | **约快 2.1–2.2×**，无退化 |
+| Process fork+exit | 6,891→7,187 | 4,140→4,111 | **约快 1.7×**，无退化 |
+| null syscall | 36–38 | ~19.8–20.1 | **约快 1.8–1.9×** |
+| Simple stat | 231→253 | 92.7→93.2 | **约快 2.5×**，无退化 |
+
+**结论：** metadata buddy + slab 实现下，同一 workload（basic+busybox pre + 全量 lmbench，
+4 窗口）的四类关键指标不仅**没有任何窗口间渐进退化**（W0→W3 均稳定在噪声范围内），
+且绝对性能相比当年 bitmap guard 修复后数据全面提升约 1.7–2.5×。原报告的
+「free-list 线性扫描导致的渐进退化」场景在当前分配器上已不复存在。
