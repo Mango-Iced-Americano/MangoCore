@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -147,22 +148,125 @@ def _stop_autoboot(ser, wait=45):
     drain(ser, quiet=0.3)
 
 
-def _ensure_network(ser):
+# Network auto-detection helpers.
+#
+# The laptop may move between networks, so the fixed 192.168.200.x default
+# does not always match. Resolution order (see resolve_net):
+#   1. explicit --board-ip / --server-ip flags
+#   2. --auto-net: board ipaddr read from U-Boot, server ip from the host
+#      ethernet NIC that actually has link carrier
+#   3. module defaults (backwards compatible)
+
+# Host NICs that are never the direct board link.
+_NIC_SKIP_PREFIXES = ("lo", "wlan", "wl", "docker", "tailscale", "veth",
+                      "br-", "virbr", "vmbr", "tun", "tap", "wg")
+
+
+def _host_link_ip():
+    """Return (iface, ipv4) of the first UP ethernet NIC with carrier.
+
+    Scans `ip -br link` for a NIC with LOWER_UP carrier, then reads its
+    IPv4 from `ip -o -4 addr`. Returns None when nothing suitable exists
+    (e.g. cable unplugged or NIC unconfigured).
+    """
+    try:
+        links = subprocess.check_output(
+            ["ip", "-br", "link", "show", "up"], text=True).splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    candidates = []
+    for line in links:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        iface = parts[0].rstrip(":")
+        if iface.startswith(_NIC_SKIP_PREFIXES):
+            continue
+        flags = " ".join(parts[1:])
+        # LOWER_UP / UP both appear with carrier on modern iproute2.
+        if "LOWER_UP" not in flags and "UP" not in flags:
+            continue
+        candidates.append(iface)
+    if not candidates:
+        return None
+    try:
+        addrs = subprocess.check_output(
+            ["ip", "-o", "-4", "addr", "show", "up"], text=True).splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    for line in addrs:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        iface = parts[1]
+        if iface not in candidates:
+            continue
+        ip = parts[3].split("/")[0]
+        if re.match(r"^(\d{1,3}\.){3}\d{1,3}$", ip):
+            return iface, ip
+    return None
+
+
+def _board_ipaddr(ser):
+    """Read the board's current `ipaddr` env var via serial (or None)."""
+    out = send_cmd(ser, "printenv ipaddr", wait=0.5, echo=False)
+    m = re.search(rb"ipaddr=(\d{1,3}(?:\.\d{1,3}){3})", out)
+    return m.group(1).decode() if m else None
+
+
+def _same_subnet(a, b):
+    """/24-subnet comparison for the typical direct-link setup."""
+    return a.split(".")[:3] == b.split(".")[:3]
+
+
+def resolve_net(args, ser=None):
+    """Resolve (board_ip, server_ip) for a TFTP command.
+
+    Explicit flags win; then --auto-net probes the board over serial and
+    the host NIC state; finally the module defaults apply. Prints what was
+    chosen so a moving laptop can see which addresses are in play.
+    """
+    if getattr(args, "board_ip", None) and getattr(args, "server_ip", None):
+        return args.board_ip, args.server_ip
+    if getattr(args, "auto_net", False):
+        board_ip, server_ip = None, None
+        if ser is not None:
+            board_ip = _board_ipaddr(ser)
+        nic = _host_link_ip()
+        if nic is not None:
+            server_ip = nic[1]
+            print("==> host NIC %s has carrier, serverip candidate %s"
+                  % (nic[0], nic[1]))
+        board_ip = board_ip or BOARD_IP
+        server_ip = server_ip or SERVER_IP
+        if not _same_subnet(board_ip, server_ip):
+            print("WARNING: board ipaddr %s and server %s differ in subnet;"
+                  " check the cable/network or pass --board-ip/--server-ip"
+                  % (board_ip, server_ip))
+        print("==> auto-net: board ipaddr=%s serverip=%s" % (board_ip, server_ip))
+        return board_ip, server_ip
+    return BOARD_IP, SERVER_IP
+
+
+def _ensure_network(ser, board_ip=BOARD_IP, server_ip=SERVER_IP):
     """Idempotently configure U-Boot networking for TFTP.
 
     Board env vars are lost on power cycle, so every TFTP-dependent
     subcommand must (re)apply them before loading. All writes are volatile
     (no saveenv) — safe and repeatable.
+
+    `board_ip`/`server_ip` are resolved by `resolve_net()` from CLI flags,
+    auto-detection or the module defaults.
     """
-    send_cmd(ser, "setenv ipaddr %s" % BOARD_IP, wait=0.3)
-    send_cmd(ser, "setenv serverip %s" % SERVER_IP, wait=0.3)
+    send_cmd(ser, "setenv ipaddr %s" % board_ip, wait=0.3)
+    send_cmd(ser, "setenv serverip %s" % server_ip, wait=0.3)
     send_cmd(ser, "setenv tftpblocksize 1468", wait=0.3)
 
 
-def _run_tftp_load(ser, image, timeout):
+def _run_tftp_load(ser, image, timeout, board_ip=BOARD_IP, server_ip=SERVER_IP):
     """Stop autoboot, ensure networking, tftpboot <image>; return size or None."""
     _stop_autoboot(ser)
-    _ensure_network(ser)
+    _ensure_network(ser, board_ip, server_ip)
     ser.reset_input_buffer()
     ser.write(("tftpboot %s %s\r" % (KERNEL_ADDR, image)).encode())
     ser.flush()
@@ -223,7 +327,8 @@ def cmd_tftp_load(args):
     print("==> TFTP-loading '%s' to %s (timeout %ds, blocksize 1468)" % (args.image, KERNEL_ADDR, args.timeout))
     ser = open_serial(args.port, args.baud)
     try:
-        size = _run_tftp_load(ser, args.image, args.timeout)
+        board_ip, server_ip = resolve_net(args, ser)
+        size = _run_tftp_load(ser, args.image, args.timeout, board_ip, server_ip)
         if size is None:
             sys.stderr.write(TFTP_FAIL)
             return 1
@@ -241,7 +346,8 @@ def cmd_boot(args):
     ser = open_serial(args.port, args.baud)
     try:
         print("==> TFTP-loading '%s'" % args.image)
-        size = _run_tftp_load(ser, args.image, args.timeout)
+        board_ip, server_ip = resolve_net(args, ser)
+        size = _run_tftp_load(ser, args.image, args.timeout, board_ip, server_ip)
         if size is None:
             sys.stderr.write(TFTP_FAIL)
             return 1
@@ -390,6 +496,17 @@ def cmd_flash_off(args):
 
 
 # Argument parser
+def _add_net_args(p):
+    """Add the TFTP address-resolution flags to a subcommand parser."""
+    p.add_argument("--board-ip", default=None, metavar="IP",
+                   help="U-Boot ipaddr to set (default: %s; overrides auto)" % BOARD_IP)
+    p.add_argument("--server-ip", default=None, metavar="IP",
+                   help="TFTP serverip to set (default: %s; overrides auto)" % SERVER_IP)
+    p.add_argument("--auto-net", action="store_true",
+                   help="detect addresses: board ipaddr from U-Boot env, "
+                        "server from the host NIC with link carrier")
+
+
 def build_arg_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--port", default=DEFAULT_PORT, metavar="PORT",
@@ -431,6 +548,7 @@ def build_arg_parser():
                         % DEFAULT_IMAGE)
     p.add_argument("--timeout", type=float, default=300,
                    help="TFTP transfer timeout in seconds (default 300)")
+    _add_net_args(p)
     p.set_defaults(func=cmd_tftp_load)
 
     p = sub.add_parser("boot", parents=[common],
@@ -442,6 +560,7 @@ def build_arg_parser():
                    help="seconds to watch for the reboot (default 300)")
     p.add_argument("--log", default=None, metavar="PATH",
                    help="transcript log path (default: vf2-boot-<ts>.log in cwd)")
+    _add_net_args(p)
     p.set_defaults(func=cmd_boot)
 
     p = sub.add_parser("capture", parents=[common],

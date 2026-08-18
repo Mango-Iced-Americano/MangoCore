@@ -1818,3 +1818,23 @@
   分区，再离线重建损坏卷。任何整分区重写都必须有精确 LBA 边界和可验证回滚点。
 - **相关文件**：`scripts/write_2k1000_p3.py`、`scripts/write_2k1000_p4.py`、
   `docs/03_fs/2k1000-full-test-disk.md`
+
+## 开发容器/网络环境工具链坑（Docker + TFTP 上板）
+
+- **现象**：docker pull 长时间卡死无输出；NetworkManager 清掉手动 `ip addr add`
+  的静态 IP；容器内 rustc 可用但 make preflight 报缺 target/component。
+- **排查**：
+  - pull 卡死先用 `curl -s -o /dev/null -w "%{http_code} %{time_total}"` 逐个探测
+    registry-mirrors 的可达性（401 = 正常需 token，000 = 源挂了）。坏镜像源会让
+    daemon 卡住；移除后重试即可。`docker pull` 完全无输出时用 `ps` 确认进程存活，
+    再看 `/var/lib/containerd` 数据量是否增长区分"慢"与"卡死"。
+  - 静态 IP 丢失先查 `nmcli device status`：NetworkManager 会接管新插网卡并跑 DHCP，
+    覆盖手动配置。改走 `nmcli connection modify "<conn>" ipv4.method manual
+    ipv4.addresses <ip>/24 && nmcli connection up "<conn>"` 固化。
+  - 镜像内 rustup 组件记录与实际文件不同步（`rustup component list` 显示 installed
+    但 `lib/rustlib/<target>/lib` 目录缺失）时，`rustup toolchain uninstall` 后
+    `install --profile complete` + `target add` 重装，不要逐个 `component add`
+    （会被"up to date"短路）。
+- **教训**：环境问题的根因验证优先于盲目重试；容器/板子工具链以 make 的 preflight
+  文件级检查为准，不以 rustup 自身元数据为准。
+- **相关文件**：`scripts/vf2_cli.py`、`scripts/rustup-preflight.sh`、`docker-compose.yml`
