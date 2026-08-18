@@ -5,16 +5,61 @@ Consolidates the throwaway serial scripts used during board bring-up into
 one argparse subcommand tool. Board facts (overridable via flags):
 serial /dev/ttyUSB0 @ 115200 8N1; U-Boot prompt "StarFive #";
 TFTP ipaddr 192.168.200.10 / serverip 192.168.200.1; host TFTP root
-/srv/tftp/vf2 (files without "vf2/" prefix); kernel loaded at
-0x40200000 (kernel-rv-image, ~9.75 MiB); boot cmd
-`booti 0x40200000 - $fdtcontroladdr`. TFTP is slow (~2-4 min at 512B
-blocks), so we always `setenv tftpblocksize 1468` first.
+/srv/tftp (files without "vf2/" prefix); kernel loaded at
+0x40200000 (kernel-rv-image); boot cmd
+`booti 0x40200000 - $fdtcontroladdr`. TFTP is slow, so we always
+`setenv tftpblocksize 1468` first.
 
 After our kernel finishes its tests it AUTO-REBOOTS back to U-Boot via
 SBI SRST; the CLI treats "StarFive #" reappearing as success.
 
 Subcommands: probe, env, fdt, tftp-load, boot, capture, send, wait-uboot,
 reset, flash-off. Requires pyserial; stdlib only otherwise.
+
+== 上板使用流程 ==
+
+物理连接:
+  VF2 UART0 (GPIO) --USB-TTL--> /dev/ttyUSB0 (115200 8N1)
+  VF2 GbE 0 口     --网线直连--> 笔记本 USB 网卡 (无路由器, 隔离网络随意定网段)
+
+换环境一次性准备:
+  1) probe 确认板子存活:
+       python3 vf2_cli.py probe            # 期望: board ALIVE (PONG + U-Boot prompt)
+  2) 网卡固化静态 IP (手动 ip addr 会被 NetworkManager 清掉, 必须用 nmcli):
+       sudo nmcli connection modify "Wired connection 1" \
+            ipv4.method manual ipv4.addresses 192.168.200.1/24
+       sudo nmcli connection up "Wired connection 1"
+     换网段时用 --board-ip/--server-ip 显式指定, 或 --auto-net 自动探测
+  3) TFTP 服务 (systemd socket 激活, inactive 时手动启动):
+       sudo systemctl start tftpd.socket   # 配置 /etc/conf.d/tftpd: --secure /srv/tftp/
+       sudo ufw allow 69/udp               # 防火墙 INPUT policy 是 DROP, 必须放行
+  4) Docker 容器 + 工具链:
+       docker compose up -d
+       docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo \
+           os-dev bash -lc 'git config --global --add safe.directory "*" && make toolchain-setup'
+
+常规流程 (每次上板):
+  1) 构建 (容器内; regression 为空盘回归, 跑完自动重启):
+       docker compose exec -T -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo \
+           os-dev bash -lc 'make kernel ARCH=rv64 PROFILE=regression'
+  2) 复制镜像 (TFTP daemon root 是 /srv/tftp/):
+       sudo cp build/rv64/release/regression/kernel/Image /srv/tftp/kernel-rv-image
+       cp build/rv64/release/regression/kernel/Image /srv/tftp/vf2/kernel-rv-image  # 供 flash-off 自检
+  3) 部署 + 验证 (一条命令):
+       python3 scripts/vf2_cli.py boot kernel-rv-image --timeout 500 --log /tmp/vf2-boot.log
+
+判断成功:
+  boot summary 的 result 显示 "REBOOTED back to U-Boot after NN s",
+  日志含 [L4 REGRESSION RESULT: PASS] 即硬通过。
+  典型: 28 项中 27 passed / 0 failed / 1 skipped
+  (inet_test 因板子无外网 SKIP, 正常)。
+
+常见坑:
+  - "ARP Retry count exceeded": 服务器网卡 IP 丢了 -> nmcli 重配静态 IP
+  - TFTP 无响应: tftpd.socket 未运行或 ufw DROP -> start tftpd.socket + ufw allow 69/udp
+  - 容器 preflight 报缺 target/component: 镜像 rustup 记录与实际文件不同步 ->
+      rustup toolchain uninstall nightly-2026-05-10 && install --profile complete + target add
+  - "dubious ownership": 容器内执行 git config --global --add safe.directory "*"
 """
 
 import argparse
