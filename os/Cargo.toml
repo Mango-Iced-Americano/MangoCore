@@ -76,6 +76,9 @@ block_virt = []
 block_virt_pci = []
 comp = []
 heap_trace = []
+# 对照实验后端：把全局堆切回最原始的 free-list 线性扫描 buddy（无 bitmap / 无 metadata / 无 slab）。
+# 编译时内核其它部分与默认完全一致，仅 GlobalAlloc 变为 Heap<32>。
+legacy_buddy_heap = []
 perf_stats = []
 perf_diag = ["perf_stats"]
 ext4_lwext4_backend = ["dep:lwext4_rust"]

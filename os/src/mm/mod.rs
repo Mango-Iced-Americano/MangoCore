@@ -19,6 +19,14 @@ mod address_space;
 mod filemap;
 mod frame_allocator;
 mod frame_store;
+#[cfg(feature = "legacy_buddy_heap")]
+mod heap_allocator_legacy;
+// legacy_buddy_heap 对照实验：用最原始 free-list buddy 顶替 MetadataHeap+slab 后端。
+#[cfg(feature = "legacy_buddy_heap")]
+mod heap_allocator {
+    pub use super::heap_allocator_legacy::*;
+}
+#[cfg(not(feature = "legacy_buddy_heap"))]
 mod heap_allocator;
 #[cfg(feature = "heap_trace")]
 pub mod heap_trace;
