@@ -34,6 +34,8 @@ fn apply(data: &[u8], cfg: &mut RuntimeConfig) {
             b"diag" => cfg.diag = matches!(value, b"1" | b"true"), b"timer_smoke" => cfg.timer_smoke = matches!(value, b"1" | b"true"),
             b"skip_apk" => cfg.skip_apk = matches!(value, b"1" | b"true"),
             b"drift_pre_mask" => if let Some(mask) = parse_mask(value) { cfg.drift_pre_mask = mask; },
+            b"drift_windows" => if let Ok(n) = core::str::from_utf8(value).unwrap_or("").parse() { cfg.drift_windows = n; },
+            b"drift_measure" => if let Ok(s) = core::str::from_utf8(value) { cfg.drift_measure = String::from(s); },
             _ => if let Some(name) = key.strip_prefix(b"timeout_") { if let (Ok(name), Ok(seconds)) = (core::str::from_utf8(name), core::str::from_utf8(value).unwrap_or("").parse()) { if let Some(index) = crate::runner::groups::catalog::TEST_GROUPS.iter().position(|(group, _)| *group == name) { cfg.timeouts[index] = seconds; } } },
         }
     }
