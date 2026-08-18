@@ -22,6 +22,7 @@ tags: [docs, index, overview]
 | [Technical-Report-MangoCore.md](00_overview/Technical-Report-MangoCore.md) | **技术报告** — 项目完整技术综述：架构设计、模块实现、工程实践与竞赛历程 |
 | [Engineering-Casebook.md](00_overview/Engineering-Casebook.md) | **工程案例手册** — 以 Q&A 形式记录各模块的设计权衡、调试过程与 Regression 案例分析 |
 | [AI-Usage-Report.md](00_overview/AI-Usage-Report.md) | **AI 工具使用情况报告** — 工具清单、使用场景、证据与合规声明 |
+| [toolchain-and-build-guide.md](00_overview/toolchain-and-build-guide.md) | **工具链与工程入口手册** — Docker、Rustup、Cargo、Make、QEMU、测试镜像、日志与故障排查 |
 
 ## 目录结构
 
