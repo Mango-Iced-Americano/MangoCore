@@ -19,8 +19,18 @@ services:
     volumes:
       - .:/app
       - /etc/localtime:/etc/localtime:ro
+      - os_dev_rustup:/root/.rustup
+      - os_dev_cargo:/root/.cargo
     environment:
       - MODE=release
+      - HTTP_PROXY=${MANGO_DOCKER_HTTP_PROXY:-}
+      - HTTPS_PROXY=${MANGO_DOCKER_HTTPS_PROXY:-}
+      - ALL_PROXY=${MANGO_DOCKER_ALL_PROXY:-}
+      - NO_PROXY=${MANGO_DOCKER_NO_PROXY:-}
+      - http_proxy=${MANGO_DOCKER_HTTP_PROXY:-}
+      - https_proxy=${MANGO_DOCKER_HTTPS_PROXY:-}
+      - all_proxy=${MANGO_DOCKER_ALL_PROXY:-}
+      - no_proxy=${MANGO_DOCKER_NO_PROXY:-}
     tty: true
     stdin_open: true
     working_dir: /app
@@ -34,3 +44,7 @@ services:
     #   device_write_bps:
     #     - path: /dev/sdb
     #       rate: "40m"
+
+volumes:
+  os_dev_rustup:
+  os_dev_cargo:

@@ -121,6 +121,12 @@ require 'no U-Boot command will be sent automatically' scripts/boot_2k1000_tftp.
 require 'console.monitor_existing_boot()' scripts/boot_2k1000_tftp.py
 require '"--ssd-backup-id"' scripts/boot_2k1000_tftp.py
 require '"--confirm-ssd-p3-start"' scripts/boot_2k1000_tftp.py
+require '"--ftp-upload"' scripts/boot_2k1000_tftp.py
+require '"--ftp-destination"' scripts/boot_2k1000_tftp.py
+require '"--upload-only"' scripts/boot_2k1000_tftp.py
+require 'http_upload_to_ssd' scripts/boot_2k1000_tftp.py
+require 'busybox wget' scripts/boot_2k1000_tftp.py
+require 'sha256sum' scripts/boot_2k1000_tftp.py
 require '"--verify-kernel"' scripts/write_2k1000_p3.py
 require 'P3 manifest kernel SHA-256 does not match --verify-kernel' scripts/write_2k1000_p3.py
 require 'P3 must be mounted read-only at /tools, /sdcard, or /' scripts/board/backup_2k1000_p3.sh

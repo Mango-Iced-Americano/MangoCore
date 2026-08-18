@@ -100,6 +100,8 @@ python3 scripts/make_2k1000_tools_partition.py \
 
 该 P3 是完整根文件系统：`/sbin/init` 指向静态 BusyBox，`/etc/inittab` 调用
 `/etc/init.d/rcS`，并包含 `/dev`、`/proc`、`/sys`、`/run`、`/tmp`、`/var` 等运行目录。
+工具根的 BusyBox applet 清单包含 `wget` 和校验工具，供一键上板脚本通过临时 HTTP
+服务向 `/persist` 导入文件；这不改变 P3/P4 的分区边界或默认启动路径。
 `/boot/kernel-A.ui` 和 `/boot/kernel-A.sha256` 与根文件系统处于同一可回滚镜像中。
 P3 与 P4 一样显式使用 `^has_journal`：当前 another_ext4 不执行 journal replay，宿主默认
 开启 journal 的镜像虽然可能首轮启动成功，但硬复位后会停在 ext4 后端初始化阶段。

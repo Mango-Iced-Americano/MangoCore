@@ -3,4 +3,10 @@
 # not run from rcS: an offline boot must still reach the P3 rescue shell.
 set -eu
 
+offline=/tools/apk/packages/loongarch64
+if [ -d "$offline" ] && [ "$(/bin/busybox ls "$offline"/*.apk 2>/dev/null | /usr/bin/wc -l)" -gt 0 ]; then
+    # Board networking is optional: use packages baked into P3 when present.
+    exec /usr/bin/apk add "$offline"/*.apk "$@"
+fi
+
 exec /usr/bin/apk add busybox musl ca-certificates "$@"

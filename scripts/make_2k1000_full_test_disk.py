@@ -140,6 +140,7 @@ def build_tools_payload(
     size_mib: int,
     temporary_dir: Path,
     kernel_image: Optional[Path] = None,
+    apk_package_dir: Optional[Path] = None,
 ) -> Path:
     staging = temporary_dir / "tools-root"
     shutil.copytree(tools_root, staging, symlinks=True)
@@ -197,6 +198,17 @@ def build_tools_payload(
     bash = staging / "bin" / "bash"
     if not busybox.is_file() or not bash.is_file():
         fail("tools root must contain bin/busybox and bin/bash")
+
+    if apk_package_dir is not None:
+        if not apk_package_dir.is_dir():
+            fail(f"APK package directory not found: {apk_package_dir}")
+        package_destination = staging / "apk" / "packages" / "loongarch64"
+        package_destination.mkdir(parents=True, exist_ok=True)
+        packages = sorted(apk_package_dir.glob("*.apk"))
+        if not packages:
+            fail(f"no APK packages found in {apk_package_dir}")
+        for package in packages:
+            shutil.copy2(package, package_destination / package.name)
     init_script = staging / "etc" / "init.d" / "rcS"
     inittab = staging / "etc" / "inittab"
     if not init_script.is_file() or not inittab.is_file():

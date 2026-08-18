@@ -33,6 +33,11 @@ def main() -> None:
     parser.add_argument("--tools-root", required=True, type=Path)
     parser.add_argument("--user-bin-dir", required=True, type=Path)
     parser.add_argument("--kernel-image", type=Path)
+    parser.add_argument(
+        "--apk-package-dir",
+        type=Path,
+        help="optional host directory of LoongArch APKs to preseed under /apk",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -56,6 +61,7 @@ def main() -> None:
             BOARD_P3_MIB,
             Path(tmp_name),
             args.kernel_image,
+            args.apk_package_dir,
         )
         shutil.copyfile(payload, args.output)
 

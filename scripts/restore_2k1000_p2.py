@@ -156,7 +156,7 @@ def main() -> None:
         raise BootError("pyserial is required") from error
 
     ensure_interface(args.interface, args.host_ip, args.netmask, args.configure_host)
-    ensure_tftp_service(args.configure_host)
+    ensure_tftp_service(args.configure_host, args.tftp_root)
     metadata_chunk = prepare_tftp_image(args.metadata_chunk, args.tftp_root)
     zero_chunk = prepare_tftp_image(args.zero_chunk, args.tftp_root)
     if metadata_chunk.stat().st_size != CHUNK_BYTES:

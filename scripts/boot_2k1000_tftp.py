@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click macOS network/TFTP/serial setup and 2K1000LA U-Boot boot."""
+"""One-click macOS network/TFTP/FTP/serial setup and 2K1000LA U-Boot boot."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import glob
 import hashlib
 import ipaddress
 import os
+import posixpath
 from pathlib import Path
 import re
 import select
@@ -20,6 +21,7 @@ import termios
 import time
 import tty
 from typing import Optional
+from urllib.parse import quote
 import zlib
 
 
@@ -27,8 +29,14 @@ DEFAULT_TFTP_ROOT = Path("/private/tftpboot")
 TFTP_PLIST = Path("/System/Library/LaunchDaemons/tftp.plist")
 TFTP_SERVICE = "system/com.apple.tftpd"
 MONITOR_ESCAPE = 0x1D  # Ctrl-]
+# 2K1000LA's shell RX path drops bursts while GMAC polling is active.  Keep
+# automated shell commands at interactive typing speed, matching the board
+# backup workflow; U-Boot commands remain burst-safe and are not affected.
+BOARD_SHELL_INPUT_DELAY = 0.20
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_LOCK_PATH = Path("/private/tmp/mango-2k1000-build.lock")
+DEFAULT_FTP_PORT = 2121
+DEFAULT_FTP_TIMEOUT = 600
 SSD_P3_START_LBA = 0xA80800
 SSD_TOOLS_ROOT = REPO_ROOT / "user" / "tools" / "loongarch64"
 SSD_USER_BIN_DIR = (
@@ -38,7 +46,14 @@ SSD_DISK_IMAGE = DEFAULT_TFTP_ROOT / "mango-2k1000la-full-test-mbr.img"
 UIMAGE_HEADER_SIZE = 64
 UIMAGE_MAGIC = 0x27051956
 SAFE_TFTP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-U_BOOT_PROMPT = re.compile(rb"(?:^|\r?\n)=>[ \t]*(?:\r?\n|\r)?$")
+# U-Boot may echo interrupt bytes immediately after the prompt (``=> ccc``)
+# while the autoboot interrupter is still running.  Treat that bounded echo as
+# a prompt too; acquire_prompt clears the raced input before issuing commands.
+U_BOOT_PROMPT = re.compile(rb"(?:^|\r?\n)=>[ \t]*(?:c*)?(?:\r?\n|\r|$)")
+SHELL_PROMPT = re.compile(
+    rb"(?:^|\r?\n)[^\r\n]{0,256}/[^\r\n]*[#$][ \t]*(?:\r?\n|$)"
+)
+ANSI_ESCAPE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 AUTOBOOT_MARKERS = (
     b"U-Boot",
     b"Autoboot",
@@ -133,6 +148,26 @@ def validate_cli_inputs(args: argparse.Namespace) -> None:
         raise BootError("reset and TFTP timeouts must be positive")
     if args.baud <= 0:
         raise BootError("baud must be positive")
+    if not 1 <= args.ftp_port <= 65535:
+        raise BootError("FTP port must be between 1 and 65535")
+    if args.ftp_timeout <= 0:
+        raise BootError("FTP timeout must be positive")
+    if args.ftp_destination is not None and args.ftp_upload is None:
+        raise BootError("--ftp-destination requires --ftp-upload")
+    if args.ftp_board_ip is not None and args.ftp_upload is None:
+        raise BootError("--ftp-board-ip requires --ftp-upload")
+    if args.ftp_upload is not None:
+        source = args.ftp_upload.expanduser().resolve()
+        if not source.is_file():
+            raise BootError(f"FTP source file not found: {source}")
+        args.ftp_upload = source
+        args.ftp_destination = validate_ftp_destination(
+            args.ftp_destination, source.name
+        )
+        if args.ftp_board_ip is not None:
+            args.ftp_board_ip = normalize_ipv4(args.ftp_board_ip, "ftp_board_ip")
+            if args.ftp_board_ip == args.host_ip:
+                raise BootError("ftp_board_ip and host_ip must be different")
 
 
 def validate_tftp_root(tftp_root: Path) -> Path:
@@ -150,6 +185,48 @@ def validate_tftp_filename(name: str) -> None:
     if SAFE_TFTP_NAME.fullmatch(name) is None:
         raise BootError(
             f"unsafe TFTP filename {name!r}; use only ASCII letters, digits, '.', '_' and '-'")
+
+
+def validate_ftp_destination(value: Optional[str], source_name: str) -> str:
+    destination = value or f"/persist/{source_name}"
+    if not destination.startswith("/persist/"):
+        raise BootError(
+            "--ftp-destination must be an absolute path below /persist (the writable SSD P4)"
+        )
+    if any(character in destination for character in "\0\r\n"):
+        raise BootError("--ftp-destination contains a NUL or line break")
+    try:
+        destination.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise BootError("--ftp-destination must contain ASCII characters") from error
+    normalized = posixpath.normpath(destination)
+    if (
+        normalized != destination
+        or normalized == "/persist"
+        or not normalized.startswith("/persist/")
+        or any(part in {"", ".", ".."} for part in normalized.split("/")[1:])
+    ):
+        raise BootError(
+            "--ftp-destination must name one file below /persist without '.', '..' or duplicate separators"
+        )
+    return normalized
+
+
+def http_server_command(directory: Path, host: str, port: int) -> list[str]:
+    """Serve one host directory for the board-side BusyBox wget pull."""
+    ruby = Path("/usr/bin/ruby")
+    if sys.platform == "darwin" and ruby.is_file():
+        return [str(ruby), "-run", "-e", "httpd", str(directory), "-p", str(port), "-b", host]
+    return [
+        sys.executable,
+        "-m",
+        "http.server",
+        str(port),
+        "--bind",
+        host,
+        "--directory",
+        str(directory),
+    ]
 
 
 def validate_uimage(path: Path) -> None:
@@ -182,7 +259,9 @@ def validate_uimage(path: Path) -> None:
 
 
 def prompt_seen(data: bytes) -> bool:
-    return U_BOOT_PROMPT.search(data) is not None
+    # The board clears the console with an ANSI sequence immediately before
+    # printing the prompt; strip it so ``\x1b[2J=> c`` is recognized too.
+    return U_BOOT_PROMPT.search(ANSI_ESCAPE.sub(b"", data)) is not None
 
 
 def autoboot_seen(data: bytes) -> bool:
@@ -807,6 +886,10 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
         if args.monitor_only
         else "ssd-install"
         if args.install_ssd_kernel
+        else "upload-only"
+        if args.upload_only
+        else "ftp-upload"
+        if args.ftp_upload is not None
         else "prepare"
         if args.prepare_only
         else "transfer"
@@ -818,6 +901,8 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
         [
             ("boot", "传输并启动"),
             ("monitor", "仅打开串口（SSD 自动启动，可交互）"),
+            ("ftp-upload", "启动后通过 FTP 写入 SSD"),
+            ("upload-only", "连接已运行系统并直接上传文件"),
             ("transfer", "只传输并校验"),
             ("prepare", "只准备主机"),
             ("ssd-install", "备份门禁后写入 SSD A 槽"),
@@ -828,6 +913,15 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
     args.prepare_only = mode == "prepare"
     args.no_boot = mode == "transfer"
     args.install_ssd_kernel = mode == "ssd-install"
+    args.upload_only = mode == "upload-only"
+    if mode not in {"ftp-upload", "upload-only"} and any(
+        (
+            args.ftp_upload is not None,
+            args.ftp_destination is not None,
+            args.ftp_board_ip is not None,
+        )
+    ):
+        raise BootError("FTP options require the interactive ftp-upload mode")
 
     if args.monitor_only:
         args.build_profile = None
@@ -840,6 +934,39 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
         print("  编译/网络/TFTP：跳过")
         print(f"  串口：{args.serial}")
         print("  模式：monitor（不自动发命令，手工输入正常转发）")
+        if not prompt_yes_no("确认执行", True):
+            raise BootError("用户取消操作")
+        return args
+
+    if mode == "upload-only":
+        args.build_profile = None
+        args.image = None
+        available = interface_candidates()
+        if available:
+            print(f"可用网卡：{', '.join(available)}")
+        args.interface = prompt_text("宿主机网卡", args.interface)
+        args.host_ip = prompt_text("宿主机 IP", args.host_ip)
+        args.board_ip = prompt_text("开发板附加 IP", args.board_ip)
+        args.netmask = prompt_text("子网掩码", args.netmask)
+        args.configure_host = prompt_yes_no(
+            "自动配置宿主机网卡（HTTP 上传需要）", args.configure_host
+        )
+        args.serial = prompt_serial(args.serial)
+        if args.ftp_upload is None:
+            args.ftp_upload = Path(prompt_text("要传输的本地文件")).expanduser()
+        args.ftp_destination = prompt_text(
+            "SSD 目标路径（必须位于 /persist）",
+            args.ftp_destination or f"/persist/{args.ftp_upload.name}",
+        )
+        args.takeover_screen = prompt_yes_no(
+            "若串口被 screen 占用，自动接管", args.takeover_screen
+        )
+        print("\n配置摘要：")
+        print("  编译：跳过")
+        print("  TFTP/复位/启动：跳过")
+        print(f"  文件：{args.ftp_upload} -> {args.ftp_destination}")
+        print(f"  串口：{args.serial}")
+        print("  模式：upload-only（板子必须已经在 P3 shell）")
         if not prompt_yes_no("确认执行", True):
             raise BootError("用户取消操作")
         return args
@@ -882,6 +1009,13 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
         args.confirm_ssd_p3_start = prompt_text(
             f"输入固定 P3 起始 LBA {SSD_P3_START_LBA:#x} 以确认覆盖"
         )
+    if mode == "ftp-upload":
+        if args.ftp_upload is None:
+            args.ftp_upload = Path(prompt_text("要传输的本地文件")).expanduser()
+        args.ftp_destination = prompt_text(
+            "SSD 目标路径（必须位于 /persist）",
+            args.ftp_destination or f"/persist/{args.ftp_upload.name}",
+        )
     if not args.prepare_only:
         args.takeover_screen = prompt_yes_no(
             "若串口被 screen 占用，自动接管", args.takeover_screen
@@ -898,6 +1032,8 @@ def interactive_config(args: argparse.Namespace) -> argparse.Namespace:
     print(f"  开发板：{args.board_ip}")
     print(f"  串口：{args.serial}")
     print(f"  模式：{mode}")
+    if mode == "ftp-upload":
+        print(f"  FTP 文件：{args.ftp_upload} -> {args.ftp_destination}")
     if not prompt_yes_no("确认执行", True):
         raise BootError("用户取消操作")
     return args
@@ -955,16 +1091,16 @@ class UBootConsole:
         self.log.close()
 
     def _write_console_input(self, data: bytes) -> None:
-        # Interactive typing usually arrives one byte at a time, while paste
-        # and automated validation can arrive as a large burst. The 2K1000
-        # kernel TTY can still drop bytes from four-byte bursts while network
-        # polling is active, so reproduce real typing at a bounded rate.
+        # Interactive typing usually arrives one byte at a time.  The 2K1000
+        # kernel TTY can drop bytes even from short bursts while GMAC polling
+        # is active, so automated commands must reproduce the board's reliable
+        # interactive rate instead of using a host-terminal paste rate.
         chunk_size = 1
         for offset in range(0, len(data), chunk_size):
             self.serial.write(data[offset : offset + chunk_size])
             self.serial.flush()
             if offset + chunk_size < len(data):
-                time.sleep(0.004)
+                time.sleep(BOARD_SHELL_INPUT_DELAY)
 
     def _handle_console_input(
         self, data: bytes, escape_pending: bool
@@ -1021,6 +1157,23 @@ class UBootConsole:
         self.last_read = bytes(output)
         tail = output[-1000:].decode("utf-8", errors="replace")
         raise BootError(f"timeout waiting for U-Boot prompt; tail:\n{tail}")
+
+    def _read_shell_prompt(self, timeout: float) -> str:
+        deadline = time.monotonic() + timeout
+        output = bytearray()
+        while time.monotonic() < deadline:
+            data = self.serial.read(self.serial.in_waiting or 1)
+            if not data:
+                continue
+            output.extend(data)
+            self._record(data)
+            prompt_input = ANSI_ESCAPE.sub(b"", bytes(output))
+            if SHELL_PROMPT.search(prompt_input):
+                self.last_read = bytes(output)
+                return output.decode("utf-8", errors="replace")
+        self.last_read = bytes(output)
+        tail = output[-2000:].decode("utf-8", errors="replace")
+        raise BootError(f"timeout waiting for MangoCore shell prompt; tail:\n{tail}")
 
     def acquire_prompt(self, timeout: float) -> None:
         self.serial.reset_input_buffer()
@@ -1084,6 +1237,29 @@ class UBootConsole:
             raise BootError(f"U-Boot does not support command: {command}")
         return output
 
+    def shell_command(self, command: str, timeout: float = 30) -> str:
+        marker = f"__MANGO_BOARD_RC_{os.getpid()}__"
+        wrapped = f'{command}; rc=$?; printf "\\n{marker}%s\\n" "$rc"'
+        encoded = wrapped.encode("ascii")
+        if len(encoded) > 2048:
+            raise BootError("board shell command exceeds the 2048-byte UART safety limit")
+        self.log.write(f"\n>>> board {command}\n".encode("ascii"))
+        self._write_console_input(encoded + b"\r")
+        output = self._read_shell_prompt(timeout)
+        match = re.search(re.escape(marker) + r"(-?\d+)", output)
+        if match is None:
+            raise BootError(
+                f"board shell completion marker missing for {command!r}; "
+                f"output:\n{output[-2000:]}"
+            )
+        return_code = int(match.group(1))
+        if return_code != 0:
+            raise BootError(
+                f"board shell command failed with rc={return_code}: {command}; "
+                f"output:\n{output[-2000:]}"
+            )
+        return output
+
     def boot_and_stream(self, loadaddr: str) -> None:
         command = f"bootm {loadaddr}"
         self.log.write(f"\n>>> {command}\n".encode("ascii"))
@@ -1095,6 +1271,32 @@ class UBootConsole:
             flush=True,
         )
 
+        self._stream_console()
+
+    def boot_and_wait_for_shell(self, loadaddr: str, timeout: float) -> None:
+        command = f"bootm {loadaddr}"
+        self.log.write(f"\n>>> {command}\n".encode("ascii"))
+        self.serial.write(command.encode("ascii") + b"\r")
+        self.serial.flush()
+        print("[console] booting; waiting for the MangoCore shell prompt", flush=True)
+        # PID1 exposes the rescue console behind an "Enter to activate"
+        # prompt.  Non-interactive FTP mode must activate it explicitly before
+        # waiting for the shell prompt, otherwise the upload path stalls even
+        # though the kernel has booted successfully.
+        time.sleep(0.5)
+        self.serial.write(b"\r")
+        self.serial.flush()
+        self._read_shell_prompt(timeout)
+        print("[console] MangoCore shell ready", flush=True)
+
+    def acquire_shell_prompt(self, timeout: float) -> None:
+        """Attach to an already-running shell without resetting or booting."""
+        self.serial.reset_input_buffer()
+        self._write_console_input(b"\r")
+        self._read_shell_prompt(timeout)
+        print("[console] existing MangoCore shell ready", flush=True)
+
+    def stream_console(self) -> None:
         self._stream_console()
 
     def monitor_existing_boot(self) -> None:
@@ -1162,6 +1364,99 @@ def require(pattern: str, output: str, message: str) -> re.Match[str]:
     return match
 
 
+def detect_ftp_board_ip(args: argparse.Namespace, console: UBootConsole) -> str:
+    if args.ftp_board_ip is not None:
+        return args.ftp_board_ip
+    output = console.shell_command("/bin/busybox ifconfig eth0", timeout=30)
+    candidates = re.findall(
+        r"\binet(?: addr:)?\s*([0-9]+(?:\.[0-9]+){3})", output, re.IGNORECASE
+    )
+    for candidate in candidates:
+        try:
+            return normalize_ipv4(candidate, "detected ftp_board_ip")
+        except BootError:
+            continue
+    raise BootError(
+        "could not detect a usable eth0 IPv4 address after boot; "
+        "pass --ftp-board-ip explicitly"
+    )
+
+
+def http_upload_to_ssd(args: argparse.Namespace, console: UBootConsole) -> None:
+    """Push a host file to P4 by serving it and pulling with board-side wget."""
+    source = args.ftp_upload
+    destination = args.ftp_destination
+    if source is None or destination is None:
+        raise BootError("HTTP upload configuration is incomplete")
+
+    board_ip = detect_ftp_board_ip(args, console)
+    source_size = source.stat().st_size
+    source_sha256 = sha256(source)
+    parent = posixpath.dirname(destination)
+    temporary = f"{destination}.mango-upload-{os.getpid()}"
+    host_url = f"http://{args.host_ip}:{args.ftp_port}/{quote(source.name)}"
+
+    prefix = ipaddress.IPv4Network(f"0.0.0.0/{args.netmask}").prefixlen
+    # Linux DHCP currently lands on 192.168.2.0/24 while the board-only host
+    # link is 192.168.9.0/24.  Add the U-Boot-side address before wget so the
+    # board can reach the temporary HTTP server without manual UART input.
+    console.shell_command(
+        f"/bin/busybox ip addr add {args.board_ip}/{prefix} dev eth0 "
+        "2>/dev/null || true",
+        timeout=90,
+    )
+    # /persist is already the mounted P4 root.  On the board, repeating
+    # `mkdir -p` on that mountpoint can enter the MountFS/ext4 create path and
+    # wait indefinitely even though the directory exists.  Only create a
+    # nested parent when the destination actually needs one.
+    if parent != "/persist":
+        console.shell_command(
+            f"/bin/busybox mkdir -p {shlex.quote(parent)}", timeout=90
+        )
+    server = subprocess.Popen(
+        http_server_command(source.parent, args.host_ip, args.ftp_port),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.3)
+    if server.poll() is not None:
+        raise BootError("host HTTP server failed to start")
+    print(
+        f"[http] board {board_ip} downloading {host_url} -> {destination} "
+        f"({source_size} bytes, sha256={source_sha256})",
+        flush=True,
+    )
+    try:
+        download = (
+            f"/bin/busybox wget -O {shlex.quote(temporary)} "
+            f"{shlex.quote(host_url)}"
+        )
+        console.shell_command(download, timeout=max(120, args.ftp_timeout))
+        verify_and_commit = (
+            f"test -f {shlex.quote(temporary)} && "
+            f"actual_size=$(/bin/busybox wc -c < {shlex.quote(temporary)}) && "
+            f"test \"$actual_size\" -eq {source_size} && "
+            f"actual_sha=$(/bin/busybox sha256sum {shlex.quote(temporary)} "
+            f"| /bin/busybox awk '{{print $1}}') && "
+            f"test \"$actual_sha\" = {shlex.quote(source_sha256)} && "
+            f"/bin/busybox mv -f {shlex.quote(temporary)} {shlex.quote(destination)} && "
+            "/bin/busybox sync"
+        )
+        console.shell_command(verify_and_commit, timeout=max(60, args.ftp_timeout))
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=2)
+    print(
+        f"[http] PASS: {destination} committed after size/SHA-256 verification "
+        f"({source_size} bytes, sha256={source_sha256})",
+        flush=True,
+    )
+
+
 def boot(args, serial_module, tftp_image: Path, serial_path: str) -> None:
     release_matching_screen(serial_path, args.takeover_screen)
     console = UBootConsole(serial_module, serial_path, args.log, args.baud)
@@ -1206,10 +1501,29 @@ def boot(args, serial_module, tftp_image: Path, serial_path: str) -> None:
         require(r"Checksum\s+\.\.\.\s+OK", image_info, "uImage checksum failed")
         print("[uboot] iminfo verified: LoongArch, checksum OK")
 
+        if args.ftp_upload:
+            console.boot_and_wait_for_shell(args.loadaddr, args.reset_timeout)
+            http_upload_to_ssd(args, console)
+            console.stream_console()
+            return
         if args.no_boot:
             print("[uboot] --no-boot selected; leaving board at the U-Boot prompt")
             return
         console.boot_and_stream(args.loadaddr)
+    except KeyboardInterrupt:
+        print("\n[console] monitor closed; board continues running")
+    finally:
+        console.close()
+
+
+def upload_existing_shell(args, serial_module, serial_path: str) -> None:
+    """Upload to a running board shell without rebuilding, TFTP, or rebooting."""
+    release_matching_screen(serial_path, args.takeover_screen)
+    console = UBootConsole(serial_module, serial_path, args.log, args.baud)
+    try:
+        console.acquire_shell_prompt(args.reset_timeout)
+        http_upload_to_ssd(args, console)
+        console.stream_console()
     except KeyboardInterrupt:
         print("\n[console] monitor closed; board continues running")
     finally:
@@ -1230,8 +1544,8 @@ def monitor_ssd_boot(args, serial_module, serial_path: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "One-command macOS network setup, TFTP image transfer, serial "
-            "detection, and Loongson 2K1000LA U-Boot boot"
+            "One-command macOS network setup, TFTP image transfer, optional "
+            "FTP-to-SSD upload, serial detection, and Loongson 2K1000LA U-Boot boot"
         )
     )
     parser.add_argument("--interface", default="en8")
@@ -1255,6 +1569,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tftp-root", type=Path, default=DEFAULT_TFTP_ROOT)
     parser.add_argument("--host-ip", default="192.168.9.10")
     parser.add_argument("--board-ip", default="192.168.9.20")
+    parser.add_argument(
+        "--ftp-upload",
+        type=Path,
+        metavar="FILE",
+        help="after boot, upload FILE to the board's writable SSD /persist tree",
+    )
+    parser.add_argument(
+        "--upload-only",
+        "--ftp-upload-only",
+        action="store_true",
+        help=(
+            "upload FILE to an already-running P3 shell; skip build, TFTP, and reset "
+            "(requires --ftp-upload)"
+        ),
+    )
+    parser.add_argument(
+        "--ftp-destination",
+        "--ftp-dest",
+        metavar="PATH",
+        help="SSD destination for --ftp-upload (default: /persist/<filename>)",
+    )
+    parser.add_argument(
+        "--ftp-board-ip",
+        help="board IPv4 used by FTP after boot (default: detect eth0 from the shell)",
+    )
+    parser.add_argument(
+        "--ftp-port",
+        type=int,
+        default=DEFAULT_FTP_PORT,
+        help=f"temporary board FTP port (default: {DEFAULT_FTP_PORT})",
+    )
+    parser.add_argument(
+        "--ftp-timeout",
+        type=float,
+        default=DEFAULT_FTP_TIMEOUT,
+        help=f"host FTP upload timeout in seconds (default: {DEFAULT_FTP_TIMEOUT})",
+    )
     parser.add_argument("--netmask", default="255.255.255.0")
     parser.add_argument("--loadaddr", default="0x9000000098000000")
     parser.add_argument("--baud", type=int, default=115200)
@@ -1341,7 +1692,12 @@ def main() -> None:
                 "pass --non-interactive with --image"
             )
         args = interactive_config(args)
-    elif not args.monitor_only and args.image is None and args.build_profile is None:
+    elif (
+        not args.monitor_only
+        and not args.upload_only
+        and args.image is None
+        and args.build_profile is None
+    ):
         raise BootError("--image or --build-profile is required with --non-interactive")
 
     if args.monitor_only:
@@ -1352,6 +1708,9 @@ def main() -> None:
                 args.prepare_only,
                 args.no_boot,
                 args.install_ssd_kernel,
+                args.ftp_upload is not None,
+                args.ftp_destination is not None,
+                args.ftp_board_ip is not None,
             )
         ):
             raise BootError(
@@ -1370,8 +1729,31 @@ def main() -> None:
         monitor_ssd_boot(args, serial, serial_path)
         return
 
+    if args.upload_only and any(
+        (
+            args.image is not None,
+            args.build_profile is not None,
+            args.prepare_only,
+            args.no_boot,
+            args.install_ssd_kernel,
+        )
+    ):
+        raise BootError(
+            "--upload-only cannot be combined with image/build/prepare/transfer/install options"
+        )
+
     validate_cli_inputs(args)
-    args.tftp_root = validate_tftp_root(args.tftp_root)
+    if not args.upload_only:
+        args.tftp_root = validate_tftp_root(args.tftp_root)
+    if args.upload_only and args.ftp_upload is None:
+        raise BootError("--upload-only requires --ftp-upload FILE")
+    if args.ftp_upload is not None and (
+        args.prepare_only or args.no_boot or args.install_ssd_kernel
+    ):
+        raise BootError(
+            "--ftp-upload requires a booting shell; it cannot be combined with "
+            "--prepare-only, --no-boot, or --install-ssd-kernel"
+        )
     if args.install_ssd_kernel:
         if args.prepare_only or args.no_boot:
             raise BootError(
@@ -1380,6 +1762,19 @@ def main() -> None:
         validate_ssd_install_gate(args)
     if args.build_profile:
         args.image = build_image(args.build_profile, args.build_mode)
+
+    if args.upload_only:
+        ensure_interface(args.interface, args.host_ip, args.netmask, args.configure_host)
+        serial_path = detect_serial(args.serial)
+        print(f"[host] serial device: {serial_path}")
+        try:
+            import serial
+        except ImportError as error:
+            raise BootError(
+                "pyserial is required: python3 -m pip install --user pyserial"
+            ) from error
+        upload_existing_shell(args, serial, serial_path)
+        return
 
     if args.install_ssd_kernel:
         install_ssd_kernel(args)
